@@ -14,6 +14,7 @@ from xianyu_agent.domain import (
     orders as domain_orders,
 )
 from xianyu_agent.services.account_pool import AccountPool
+from xianyu_agent.utils.time_utils import to_local
 
 
 class AccountsPanel(DataTable):
@@ -57,7 +58,7 @@ class MessagesPanel(DataTable):
         for acc in accounts:
             rows = await domain_messages.list_recent(account_id=acc, limit=8)
             for m in rows:
-                ts = m.received_at.astimezone().strftime("%H:%M:%S") if m.received_at else "-"
+                ts = to_local(m.received_at).strftime("%H:%M:%S") if m.received_at else "-"
                 self.add_row(
                     ts,
                     acc,

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.domain import orders as domain_orders
+from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="订单查询。")
 console = Console()
@@ -42,8 +43,8 @@ def list_orders(
                 (r.item_title or "-")[:30],
                 str(r.amount),
                 r.status,
-                r.paid_at.isoformat(timespec="seconds") if r.paid_at else "-",
-                r.delivered_at.isoformat(timespec="seconds") if r.delivered_at else "-",
+                format_local(r.paid_at) or "-",
+                format_local(r.delivered_at) or "-",
             )
         console.print(table)
 
@@ -66,12 +67,8 @@ def show_order(order_id: int = typer.Argument(...)) -> None:
         console.print(f"buyer:      {r.buyer_name or '-'} ({r.buyer_id or '-'})")
         console.print(f"amount:     {r.amount}")
         console.print(f"status:     {r.status}")
-        console.print(
-            f"paid_at:    {r.paid_at.isoformat(timespec='seconds') if r.paid_at else '-'}"
-        )
-        console.print(
-            f"delivered:  {r.delivered_at.isoformat(timespec='seconds') if r.delivered_at else '-'}"
-        )
+        console.print(f"paid_at:    {format_local(r.paid_at) or '-'}")
+        console.print(f"delivered:  {format_local(r.delivered_at) or '-'}")
         console.print(f"发货内容:   [cyan]{r.delivery_content or '(未发货)'}[/cyan]")
         console.print(f"失败原因:   {r.delivery_fail_reason or '-'}")
 

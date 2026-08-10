@@ -13,6 +13,7 @@ from rich.table import Table
 from xianyu_agent.domain import messages as domain_messages
 from xianyu_agent.protocol.events import MessageContentType, MessageSent
 from xianyu_agent.services.account_worker import AccountWorker
+from xianyu_agent.utils.time_utils import format_local, to_local
 
 app = typer.Typer(help="查询消息历史。")
 console = Console()
@@ -54,7 +55,7 @@ def list_messages(
         table.add_column("type")
         table.add_column("内容", overflow="fold")
         for r in rows:
-            ts = r.received_at.astimezone() if r.received_at else None
+            ts = to_local(r.received_at)
             table.add_row(
                 str(r.id),
                 ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "-",
@@ -86,7 +87,7 @@ def show_message(
         console.print(f"sender:     {m.sender_name or '-'}  ({m.sender_id or '-'})")
         console.print(f"方向:       {m.direction}")
         console.print(f"类型:       {m.content_type}")
-        console.print(f"received:   {m.received_at.isoformat() if m.received_at else '-'}")
+        console.print(f"received:   {format_local(m.received_at) or '-'}")
         console.print(f"\n[bold]内容:[/bold]\n{m.content or '(空)'}")
         if m.image_url:
             console.print(f"\n图片: {m.image_url}")

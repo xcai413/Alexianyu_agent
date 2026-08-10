@@ -29,3 +29,16 @@ def test_format_local_shape() -> None:
 
 def test_format_local_none_empty() -> None:
     assert format_local(None) == ""
+
+
+def test_to_local_handles_naive_utc_from_sqlite() -> None:
+    """SQLite 经 SQLAlchemy 读出的 datetime 是 naive(值为 UTC),必须补 UTC 再转本地。"""
+    naive_utc = datetime(2026, 8, 10, 6, 27, 23)  # 无 tzinfo,值上是 UTC
+    local = to_local(naive_utc)
+    assert local is not None
+    assert local.hour == 14  # +08:00
+    assert local.utcoffset() == timedelta(hours=8)
+
+
+def test_format_local_naive_utc() -> None:
+    assert format_local(datetime(2026, 8, 10, 6, 27, 23)) == "2026-08-10T14:27:23+08:00"

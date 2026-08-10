@@ -23,6 +23,7 @@ from xianyu_agent.domain import (
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.heartbeat import purge_old_messages
+from xianyu_agent.utils.time_utils import format_local
 
 app = FastAPI(title="xianyu-agent", description="闲鱼运营 Agent API", version="0.1.0")
 
@@ -117,9 +118,7 @@ async def account_list() -> dict[str, Any]:
                 "account_id": r.account_id,
                 "enabled": r.enabled,
                 "status": r.status,
-                "last_heartbeat_at": r.last_heartbeat_at.isoformat(timespec="seconds")
-                if r.last_heartbeat_at
-                else None,
+                "last_heartbeat_at": format_local(r.last_heartbeat_at) or None,
             }
             for r in rows
         ]
@@ -181,9 +180,7 @@ async def message_list(
                 "direction": m.direction,
                 "sender": m.sender_name or m.sender_id,
                 "content": m.content,
-                "received_at": m.received_at.isoformat(timespec="seconds")
-                if m.received_at
-                else None,
+                "received_at": format_local(m.received_at) or None,
             }
             for m in rows
         ]
