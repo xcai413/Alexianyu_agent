@@ -1,0 +1,33 @@
+{
+  "$schema": "https://claude.ai/schemas/marketplace.json",
+  "name": "xianyu-agent",
+  "display_name": "闲鱼运营 Agent",
+  "description": "为 AI Agent 直接控制的闲鱼运营系统:账号池 / 规则回复 / 自动发货 / 驾驶舱。",
+  "version": "0.1.0",
+  "author": "ale",
+  "skills": [
+    {
+      "name": "xianyu-triage",
+      "description": "闲鱼新买家消息分诊:判断意图(询价/砍价/催发/售后/广告)并决定下一步动作。"
+    },
+    {
+      "name": "xianyu-reply-draft",
+      "description": "为闲鱼买家消息起草自然、不机械的回复草稿,供人工确认后发送。"
+    },
+    {
+      "name": "xianyu-delivery",
+      "description": "闲鱼自动发货编排:确认订单、查库存、补发、排查发货失败。"
+    },
+    {
+      "name": "xianyu-pool",
+      "description": "闲鱼账号池运维:启停 Worker、查看在线状态与心跳、处理异常账号。"
+    }
+  ],
+  "mcp_servers": {
+    "xianyu-agent": {
+      "command": "uv",
+      "args": ["run", "xianyu-agent", "mcp", "serve"],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,111 @@
+# 闲鱼协议笔记 (Phase 1)
+
+> 来源:公开搜索 xianyu-auto-reply、XianYuApis、GoofishEngine 项目,只整理字段命名与流程,不引用任何源代码。
+> 本文档由 xianyu-agent 维护,字段值以实际抓包为准。
+
+## 1. 三类入口
+
+| 入口 | 用途 | 备注 |
+|------|------|------|
+| wss://wss-goofish... (WebSocket) | 实时聊天消息、订单状态推送 | 长连接,需 heartbeat |
+| https://h5api.m.goofish.com/h5/mtop... (mtop RPC) | 主动拉取订单、详情、用户信息 | 短连接,需带 _m_h5_tk 签名 |
+| https://passport.goofish.com/... (登录) | 扫码 / cookie 校验 | Phase 1 不做自动登录,只接 cookie |
+
+## 2. Cookie 关键字段
+
+| 字段 | 用途 | 必备 |
+|------|------|------|
+| unb | 用户身份标识 | 是 |
+| _m_h5_tk | mtop 接口签名 token | 是 |
+| cookie2 | 反爬 | 否但建议有 |
+| sgcookie | 风控 | 否 |
+| t | 时间戳,部分场景用 | 否 |
+
+### 签名生成 (mtop)
+
+token 由 _m_h5_tk 字段拆分得到:
+
+    token = _m_h5_tk.split('_')[0]    # 前半段作为种子
+    ts    = 当前毫秒时间戳
+    appKey = "34839810"                # 固定
+    sign = md5(f"{token}&{ts}&{appKey}&{data}")
+
+请求头需要带:
+    x-t:        {ts}
+    x-sign:     {sign}
+    x-mini-wua: {H5加密后的ua}  # 复杂,Phase 1 先留空
+    x-sid:      会话ID
+    x-uid:      用户ID(unb)
+
+> 实际项目里 _m_h5_tk 会随时间过期,需要定期 xianyu-agent auth refresh --account id 重拉。
+
+## 3. WebSocket 帧结构 (mtop push)
+
+消息推送帧格式 (以下结构为常见约定,实际以抓包为准):
+
+    {
+      "code": 0,
+      "packetId": "<uuid>",
+      "headers": {
+        "appKey": "34839810",
+        "mid": "...",
+        "timestamp": "1700000000000"
+      },
+      "body": {
+        "ack": "...",
+        "dataTemplate": "...",
+        "pushStrategy": "...",
+        "time": "1700000000000",
+        "userId": "<unb>",
+        "version": "..."
+      }
+    }
+
+body 通常是 base64 编码的 JSON,需要先解码再解析。常见字段:
+
+| 字段 | 含义 |
+|------|------|
+| 1 (string) | 消息正文 (买家发的文字 / 系统通知) |
+| 2 (string) | 发送者 userId |
+| 3 (string) | 接收者 userId |
+| 4 (string) | 消息类型,常见值: text / image / card / system |
+| 5 (object) | 扩展数据 (订单详情、卡片信息等) |
+| 6 (object) | 时间戳 + 消息 ID |
+| 10 (string) | chatId (会话唯一标识) |
+| 100 (object) | 商品信息 (订单推送时) |
+
+> 字段编号与 body 内的 JSON 结构会根据闲鱼后端版本变化,不要硬编码。
+
+## 4. 事件类型映射 (本项目关注)
+
+| 原始事件 | 本项目事件 | 触发动作 |
+|----------|-----------|---------|
+| 收到买家文字消息 | MessageReceived | 匹配回复规则 / AI 回复 |
+| 收到订单创建推送 | OrderCreated | 入库待支付 |
+| 收到订单支付推送 | OrderPaid | 触发自动发货 |
+| 收到订单发货完成推送 | OrderDelivered | 更新订单状态 |
+| 收到系统通知 | SystemNotice | 入 audit_logs |
+| 连接断开 | ConnectionStateChanged | 触发重连 |
+| 签名失败 / token 过期 | ErrorOccurred | 需要 auth refresh |
+
+## 5. 鉴权失败常见信号
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| code != 0 且 body 含 "重新登录" | cookie 过期 | auth refresh --account id |
+| 连接建立后立刻断开 | unb 不匹配 _m_h5_tk | 重新抓 cookie |
+| heartbeat 反复失败 | IP 风控 / 滑块 | Phase 1 不处理,只记录 |
+| mtop sign error | 签名算法不对 | 检查 signer.py 的 md5 拼接顺序 |
+
+## 6. 已知风险与限制
+
+- 闲鱼后端频繁变更:字段编号、签名算法会变,本项目假设一个稳定期内有效。
+- 风控:高频 heartbeat / 异常消息触发滑块验证码。Phase 1 不接滑块求解器,触发后告警并暂停账号。
+- AGPL-3.0 上游:GoofishEngine 与本项目不兼容。本文档只引用公开字段命名约定。
+
+## 7. 后续 Phase 扩展点
+
+- Phase 2:多账号并行 - 需要连接池抽象
+- Phase 3:消息规则匹配 - 复用 events.MessageReceived
+- Phase 4:自动发货 - 复用 events.OrderPaid
+- Phase 5:Textual TUI - 订阅 events.ConnectionStateChanged 实时显示状态

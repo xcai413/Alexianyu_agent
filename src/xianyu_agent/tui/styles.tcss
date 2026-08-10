@@ -1,0 +1,38 @@
+Screen {
+    layout: vertical;
+}
+
+#status-bar {
+    height: 1;
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+}
+
+#risk-bar {
+    height: 1;
+    background: $error;
+    color: $text;
+    padding: 0 1;
+}
+
+#dashboard-grid {
+    layout: grid;
+    grid-size: 2 2;
+    grid-gutter: 1;
+    padding: 0 1 1 1;
+    height: 1fr;
+}
+
+DataTable {
+    border: round $primary;
+    height: 100%;
+}
+
+DataTable:focus {
+    border: round $accent;
+}
+
+Footer {
+    height: 1;
+}
