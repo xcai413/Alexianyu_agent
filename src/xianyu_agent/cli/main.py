@@ -36,6 +36,7 @@ from xianyu_agent.cli.commands import (
     protocol as protocol_cmd,
     rule as rule_cmd,
 )
+from xianyu_agent.config import ensure_fernet_key
 
 app = typer.Typer(
     name="xianyu-agent",
@@ -75,6 +76,11 @@ def main_callback(
     ),
 ) -> None:
     """xianyu-agent 全局选项。"""
+    _ = version  # typer 选项占位(实际处理在 _version_callback)
+    try:
+        ensure_fernet_key()
+    except Exception as exc:
+        console.print(f"[yellow]自动生成 FERNET_KEY 失败:{exc}[/yellow]")
 
 
 @app.command()

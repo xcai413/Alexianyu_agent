@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from cryptography.fernet import Fernet
+from dotenv import set_key
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -97,3 +98,22 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """测试用:清掉 lru_cache。"""
     get_settings.cache_clear()
+
+
+def ensure_fernet_key() -> str:
+    """确保 FERNET_KEY 已配置:缺失则生成并持久化到 .env。
+
+    兑现 README / .env.example 中"首次启动自动生成"的承诺。
+    返回当前生效的 key。
+    """
+    s = get_settings()
+    if s.fernet_key:
+        return s.fernet_key
+    key = Settings.generate_fernet_key()
+    env_path = Path(".env")
+    if env_path.exists():
+        set_key(str(env_path), "XIANYU_FERNET_KEY", key)
+    else:
+        env_path.write_text(f"XIANYU_FERNET_KEY={key}\n", encoding="utf-8")
+    reset_settings_cache()
+    return get_settings().fernet_key
