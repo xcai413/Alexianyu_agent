@@ -109,3 +109,34 @@ body 通常是 base64 编码的 JSON,需要先解码再解析。常见字段:
 - Phase 3:消息规则匹配 - 复用 events.MessageReceived
 - Phase 4:自动发货 - 复用 events.OrderPaid
 - Phase 5:Textual TUI - 订阅 events.ConnectionStateChanged 实时显示状态
+
+## 8. 扫码登录(已实现,Phase 9)
+
+入口:`xianyu-agent auth qr-login --account <id>`(实现:`protocol/qr_login.py`)。
+
+### 流程与接口(字段命名参考公开项目,代码自写)
+
+1. **取 m_h5_tk**:GET `h5api.m.goofish.com/h5/mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get/1.0/`
+   → 响应 Set-Cookie 含 `m_h5_tk`;token = 下划线前半段;md5(token&t&appKey&data) 签名后 POST 同址。
+2. **取登录参数**:GET `passport.goofish.com/mini_login.htm`(参数:lang/appName=xianyu/
+   appEntrance=web/stie=77/rnd 等)→ 从 HTML 正则提取 `window.viewData = {...}` →
+   `loginFormData` 字段,附加 `umidTag=SERVER`。
+3. **生成二维码**:GET `passport.goofish.com/newlogin/qrcode/generate.do` 带 loginFormData
+   → `content.success=true` 时取 `content.data.t` / `content.data.ck` / `content.data.codeContent`。
+4. **轮询状态**:POST `passport.goofish.com/newlogin/qrcode/query.do`(data=t/ck+loginFormData)
+   → `content.data.qrCodeStatus`:
+   - `NEW` 等待扫码;`SCANED` 已扫待确认
+   - `CONFIRMED` 且 `iframeRedirect=false` → 成功,响应 Set-Cookie 含 `unb` 等
+   - `CONFIRMED` 且 `iframeRedirect=true` → 风控,需手机验证(`iframeRedirectUrl`)
+   - `EXPIRED` 过期;其他 → 取消
+5. **落库**:成功后将 Cookie 串经 Fernet 加密存 `cookies` 表。
+
+### 状态机
+
+`waiting → scanned → success | verification_required | expired | cancelled`;轮询间隔 0.8s,
+会话 TTL 300s。
+
+### 已知风险
+
+- passport 接口字段可能随版本变化(与 WS 协议同理),实测为准。
+- 风控(手机验证)不在自动化范围内,CLI 会打印验证 URL 并退出码 2。
