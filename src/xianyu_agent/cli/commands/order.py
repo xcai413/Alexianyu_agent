@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import select
 
+from xianyu_agent.config import get_settings
+from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import orders as domain_orders
+from xianyu_agent.protocol.client import WsClient
+from xianyu_agent.protocol.events import ConnectionState
+from xianyu_agent.services.delivery_service import DeliveryService
+from xianyu_agent.services.guardrails import Guardrails
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="订单查询。")
@@ -60,9 +68,16 @@ def show_order(order_id: int = typer.Argument(...)) -> None:
         if r is None:
             console.print(f"[red]订单 #{order_id} 不存在。[/red]")
             raise typer.Exit(code=1)
+        async with get_async_session() as session:
+            account_row = (
+                await session.execute(
+                    select(Account).where(Account.id == r.account_id).limit(1)
+                )
+            ).scalar_one_or_none()
+        account_key = account_row.account_id if account_row is not None else str(r.account_id)
         console.rule(f"订单 #{r.id}")
         console.print(f"order_id:   {r.order_id}")
-        console.print(f"account:    {r.account_id}")
+        console.print(f"account:    {account_key}")
         console.print(f"item:       {r.item_title or '-'} ({r.item_id or '-'})")
         console.print(f"buyer:      {r.buyer_name or '-'} ({r.buyer_id or '-'})")
         console.print(f"amount:     {r.amount}")
@@ -71,5 +86,71 @@ def show_order(order_id: int = typer.Argument(...)) -> None:
         console.print(f"delivered:  {format_local(r.delivered_at) or '-'}")
         console.print(f"发货内容:   [cyan]{r.delivery_content or '(未发货)'}[/cyan]")
         console.print(f"失败原因:   {r.delivery_fail_reason or '-'}")
+
+    asyncio.run(_run())
+
+
+@app.command("redeliver")
+def redeliver_order(order_id: int = typer.Argument(...)) -> None:
+    """重试发货(发送失败过的订单,复用已预留的卡密)。"""
+
+    async def _run() -> None:
+        r = await domain_orders.get_by_id(order_id)
+        if r is None:
+            console.print(f"[red]订单 #{order_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        if r.status != "paid":
+            console.print(
+                f"[yellow]订单状态 {r.status} 不是 paid,无需重试发货。[/yellow]"
+            )
+            raise typer.Exit(code=1)
+        async with get_async_session() as session:
+            account_row = (
+                await session.execute(
+                    select(Account).where(Account.id == r.account_id).limit(1)
+                )
+            ).scalar_one_or_none()
+        account_key = account_row.account_id if account_row is not None else str(r.account_id)
+        if not get_settings().ws_url:
+            console.print(
+                "[red]未配置 XIANYU_WS_URL,无法真实发送。[/red]"
+                "\n请先配置 WS URL 后重试,或在线运行 worker(pool start)。"
+            )
+            raise typer.Exit(code=1)
+
+        connected = asyncio.Event()
+
+        async def _on_state(state) -> None:
+            if state.state == ConnectionState.CONNECTED:
+                connected.set()
+
+        client = WsClient(account_key, on_state=_on_state)
+        client.start()
+        try:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(connected.wait(), timeout=10.0)
+            if client.state != ConnectionState.CONNECTED:
+                console.print(
+                    f"[red]WS 连接未就绪(state={client.state.value}),重试取消。[/red]"
+                )
+                raise typer.Exit(code=1)
+
+            async def sender(_a: str, _o: str, content: str) -> bool:
+                return await client.send_text(content)
+
+            svc = DeliveryService(sender=sender, guardrails=Guardrails())
+            result = await svc.retry(order_id)
+        finally:
+            await client.stop()
+        if result.delivered:
+            console.print(
+                f"[green]重试成功:[/green] 订单 {result.order_id} 已发货 "
+                f"(code={result.code or '-'})。"
+            )
+        else:
+            console.print(
+                f"[red]重试失败:[/red] {result.order_id} -> {result.reason}"
+            )
+            raise typer.Exit(code=1)
 
     asyncio.run(_run())
