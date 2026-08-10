@@ -1,0 +1,71 @@
+xianyu-agent
+Copyright 2026 ale
+
+本项目代码采用 MIT 协议发布。下列项目为架构灵感来源,本项目**未直接复用其代码**,
+仅借鉴目录结构、命令命名、Skill 设计、协议字段命名等设计经验。如发现实际代码引用,
+请提交 issue。
+
+================================================================================
+Apache License 2.0 项目
+================================================================================
+
+fancyboi999/goofish-cli(https://github.com/fancyboi999/goofish-cli)
+Copyright 2026 fancyboi999
+
+借鉴内容:
+  - CLI 子命令命名风格 (auth / item / message / search)
+  - Skills 文件夹布局(skills/<name>/SKILL.md)
+  - .claude-plugin/marketplace.json 元数据
+  - 多输出格式支持 (json / yaml / table / md / csv)
+  - ruff 严格规则配置
+  - uv + pyproject.toml 项目结构
+
+================================================================================
+MIT License 项目
+================================================================================
+
+madguyevans-creator/resale-agent-skill-hub
+(https://github.com/madguyevans-creator/resale-agent-skill-hub)
+Copyright 2026 madguyevans-creator
+
+借鉴内容:
+  - broker_core/ 分层架构(mcp_server / platform_client / scheduler /
+    state_manager / session_manager / audit_logger)
+  - broker-style Skill 命名模式
+  - guardrails 安全门机制
+
+---
+
+Kaguya233qwq/myfish(https://github.com/Kaguya233qwq/myfish)
+Copyright 2024 Kaguya233qwq
+
+借鉴内容:
+  - 现代 Python async 框架的目录分层
+  - 适配器 / 插件注册机制思路
+
+---
+
+usagi-org/ai-goofish-monitor
+(https://github.com/Usagi-org/ai-goofish-monitor)
+Copyright 2025 Usagi-org
+
+借鉴内容(留待 Phase 7+):
+  - Playwright + AI 多任务监控模式
+  - 关键词搜索 / 筛选的领域模型
+
+================================================================================
+协议字段命名参考(仅字段名,不引用代码)
+================================================================================
+
+cv-cat/XianYuApis(https://github.com/cv-cat/XianYuApis)
+zhinianboke/xianyu-auto-reply(https://github.com/zhinianboke/xianyu-auto-reply)
+
+仅参考 mtop / WebSocket 协议字段命名约定;**未引用任何源代码**。
+前者项目未声明 License,后者为 AGPL-3.0(与本项目 MIT 不兼容)。
+
+================================================================================
+xianyu-agent 自有代码
+================================================================================
+
+其余所有源代码(src/xianyu_agent/、tests/、docs/)均为本项目原创,
+遵循 MIT License,详见 LICENSE 文件。

@@ -1,0 +1,5 @@
+{"code": 0, "packetId": "p-1", "body": {"bizType": "text", "1": "你好,商品还在吗?", "2": "buyer-100", "3": "seller-1", "4": "text", "6": {"mid": "M-1001", "time": 1700000001000}, "10": "chat-001"}}
+{"code": 0, "packetId": "p-2", "body": {"bizType": "text", "1": "在的,亲,9.9 包邮", "2": "seller-1", "3": "buyer-100", "4": "text", "6": {"mid": "M-1002", "time": 1700000002000}, "10": "chat-001"}}
+{"code": 0, "packetId": "p-3", "body": {"bizType": "order", "5": {"orderId": "O-9001", "buyerId": "buyer-100", "buyerNick": "小明", "amount": 9.9, "status": "paid"}, "100": {"itemId": "I-1", "title": "9.9 商品"}, "6": {"time": 1700000003000}}}
+{"code": 0, "packetId": "p-4", "body": {"bizType": "system", "1": "账号风控提醒", "5": {"type": "risk"}}}
+{"code": 0, "packetId": "p-5", "body": {"bizType": "order", "5": {"orderId": "O-9001", "status": "delivered"}}}
