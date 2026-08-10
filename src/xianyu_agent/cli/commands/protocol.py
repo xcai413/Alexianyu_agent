@@ -33,7 +33,7 @@ from xianyu_agent.protocol.events import (
     WsFrame,
 )
 from xianyu_agent.services.account_worker import AccountWorker
-from xianyu_agent.utils.time_utils import format_local
+from xianyu_agent.utils.time_utils import format_local, to_local
 
 app = typer.Typer(help="协议层命令:连接 / 测试 / 录制回放。")
 console = Console()
@@ -181,7 +181,7 @@ def watch(
         t.add_row("ws.last_error", (ws_row.last_error or "-") if ws_row else "-")
         t.add_row("recent_msgs", str(len(recent)))
         for m in recent[:5]:
-            ts = m.received_at.astimezone().strftime("%H:%M:%S") if m.received_at else "-"
+            ts = to_local(m.received_at).strftime("%H:%M:%S") if m.received_at else "-"
             t.add_row(f"  [{ts}] {m.direction}", (m.content or "")[:60])
         return t
 

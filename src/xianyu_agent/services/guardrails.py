@@ -23,6 +23,7 @@ from sqlalchemy import select
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import AuditLog, get_async_session
 from xianyu_agent.domain import messages as domain_messages
+from xianyu_agent.utils.time_utils import format_local
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ async def recent_guardrail_events(*, limit: int = 10) -> list[dict]:
             "account_id": r.target,
             "rule": (r.params or {}).get("rule"),
             "detail": (r.params or {}).get("detail"),
-            "at": r.created_at.isoformat(timespec="seconds") if r.created_at else None,
+            "at": format_local(r.created_at) or None,
         }
         for r in rows
     ]
