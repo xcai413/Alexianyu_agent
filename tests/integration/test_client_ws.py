@@ -23,9 +23,12 @@ class FakeServer:
     def __init__(self, frames):
         self.frames = frames
         self.received = []
+        self.request_headers: dict[str, str] = {}
 
     async def handle(self, ws):
         try:
+            if ws.request is not None:
+                self.request_headers = {k.lower(): v for k, v in ws.request.headers.items()}
             for f in self.frames:
                 await ws.send(json.dumps(f))
             async for msg in ws:
@@ -68,7 +71,7 @@ async def fake_ws_server():
 
 @pytest.mark.asyncio
 async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, monkeypatch) -> None:
-    url, _server = fake_ws_server
+    url, server = fake_ws_server
     db = tmp_path / "intg.db"
     fernet_key = Fernet.generate_key().decode()
     monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
@@ -106,6 +109,11 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
         ConnectionState.ERROR,
         ConnectionState.CONNECTED,
     }
+    # WS 连接必须携带 Cookie header(真实服务依赖它鉴权)
+    assert "cookie" in server.request_headers, f"headers={server.request_headers}"
+    assert "unb=s-1" in server.request_headers["cookie"]
+    # 心跳帧必须是 lwp 格式
+    assert any("lwp" in m for m in server.received), f"received={server.received}"
     assert any(isinstance(e, MessageReceived) for e in received_events), f"events={received_events}"
     assert any(isinstance(e, OrderPaid) for e in received_events), f"events={received_events}"
     async with get_async_session() as session:

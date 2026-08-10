@@ -18,6 +18,7 @@ from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.qr_login import QRLoginClient, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="管理账号 Cookie 与 token 签名。")
 console = Console()
@@ -127,7 +128,7 @@ def list_accounts() -> None:
                 r.remark or "-",
                 "Y" if r.enabled else "N",
                 r.status,
-                r.last_login_at.isoformat() if r.last_login_at else "-",
+                format_local(r.last_login_at) or "-",
             )
         console.print(table)
 

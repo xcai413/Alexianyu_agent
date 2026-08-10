@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.utils.time_utils import format_local, to_local
 
 app = typer.Typer(help="账号 CRUD(增删改查、启停)。")
 console = Console()
@@ -56,7 +57,7 @@ def list_accounts() -> None:
                 r.remark or "-",
                 "Y" if r.enabled else "N",
                 r.status,
-                r.last_heartbeat_at.isoformat(timespec="seconds") if r.last_heartbeat_at else "-",
+                format_local(r.last_heartbeat_at) or "-",
             )
         console.print(table)
 
@@ -92,7 +93,7 @@ def show_account(
             if isinstance(val, bool):
                 val = "Y" if val else "N"
             elif val is not None and hasattr(val, "isoformat"):
-                val = val.isoformat(timespec="seconds")
+                val = to_local(val).isoformat(timespec="seconds")
             table.add_row(col, str(val) if val is not None else "-")
         console.print(table)
 
