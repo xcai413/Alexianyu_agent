@@ -171,3 +171,96 @@ async def test_upstream_delivered_does_not_mask_send_failure(clean_db) -> None:
     # Sanity: card still exists (not consumed twice)
     got = await domain_cards.get_card(card.id)
     assert got.remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_send_failure_reuses_reserved_code(clean_db) -> None:
+    """retry() re-sends the reserved code and flips the order to delivered."""
+    await domain_accounts.create_account("acc-1", enabled=True)
+    card = await domain_cards.create_card("acc-1", "卡", "CODE-R", type_="text")
+
+    async def sender(account_id: str, order_id: str, content: str) -> bool:
+        return False
+
+    svc = DeliveryService(sender=sender)
+    first = await svc.deliver(_paid_event(order_id="O-R"))
+    assert first.delivered is False
+
+    async with db_mod.get_async_session() as session:
+        order = (
+            await session.execute(select(Order).where(Order.order_id == "O-R").limit(1))
+        ).scalar_one()
+        order_id = order.id
+        cons = (
+            (
+                await session.execute(
+                    select(CardConsumption).where(CardConsumption.card_id == card.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(cons) == 1
+    assert cons[0].status == "failed"
+    assert cons[0].content == "CODE-R"
+
+    # Now the sender recovers; retry must reuse CODE-R (not consume a 2nd code).
+    sent: list[tuple[str, str, str]] = []
+
+    async def ok_sender(account_id: str, order_id: str, content: str) -> bool:
+        sent.append((account_id, order_id, content))
+        return True
+
+    svc2 = DeliveryService(sender=ok_sender)
+    result = await svc2.retry(order_id)
+    assert result.delivered is True
+    assert result.code == "CODE-R"
+    assert sent == [("acc-1", "O-R", "CODE-R")]
+
+    async with db_mod.get_async_session() as session:
+        order = (await session.execute(select(Order).where(Order.id == order_id).limit(1))).scalar_one()
+        cons = (
+            (
+                await session.execute(
+                    select(CardConsumption).where(CardConsumption.card_id == card.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert order.status == OrderStatus.DELIVERED.value
+    assert order.delivery_content == "CODE-R"
+    assert order.delivery_fail_reason is None
+    assert len(cons) == 1
+    assert cons[0].status == "success"
+    # stock not double-decremented
+    got = await domain_cards.get_card(card.id)
+    assert got.remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_missing_order(clean_db) -> None:
+    await domain_accounts.create_account("acc-1", enabled=True)
+    svc = DeliveryService(sender=lambda a, o, c: True)
+    result = await svc.retry(99999)
+    assert result.delivered is False
+    assert "订单不存在" in (result.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_retry_no_reserved_code(clean_db) -> None:
+    """Guardrail-blocked order (no consumption) cannot be retried blindly."""
+    await domain_accounts.create_account("acc-1", enabled=True)
+    svc = DeliveryService(sender=lambda a, o, c: True)
+    ev = _paid_event(order_id="O-H")
+    ev.amount = 99999.0
+    await svc.deliver(ev)
+
+    async with db_mod.get_async_session() as session:
+        order = (
+            await session.execute(select(Order).where(Order.order_id == "O-H").limit(1))
+        ).scalar_one()
+        order_id = order.id
+    result = await svc.retry(order_id)
+    assert result.delivered is False
+    assert "无预留卡密" in (result.reason or "")

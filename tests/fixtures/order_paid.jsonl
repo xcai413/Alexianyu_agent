@@ -1,0 +1,2 @@
+{"code": 0, "body": {"bizType": "order", "5": {"orderId": "TEST-001", "buyerId": "b-1", "amount": 5.0, "status": "paid"}, "100": {"itemId": "I-1", "title": "测试商品"}}}
+{"code": 0, "body": {"bizType": "order", "5": {"orderId": "TEST-001", "status": "delivered"}}}
