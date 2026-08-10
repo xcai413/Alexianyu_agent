@@ -33,6 +33,7 @@ from xianyu_agent.protocol.events import (
     WsFrame,
 )
 from xianyu_agent.services.account_worker import AccountWorker
+from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="协议层命令:连接 / 测试 / 录制回放。")
 console = Console()
@@ -170,18 +171,13 @@ def watch(
             stmt_ws = select(DbWorkerStatus).where(DbWorkerStatus.account_id == account.id).limit(1)
             ws_row = (await session.execute(stmt_ws)).scalar_one_or_none()
             recent = await domain_messages.list_recent(account_id=account_id, limit=10)
-        t = Table(title=f"实时: {account_id}  ({datetime.now(UTC).isoformat(timespec='seconds')})")
+        t = Table(title=f"实时: {account_id}  ({format_local(datetime.now(UTC))})")
         t.add_column("字段", style="cyan")
         t.add_column("值")
         t.add_row("enabled", "Y" if account.enabled else "N")
         t.add_row("status", account.status)
         t.add_row("ws.status", ws_row.status if ws_row else "offline")
-        t.add_row(
-            "ws.last_heartbeat_at",
-            ws_row.last_heartbeat_at.isoformat(timespec="seconds")
-            if ws_row and ws_row.last_heartbeat_at
-            else "-",
-        )
+        t.add_row("ws.last_heartbeat_at", format_local(ws_row.last_heartbeat_at) or "-")
         t.add_row("ws.last_error", (ws_row.last_error or "-") if ws_row else "-")
         t.add_row("recent_msgs", str(len(recent)))
         for m in recent[:5]:

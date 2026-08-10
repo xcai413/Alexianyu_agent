@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
 from xianyu_agent.services.account_worker import AccountWorker
+from xianyu_agent.utils.time_utils import format_local
 
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
 
@@ -96,13 +97,9 @@ class AccountPool:
             by_account[key] = {
                 "status": row.status,
                 "reconnect_attempts": row.reconnect_attempts,
-                "last_heartbeat_at": row.last_heartbeat_at.isoformat(timespec="seconds")
-                if row.last_heartbeat_at
-                else None,
+                "last_heartbeat_at": format_local(row.last_heartbeat_at) or None,
                 "last_error": row.last_error,
-                "started_at": row.started_at.isoformat(timespec="seconds")
-                if row.started_at
-                else None,
+                "started_at": format_local(row.started_at) or None,
             }
         result: list[dict] = []
         for acc in accounts:
@@ -117,7 +114,7 @@ class AccountPool:
                     "reconnect_attempts": row.get("reconnect_attempts", 0),
                     "last_heartbeat_at": row.get("last_heartbeat_at"),
                     "last_error": row.get("last_error"),
-                    "started_at": worker.started_at.isoformat(timespec="seconds")
+                    "started_at": format_local(worker.started_at)
                     if worker and worker.started_at
                     else row.get("started_at"),
                 }

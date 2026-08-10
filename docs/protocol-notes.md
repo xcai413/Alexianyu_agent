@@ -7,7 +7,7 @@
 
 | 入口 | 用途 | 备注 |
 |------|------|------|
-| wss://wss-goofish... (WebSocket) | 实时聊天消息、订单状态推送 | 长连接,需 heartbeat |
+| wss://wss-goofish.dingtalk.com/ (WebSocket) | 实时聊天消息、订单状态推送 | 长连接,需 heartbeat |
 | https://h5api.m.goofish.com/h5/mtop... (mtop RPC) | 主动拉取订单、详情、用户信息 | 短连接,需带 _m_h5_tk 签名 |
 | https://passport.goofish.com/... (登录) | 扫码 / cookie 校验 | Phase 1 不做自动登录,只接 cookie |
 
@@ -40,6 +40,16 @@ token 由 _m_h5_tk 字段拆分得到:
 > 实际项目里 _m_h5_tk 会随时间过期,需要定期 xianyu-agent auth refresh --account id 重拉。
 
 ## 3. WebSocket 帧结构 (mtop push)
+
+### 连接与握手
+
+- 地址:`wss://wss-goofish.dingtalk.com/`(无额外 path/query)
+- 请求头:仅需 `Cookie: <完整 cookie 串>`(含 unb / _m_h5_tk / cookie2 等)
+- 心跳帧(间隔 ~15s):
+
+      {"lwp": "/!", "headers": {"mid": "<随机3位><毫秒时间戳> 0"}}
+
+- 连接建立后需发初始化握手帧(当前实现未接,联调确认后补)。
 
 消息推送帧格式 (以下结构为常见约定,实际以抓包为准):
 

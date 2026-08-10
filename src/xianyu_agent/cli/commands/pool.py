@@ -14,13 +14,14 @@ from rich.table import Table
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.heartbeat import purge_old_messages
+from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="多账号 Worker 池(启停 / 状态)。")
 console = Console()
 
 
 def _status_table(rows: list[dict]) -> Table:
-    t = Table(title=f"账号池状态 ({len(rows)})  {datetime.now(UTC).isoformat(timespec='seconds')}")
+    t = Table(title=f"账号池状态 ({len(rows)})  {format_local(datetime.now(UTC))}")
     t.add_column("account_id", style="cyan")
     t.add_column("enabled")
     t.add_column("worker", style="magenta")

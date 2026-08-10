@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import random
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -48,16 +49,27 @@ EventHandler = Callable[[EventEnvelope], Awaitable[None]]
 StateHandler = Callable[[ConnectionStateChanged], Awaitable[None]]
 ErrorHandler = Callable[[ErrorOccurred], Awaitable[None]]
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
-DEFAULT_HEARTBEAT_PAYLOAD = json.dumps({"type": "ping"})
 MIN_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
+
+
+def _generate_mid() -> str:
+    """闲鱼消息 ID 格式:<随机3位><毫秒时间戳> 0"""
+    random_part = int(1000 * random.random())
+    timestamp = int(time.time() * 1000)
+    return f"{random_part}{timestamp} 0"
+
+
+def _default_heartbeat() -> str:
+    """闲鱼 WS 心跳帧:lwp/! + mid(与真实服务对齐)。"""
+    return json.dumps({"lwp": "/!", "headers": {"mid": _generate_mid()}})
 
 
 @dataclass
 class ClientConfig:
     ws_url: str
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
-    heartbeat_payload: str = DEFAULT_HEARTBEAT_PAYLOAD
+    heartbeat_builder: Callable[[], str] = _default_heartbeat
     min_backoff_s: float = MIN_BACKOFF_S
     max_backoff_s: float = MAX_BACKOFF_S
 
@@ -263,11 +275,11 @@ class WsClient:
         except ImportError as exc:  # pragma: no cover
             msg = "websockets package is required for live connections"
             raise RuntimeError(msg) from exc
-        headers = await self.signer.fingerprint(self.account_id)
-        if not headers:
+        cookie_value = await self.signer.load_cookie_value(self.account_id)
+        if not cookie_value:
             msg = f"no cookie for account={self.account_id}"
             raise RuntimeError(msg)
-        additional_headers = [("X-Uid", str(headers.get("unb") or ""))]
+        additional_headers = [("Cookie", cookie_value)]
         async with websockets.connect(
             self.config.ws_url,
             additional_headers=additional_headers,
@@ -300,7 +312,7 @@ class WsClient:
     async def _heartbeat_loop(self, ws: Any) -> None:
         while not self._stop.is_set():
             try:
-                await ws.send(self.config.heartbeat_payload)
+                await ws.send(self.config.heartbeat_builder())
             except Exception as exc:
                 logger.debug("heartbeat send failed: %s", exc)
                 return
