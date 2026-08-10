@@ -7,6 +7,7 @@
 | 命令 | 说明 |
 |------|------|
 | `auth login --account <id> --cookie "<串>"` | 建账号并加密存 Cookie(Fernet) |
+| `auth qr-login --account <id> [--timeout] [--qr-out]` | 扫码登录:生成二维码(终端 ASCII + PNG)→ 轮询 → 自动保存 Cookie |
 | `auth status --account <id>` | 指纹(脱敏):unb / 有无 _m_h5_tk |
 | `auth refresh --account <id>` | 手动刷新占位(Phase 1:重新 login) |
 | `auth list` | 账号列表 |

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
+import qrcode as qrcode_lib
+import qrcode.constants
 import typer
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import select
 
+from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, get_async_session
+from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.protocol.qr_login import QRLoginClient, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
 
 app = typer.Typer(help="管理账号 Cookie 与 token 签名。")
@@ -225,5 +231,91 @@ def delete(
             await session.delete(r)
             await session.commit()
         console.print(f"[red]OK[/red] {account_id} 已删除。")
+
+    asyncio.run(_run())
+
+
+@app.command("qr-login")
+def qr_login(
+    account_id: str = typer.Option(..., "--account", "-a", help="登录后保存到的账号标识。"),
+    timeout: float = typer.Option(300.0, "--timeout", help="等待扫码总时长(秒)。"),
+    qr_out: str = typer.Option(
+        "", "--qr-out", help="二维码 PNG 保存路径;默认 data/qr_logins/<session>.png。"
+    ),
+    remark: str = typer.Option("", "--remark", "-r", help="账号备注(可选)。"),
+) -> None:
+    """扫码登录闲鱼账号:生成二维码 -> 手机扫码确认 -> 自动保存 Cookie。"""
+
+    async def _run() -> None:
+        client = QRLoginClient()
+        console.print("[dim]正在生成二维码...[/dim]")
+        try:
+            session = await client.generate()
+        except Exception as exc:
+            console.print(f"[red]生成二维码失败: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+        # 渲染二维码:PNG + 终端 ASCII
+        try:
+            qr = qrcode_lib.QRCode(
+                version=5,
+                error_correction=qrcode_lib.constants.ERROR_CORRECT_L,
+                box_size=8,
+                border=2,
+            )
+            qr.add_data(session.qr_content or "")
+            qr.make()
+            qr.print_ascii(invert=True)
+            out_path = (
+                Path(qr_out)
+                if qr_out
+                else (get_settings().data_dir / "qr_logins" / f"{session.session_id}.png")
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            qr.make_image().save(out_path)
+            console.print(f"\n[green]二维码已保存:[/green] {out_path}")
+        except Exception as exc:
+            console.print(f"[yellow]二维码渲染失败(仍可继续): {exc}[/yellow]")
+
+        console.print(
+            f"请用闲鱼 App 扫码(会话 {session.session_id[:8]}...),等待 {timeout:.0f} 秒..."
+        )
+
+        last_status = session.status
+        status_map = {
+            QrStatus.SCANNED: "已扫码,请在手机上确认",
+            QrStatus.SUCCESS: "登录成功",
+            QrStatus.EXPIRED: "二维码已过期",
+            QrStatus.CANCELLED: "已取消",
+            QrStatus.VERIFICATION_REQUIRED: "需要手机验证",
+        }
+
+        def on_status(status: str) -> None:
+            nonlocal last_status
+            if status != last_status and status in status_map:
+                console.print(f"[cyan]{status_map[status]}[/cyan]")
+                last_status = status
+
+        final = await client.wait_for_login(session, timeout_s=timeout, on_status=on_status)
+
+        if final == QrStatus.SUCCESS and session.unb:
+            # 建账号(幂等)并保存加密 Cookie
+            await domain_accounts.create_account(account_id, remark=remark or None)
+            saved = await CookieSigner().save_cookie(account_id, session.cookie_string())
+            if not saved:
+                console.print("[red]Cookie 保存失败。[/red]")
+                raise typer.Exit(code=1)
+            console.print(
+                f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
+                f"(unb={session.unb}),Cookie 已加密保存。"
+            )
+        elif final == QrStatus.VERIFICATION_REQUIRED:
+            console.print(
+                f"[red]账号被风控,需要手机验证:[/red] {session.verification_url or '未知'}"
+            )
+            raise typer.Exit(code=2)
+        else:
+            console.print(f"[red]扫码未完成: {final}[/red]")
+            raise typer.Exit(code=1)
 
     asyncio.run(_run())
