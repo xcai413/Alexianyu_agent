@@ -10,7 +10,7 @@ CLI 是单一事实源,TUI / MCP / Skill 都包装同一套领域逻辑。
 | 层 | 路径 | 职责 | 依赖 |
 |----|------|------|------|
 | 协议层 | `src/xianyu_agent/protocol/` | WS 连接/重连/心跳、mtop 帧解析、token 签名 | 仅依赖 `events.py` |
-| 领域层 | `src/xianyu_agent/domain/` | 账号/消息/订单/卡密/规则的纯业务逻辑 | 仅依赖 DB 模型 |
+| 领域层 | `src/xianyu_agent/domain/` | 账号/商品/消息/订单/卡密/规则的纯业务逻辑 | 仅依赖 DB 模型 |
 | 服务层 | `src/xianyu_agent/services/` | Worker、账号池、回复引擎、发货、guardrails、AI Provider | 串接协议 + 领域 |
 | 接口层 | `cli/` `tui/` `mcp/` `skills/` | Typer CLI / Textual 驾驶舱 / FastAPI+MCP / Codex Skill | 全部包装领域与服务 |
 
@@ -47,6 +47,7 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 |----|------|------|
 | `accounts` | 账号与启停状态 | CLI / auth |
 | `worker_status` | Worker 心跳(30s)与状态 | WsClient |
+| `items` | 账号在售商品只读镜像 | item sync |
 | `messages` | 聊天消息(幂等按 message_id) | Worker |
 | `orders` | 订单状态机 | Worker / DeliveryService |
 | `cards` / `card_consumptions` | 卡密库存与消费 | CLI / DeliveryService |
@@ -62,6 +63,8 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 - **失败可审计**:发送/发货失败都落库(`reply_logs.success=False`、`orders.delivery_fail_reason`),
   绝不假装成功。
 - **状态机防伪**:上游 `delivered` 确认帧只在确有发货内容时更新订单状态,避免掩盖失败。
+- **商品只读镜像**:`item sync` 只调用闲鱼商品列表;完整快照成功才将未出现的历史商品标记为非在售,
+  请求失败不改动原镜像,且不会向闲鱼写入商品变更。
 - **guardrails 事件进 audit_logs**:任何进程(含 TUI)都能看到被拦原因。
 
 ## 扩展点

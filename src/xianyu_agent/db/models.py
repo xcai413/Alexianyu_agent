@@ -1,8 +1,8 @@
-"""SQLAlchemy 2.0 ORM 模型 — 11 张表。
+"""SQLAlchemy 2.0 ORM 模型 — 12 张表。
 
 四类:
   - 身份类: Account / Cookie / WorkerStatus
-  - 业务类: Message / Order / Card / CardConsumption / ReplyRule
+  - 业务类: Item / Message / Order / Card / CardConsumption / ReplyRule
   - 日志类: ReplyLog / TaskLog / AuditLog
 
 所有表均带 created_at / updated_at;带外键引用 Account(id) 的列可空(NULL 表示全局)。
@@ -264,6 +264,52 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_account_received", "account_id", "received_at"),
         Index("ix_messages_chat_received", "chat_id", "received_at"),
+    )
+
+
+class Item(Base):
+    """账号在售商品的本地只读镜像。
+
+    同步只写入此表,绝不修改闲鱼端的上架状态、标题、价格或库存。
+    """
+
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    main_image_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    category_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    auction_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    is_on_sale: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account: Mapped[Account] = relationship()
+
+    __table_args__ = (
+        Index("uq_items_account_item", "account_id", "item_id", unique=True),
+        Index("ix_items_account_sale", "account_id", "is_on_sale"),
     )
 
 

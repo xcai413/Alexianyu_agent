@@ -12,9 +12,11 @@ from xianyu_agent.db import database as db_mod
 from xianyu_agent.domain import (
     accounts as domain_accounts,
     cards as domain_cards,
+    items as domain_items,
     messages as domain_messages,
 )
 from xianyu_agent.protocol.events import MessageContentType, MessageReceived
+from xianyu_agent.protocol.items_client import RemoteItem
 from xianyu_agent.services.guardrails import write_guardrail_event
 from xianyu_agent.tui.app import DashboardApp
 from xianyu_agent.tui.widgets import AccountsPanel, CardsPanel, MessagesPanel, OrdersPanel
@@ -30,6 +32,22 @@ async def seeded_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     await db_mod.init_db()
     await domain_accounts.create_account("acc-t", nickname="测试", remark="tui")
     await domain_cards.create_card("acc-t", "卡A", "T-1\nT-2", type_="text")
+    await domain_items.apply_on_sale_snapshot(
+        "acc-t",
+        [
+            RemoteItem(
+                "item-t",
+                "测试在售商品",
+                "9.9",
+                "0",
+                None,
+                None,
+                None,
+                None,
+                {"id": "item-t"},
+            )
+        ],
+    )
     await domain_messages.upsert_inbound(
         MessageReceived(
             event_id="e-t",
@@ -60,6 +78,7 @@ async def test_dashboard_renders_data_and_quits(seeded_db) -> None:
         assert len(accounts.rows) >= 1
         first_key = next(iter(accounts.rows))
         assert "acc-t" in accounts.get_row(first_key)
+        assert "在售商品 1" in str(app._status.content)
 
         messages = app.query_one(MessagesPanel)
         assert len(messages.rows) >= 1

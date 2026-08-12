@@ -16,10 +16,12 @@ from pydantic import BaseModel, Field
 from xianyu_agent.domain import (
     accounts as domain_accounts,
     cards as domain_cards,
+    items as domain_items,
     messages as domain_messages,
     orders as domain_orders,
     rules as domain_rules,
 )
+from xianyu_agent.protocol.items_client import ItemSyncError, XianyuItemsClient
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.heartbeat import purge_old_messages
@@ -84,6 +86,12 @@ class CardRestock(BaseModel):
 
 class CardEnabled(BaseModel):
     enabled: bool
+
+
+class ItemSyncRequest(BaseModel):
+    account_id: str
+    page_size: int = Field(default=20, ge=1, le=50)
+    max_pages: int = Field(default=100, ge=1, le=100)
 
 
 class PurgeRequest(BaseModel):
@@ -220,6 +228,78 @@ async def order_get(order_id: int) -> dict[str, Any]:
             "status": row.status,
             "delivery_content": row.delivery_content,
             "delivery_fail_reason": row.delivery_fail_reason,
+        }
+    )
+
+
+@app.post("/api/v1/items/sync", operation_id="item_sync")
+async def item_sync(body: ItemSyncRequest) -> dict[str, Any]:
+    """只读同步账号在售商品到本地镜像。"""
+    try:
+        snapshot = await XianyuItemsClient().fetch_all_on_sale(
+            body.account_id, page_size=body.page_size, max_pages=body.max_pages
+        )
+        result = await domain_items.apply_on_sale_snapshot(
+            body.account_id, snapshot.items, synced_at=snapshot.fetched_at
+        )
+    except (ItemSyncError, ValueError) as exc:
+        _err(exc)
+    return _ok(
+        {
+            "account_id": result.account_id,
+            "total": result.total,
+            "pages": snapshot.pages,
+            "created": result.created,
+            "updated": result.updated,
+            "marked_off_sale": result.marked_off_sale,
+        }
+    )
+
+
+@app.get("/api/v1/items", operation_id="item_list")
+async def item_list(
+    account_id: str, include_off_sale: bool = False, limit: int = 100
+) -> dict[str, Any]:
+    rows = await domain_items.list_items(
+        account_id, on_sale_only=not include_off_sale, limit=limit
+    )
+    return _ok(
+        [
+            {
+                "id": item.id,
+                "item_id": item.item_id,
+                "title": item.title,
+                "price": item.price,
+                "status": item.status,
+                "is_on_sale": item.is_on_sale,
+                "detail_url": item.detail_url,
+                "main_image_url": item.main_image_url,
+                "last_synced_at": format_local(item.last_synced_at) or None,
+            }
+            for item in rows
+        ]
+    )
+
+
+@app.get("/api/v1/items/{item_pk}", operation_id="item_get")
+async def item_get(item_pk: int) -> dict[str, Any]:
+    item = await domain_items.get_item(item_pk)
+    if item is None:
+        _err(ValueError(f"商品镜像 #{item_pk} 不存在"))
+    return _ok(
+        {
+            "id": item.id,
+            "item_id": item.item_id,
+            "title": item.title,
+            "price": item.price,
+            "status": item.status,
+            "is_on_sale": item.is_on_sale,
+            "detail_url": item.detail_url,
+            "main_image_url": item.main_image_url,
+            "category_id": item.category_id,
+            "auction_type": item.auction_type,
+            "first_seen_at": format_local(item.first_seen_at) or None,
+            "last_synced_at": format_local(item.last_synced_at) or None,
         }
     )
 

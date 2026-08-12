@@ -28,6 +28,7 @@ from xianyu_agent.cli.commands import (
     auth as auth_cmd,
     card as card_cmd,
     dashboard as dashboard_cmd,
+    item as item_cmd,
     maintenance as maintenance_cmd,
     mcp as mcp_cmd,
     message as message_cmd,
@@ -49,6 +50,7 @@ app.add_typer(auth_cmd.app, name="auth")
 app.add_typer(account_cmd.app, name="account")
 app.add_typer(card_cmd.app, name="card")
 app.add_typer(dashboard_cmd.app, name="dashboard")
+app.add_typer(item_cmd.app, name="item")
 app.add_typer(maintenance_cmd.app, name="maintenance")
 app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(message_cmd.app, name="message")

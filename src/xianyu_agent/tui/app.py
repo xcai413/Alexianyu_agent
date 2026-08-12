@@ -17,7 +17,7 @@ from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
 from xianyu_agent.db import AuditLog, get_async_session
-from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.domain import accounts as domain_accounts, items as domain_items
 from xianyu_agent.services.guardrails import recent_guardrail_events
 from xianyu_agent.tui.widgets import AccountsPanel, CardsPanel, MessagesPanel, OrdersPanel
 
@@ -65,13 +65,21 @@ class DashboardApp(App):
         try:
             accounts = await domain_accounts.list_accounts()
             account_ids = [a.account_id for a in accounts]
+            on_sale_total = 0
+            for account_id in account_ids:
+                on_sale_total += len(
+                    await domain_items.list_items(account_id, on_sale_only=True)
+                )
             await self.query_one(AccountsPanel).reload()
             await self.query_one(MessagesPanel).reload(account_ids)
             await self.query_one(OrdersPanel).reload(account_ids)
             await self.query_one(CardsPanel).reload(account_ids)
             now = datetime.now(UTC).strftime("%H:%M:%S")
             mode = "紧急暂停" if self.emergency else "正常"
-            self._status.update(f"账号 {len(account_ids)}  |  模式: {mode}  |  刷新: {now}")
+            self._status.update(
+                f"账号 {len(account_ids)}  |  在售商品 {on_sale_total}  |  "
+                f"模式: {mode}  |  刷新: {now}"
+            )
             events = await recent_guardrail_events(limit=5)
             if events:
                 latest = events[0]
