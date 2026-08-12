@@ -25,6 +25,14 @@
 
 `order list --account <id> [--status] [--limit]`、`order show <id>`(含发货内容/失败原因)
 
+### item — 在售商品镜像(只读)
+
+`item sync --account <id> [--page-size 20] [--max-pages 100]` 从闲鱼“在售”商品列表创建或更新本地镜像;
+该命令只发送商品列表读取请求,不会修改闲鱼端的标题、价格、上下架状态或库存。
+
+`item list --account <id> [--all] [--limit]` 查看本地商品镜像;`item show <local_id>` 查看详情。
+完整同步成功后,本次未出现的历史镜像会标记为非在售;请求失败时原有镜像不会被改动。
+
 ### rule — 回复规则
 
 `rule add --name -n --type keyword|regex|default --pattern -p --reply -r [--account] [--priority]`、
@@ -63,6 +71,7 @@
 | `account_set_enabled` / `account_delete` | 启停/删除 |
 | `auth_login` / `auth_status` | Cookie 录入 / 指纹 |
 | `message_list` | 最近消息 |
+| `item_sync` / `item_list` / `item_get` | 只读在售商品同步 / 本地镜像查询 |
 | `order_list` / `order_get` | 订单 |
 | `rule_create` / `rule_list` / `rule_set_enabled` / `rule_delete` / `rule_test` | 规则 |
 | `card_create` / `card_list` / `card_restock` / `card_consume` / `card_set_enabled` / `card_delete` | 卡密 |

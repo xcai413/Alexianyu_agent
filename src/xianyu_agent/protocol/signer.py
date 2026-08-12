@@ -60,6 +60,15 @@ def derive_token_seed(m_h5_tk: str) -> str:
     return m_h5_tk.split("_", 1)[0]
 
 
+def extract_mtop_token(cookie: str) -> str | None:
+    """Extract the mtop token from either observed cookie spelling.
+
+    The platform has used both ``_m_h5_tk`` and ``m_h5_tk`` in different
+    flows. Callers receive only the value in memory and must never log it.
+    """
+    return _extract_field(cookie, "_m_h5_tk") or _extract_field(cookie, "m_h5_tk")
+
+
 def make_headers(m_h5_tk: str, *, data: str = "") -> MtopHeaders:
     """Build a fresh MtopHeaders bundle. Timestamp is now (ms)."""
     seed = derive_token_seed(m_h5_tk)
@@ -132,7 +141,7 @@ class CookieSigner:
         cookie = await self.load_cookie_value(account_id)
         if not cookie:
             return None
-        m_h5_tk = _extract_field(cookie, "_m_h5_tk")
+        m_h5_tk = extract_mtop_token(cookie)
         if not m_h5_tk:
             return None
         return make_headers(m_h5_tk, data=data)
@@ -145,9 +154,12 @@ class CookieSigner:
         return {
             "account_id": account_id,
             "unb": _extract_field(cookie, "unb"),
-            "has_m_h5_tk": bool(_extract_field(cookie, "_m_h5_tk")),
+            "has_m_h5_tk": bool(extract_mtop_token(cookie)),
             "has_cookie2": bool(_extract_field(cookie, "cookie2")),
-            "m_h5_tk_prefix": _extract_field(cookie, "_m_h5_tk", prefix_only=True),
+            "m_h5_tk_prefix": (
+                _extract_field(cookie, "_m_h5_tk", prefix_only=True)
+                or _extract_field(cookie, "m_h5_tk", prefix_only=True)
+            ),
             "loaded_at": datetime.now(UTC).isoformat(),
         }
 

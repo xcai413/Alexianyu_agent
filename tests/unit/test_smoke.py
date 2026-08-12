@@ -42,13 +42,14 @@ def test_fernet_key_generation() -> None:
 
 
 def test_models_importable() -> None:
-    """11 张表应全部注册到 Base.metadata。"""
+    """12 张表应全部注册到 Base.metadata。"""
     table_names = set(Base.metadata.tables.keys())
     expected = {
         "accounts",
         "cookies",
         "worker_status",
         "messages",
+        "items",
         "orders",
         "cards",
         "card_consumptions",

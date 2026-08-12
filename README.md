@@ -86,7 +86,7 @@ uv run xianyu-agent dashboard
 | 层 | 路径 | 职责 |
 |----|------|------|
 | **协议层** | `src/xianyu_agent/protocol/` | WebSocket / mtop 解析、签名、断线重连 |
-| **领域层** | `src/xianyu_agent/domain/`   | 纯业务逻辑(账号/消息/订单/卡密/规则),无 IO |
+| **领域层** | `src/xianyu_agent/domain/`   | 纯业务逻辑(账号/商品/消息/订单/卡密/规则),无 IO |
 | **服务层** | `src/xianyu_agent/services/` | 协调器:账号池、Worker、回复引擎、发货 |
 | **接口层** | `src/xianyu_agent/cli/`、`tui/`、`mcp/`、`skills/` | CLI 是单一事实源;TUI/MCP/Skill 包装 CLI |
 
@@ -101,6 +101,8 @@ xianyu-agent auth login --account demo --cookie 'unb=...; _m_h5_tk=...'
 xianyu-agent account enable --id demo
 xianyu-agent rule add --name 在吗 --type keyword --pattern 还在吗 --reply "在的,亲"
 xianyu-agent card add --account demo --name 卡 --content "CODE-1"
+xianyu-agent item sync --account demo       # 只读同步闲鱼在售商品到本地镜像
+xianyu-agent item list --account demo
 xianyu-agent pool start-all --seconds 3600
 xianyu-agent message list --since 10m
 xianyu-agent order list --account demo --status paid
