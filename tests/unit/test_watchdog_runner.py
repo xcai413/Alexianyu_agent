@@ -85,3 +85,21 @@ async def test_watchdog_allows_fresh_starting_daemon(monkeypatch: pytest.MonkeyP
         lambda: pytest.fail("fresh starting daemon must not be stopped"),
     )
     assert await watchdog_runner.check_and_recover() is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_run_once_samples_active_soaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def recover() -> bool:
+        calls.append("recover")
+        return False
+
+    async def sample() -> int:
+        calls.append("sample")
+        return 1
+
+    monkeypatch.setattr(watchdog_runner, "check_and_recover", recover)
+    monkeypatch.setattr(watchdog_runner, "sample_active_soaks", sample)
+    await watchdog_runner._run_once()
+    assert calls == ["recover", "sample"]

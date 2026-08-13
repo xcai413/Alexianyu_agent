@@ -13,6 +13,7 @@ Subcommand groups:
   - daemon    常驻运行与进程级控制 (P0.1)
   - service   Windows 任务计划与失败恢复 (P0.3)
   - doctor    本地健康检查 (P0.4)
+  - soak      24 小时长稳验收 (P0.5)
   - dashboard Textual 驾驶舱 (Phase 5 起)
   - mcp       MCP Server (Phase 6 起)
 """
@@ -42,6 +43,7 @@ from xianyu_agent.cli.commands import (
     protocol as protocol_cmd,
     rule as rule_cmd,
     service as service_cmd,
+    soak as soak_cmd,
 )
 from xianyu_agent.config import ensure_fernet_key
 
@@ -67,6 +69,7 @@ app.add_typer(pool_cmd.app, name="pool")
 app.add_typer(protocol_cmd.app, name="protocol")
 app.add_typer(rule_cmd.app, name="rule")
 app.add_typer(service_cmd.app, name="service")
+app.add_typer(soak_cmd.app, name="soak")
 
 
 def _version_callback(value: bool) -> None:

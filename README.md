@@ -45,6 +45,8 @@ uv run xianyu-agent service stop
 uv run xianyu-agent service start
 uv run xianyu-agent doctor
 uv run xianyu-agent doctor --output json
+uv run xianyu-agent soak start --account xcaicai --hours 24
+uv run xianyu-agent soak status
 ```
 
 daemon 运行后,可在其他终端跨进程控制单个账号:
