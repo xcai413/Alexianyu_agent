@@ -22,6 +22,7 @@ from xianyu_agent.db.models import (
     ReplyLog,
     ReplyRule,
     TaskLog,
+    WorkerCommand,
     WorkerStatus,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "ReplyLog",
     "ReplyRule",
     "TaskLog",
+    "WorkerCommand",
     "WorkerStatus",
     "async_engine",
     "async_session_factory",

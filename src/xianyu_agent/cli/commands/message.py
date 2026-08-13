@@ -131,7 +131,7 @@ def send_message(
         if not ok:
             console.print(
                 "[red]发送失败:账号未连接(离线)。[/red] 先确认 XIANYU_WS_URL 已配置且 "
-                "pool start 在运行。"
+            "daemon run 和对应账号的 pool start 已执行。"
             )
             raise typer.Exit(code=1)
         await domain_messages.record_outbound(

@@ -82,7 +82,7 @@ uv run alembic upgrade head
 
 ## 当前阶段
 
-当前 P0.1 daemon 核心已实现;下一步是 `docs/开发计划.md` 的 P0.2 账号级跨进程控制。
-Windows `service` 与 `doctor` 仍是规划命令,不得写成现有能力。
+当前 P0.1-P0.2 已实现;下一步是 `docs/开发计划.md` 的 P0.3 Windows 启动与自恢复。
+Windows `service` 与 `doctor` 目前仍是规划命令,不得写成现有能力。
 查看 `docs/architecture.md` 与本文件顶部的"仓库结构速查"对齐。
 每个 Phase 的验证证据记录在 `docs/验证记录.md`;测试套件为最新权威证据(`uv run pytest -q`)。

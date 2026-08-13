@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from xianyu_agent.cli.commands.daemon import _pid_alive
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import database as db_mod
 from xianyu_agent.domain import accounts as domain_accounts, daemon as daemon_domain
@@ -17,6 +16,7 @@ from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError, DaemonLock
 from xianyu_agent.services.logging_setup import configure_daemon_logging, redact_text
 from xianyu_agent.services.runtime_daemon import RuntimeDaemon
+from xianyu_agent.utils.process_utils import pid_alive
 
 
 class FakeWorker:
@@ -153,6 +153,7 @@ async def test_runtime_daemon_reconciles_account_changes(daemon_db: Path) -> Non
         return worker
 
     await domain_accounts.create_account("a", enabled=True)
+    await domain_accounts.set_desired_state("a", "running")
     pool = AccountPool(worker_factory=factory)
     await pool.reconcile_enabled_accounts()
     assert pool.account_ids == ["a"]
@@ -160,6 +161,7 @@ async def test_runtime_daemon_reconciles_account_changes(daemon_db: Path) -> Non
 
     await domain_accounts.set_enabled("a", False)
     await domain_accounts.create_account("b", enabled=True)
+    await domain_accounts.set_desired_state("b", "running")
     changes = await pool.reconcile_enabled_accounts()
     assert changes == {"started": ["b"], "stopped": ["a"]}
     assert workers["a"].stopped == 1
@@ -214,9 +216,9 @@ def test_daemon_lock_propagates_metadata_write_failure(
 
 
 def test_pid_alive_handles_current_and_invalid_pid() -> None:
-    assert _pid_alive(os.getpid()) is True
-    assert _pid_alive(-1) is False
-    assert _pid_alive(2_147_483_647) is False
+    assert pid_alive(os.getpid()) is True
+    assert pid_alive(-1) is False
+    assert pid_alive(2_147_483_647) is False
 
 
 def test_redact_text_hides_secrets() -> None:

@@ -48,6 +48,7 @@ def list_accounts() -> None:
         table.add_column("nickname")
         table.add_column("remark")
         table.add_column("enabled")
+        table.add_column("desired")
         table.add_column("status")
         table.add_column("last_heartbeat_at")
         for r in rows:
@@ -56,6 +57,7 @@ def list_accounts() -> None:
                 r.nickname or "-",
                 r.remark or "-",
                 "Y" if r.enabled else "N",
+                r.desired_state,
                 r.status,
                 format_local(r.last_heartbeat_at) or "-",
             )
@@ -84,6 +86,7 @@ def show_account(
             "nickname",
             "remark",
             "enabled",
+            "desired_state",
             "status",
             "last_login_at",
             "last_heartbeat_at",
@@ -104,14 +107,16 @@ def show_account(
 def enable_account(
     account_id: str = typer.Option(..., "--id", "-i"),
 ) -> None:
-    """启用账号(下次 pool start-all 会拉起)。"""
+    """允许账号运行;仍需 `pool start` 才会变为期望在线。"""
 
     async def _run() -> None:
         ok = await domain_accounts.set_enabled(account_id, True)
         if not ok:
             console.print(f"[red]账号 {account_id} 不存在。[/red]")
             raise typer.Exit(code=1)
-        console.print(f"[green]OK[/green] {account_id} 已启用。")
+        console.print(
+            f"[green]OK[/green] {account_id} 已启用;执行 `pool start --account {account_id}` 上线。"
+        )
 
     asyncio.run(_run())
 
@@ -120,7 +125,7 @@ def enable_account(
 def disable_account(
     account_id: str = typer.Option(..., "--id", "-i"),
 ) -> None:
-    """禁用账号(Worker 不会启动)。"""
+    """禁用账号并把 desired_state 置 stopped;daemon 会停止对应 Worker。"""
 
     async def _run() -> None:
         ok = await domain_accounts.set_enabled(account_id, False)
