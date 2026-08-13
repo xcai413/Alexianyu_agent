@@ -305,10 +305,16 @@ def qr_login(  # noqa: PLR0915
         try:
             session = await client.generate()
         except Exception as exc:
-            console.print(f"[red]生成二维码失败: {exc}[/red]")
+            detail = str(exc).strip() or type(exc).__name__
+            console.print(f"[red]生成二维码失败:{detail}[/red]")
             raise typer.Exit(code=1) from exc
 
-        # 渲染二维码:PNG + 终端 ASCII
+        # 渲染二维码:必须先保存 PNG;终端预览失败不得阻断文件输出。
+        out_path = (
+            Path(qr_out)
+            if qr_out
+            else (get_settings().data_dir / "qr_logins" / f"{session.session_id}.png")
+        )
         try:
             qr = qrcode_lib.QRCode(
                 version=5,
@@ -318,17 +324,18 @@ def qr_login(  # noqa: PLR0915
             )
             qr.add_data(session.qr_content or "")
             qr.make()
-            qr.print_ascii(invert=True)
-            out_path = (
-                Path(qr_out)
-                if qr_out
-                else (get_settings().data_dir / "qr_logins" / f"{session.session_id}.png")
-            )
             out_path.parent.mkdir(parents=True, exist_ok=True)
             qr.make_image().save(out_path)
             console.print(f"\n[green]二维码已保存:[/green] {out_path}")
         except Exception as exc:
-            console.print(f"[yellow]二维码渲染失败(仍可继续): {exc}[/yellow]")
+            console.print(f"[red]二维码 PNG 保存失败:{type(exc).__name__}: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        try:
+            _print_qr_ascii(qr)
+        except Exception as exc:
+            console.print(
+                f"[yellow]终端二维码预览失败(不影响 PNG):{type(exc).__name__}[/yellow]"
+            )
 
         console.print(
             f"请用闲鱼 App 扫码(会话 {session.session_id[:8]}...),等待 {timeout:.0f} 秒..."
@@ -393,3 +400,9 @@ def _acquire_auth_lock(account_id: str, operation: str) -> AccountConnectionLock
         )
         raise typer.Exit(code=2) from exc
     return lock
+
+
+def _print_qr_ascii(qr: qrcode_lib.QRCode) -> None:
+    """使用仅 ASCII 字符输出二维码,兼容 Windows GBK 终端。"""
+    for row in qr.get_matrix():
+        console.print("".join("##" if cell else "  " for cell in row), markup=False)

@@ -7,6 +7,7 @@ import pytest
 import respx
 
 import xianyu_agent.protocol.qr_login as qr_mod
+from xianyu_agent.cli.commands.auth import _print_qr_ascii
 from xianyu_agent.protocol.qr_login import (
     API_GENERATE_QR,
     API_MINI_LOGIN,
@@ -22,6 +23,23 @@ MINI_LOGIN_HTML = (
     '{"loginFormData": {"key1": "v1", "key2": "v2"}};'
     "</script></html>"
 )
+
+
+def test_terminal_qr_preview_is_ascii_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines: list[str] = []
+
+    class FakeQr:
+        @staticmethod
+        def get_matrix():
+            return [[True, False], [False, True]]
+
+    monkeypatch.setattr(
+        "xianyu_agent.cli.commands.auth.console.print",
+        lambda value, **_kwargs: lines.append(value),
+    )
+    _print_qr_ascii(FakeQr())
+    assert lines == ["##  ", "  ##"]
+    assert all(line.isascii() for line in lines)
 
 
 def _qr_generate_response() -> httpx.Response:
@@ -89,6 +107,37 @@ async def test_generate_fails_when_qr_api_error(mock_passport) -> None:
     client = QRLoginClient()
     with pytest.raises(QrLoginError, match="二维码"):
         await client.generate()
+
+
+@pytest.mark.asyncio
+async def test_generate_retries_transient_passport_connect_error(mock_passport) -> None:
+    calls = {"count": 0}
+
+    def flaky_params(_request):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.ConnectError("temporary")
+        return httpx.Response(200, text=MINI_LOGIN_HTML)
+
+    mock_passport.get(API_MINI_LOGIN).mock(side_effect=flaky_params)
+    session = await QRLoginClient().generate()
+    assert session.qr_content == "https://qr.example/scan"
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_reports_stage_after_retry_exhausted(
+    mock_passport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(qr_mod, "HTTP_RETRY_DELAYS_S", (0.0, 0.0))
+    mock_passport.get(API_MINI_LOGIN).mock(side_effect=httpx.ConnectError("temporary"))
+    monkeypatch.setattr(
+        qr_mod.httpx,
+        "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("sync temporary")),
+    )
+    with pytest.raises(QrLoginError, match=r"登录参数.*ConnectError.*3 次"):
+        await QRLoginClient().generate()
 
 
 @pytest.mark.asyncio
