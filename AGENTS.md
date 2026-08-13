@@ -82,5 +82,7 @@ uv run alembic upgrade head
 
 ## 当前阶段
 
+当前最高优先级是 `docs/开发计划.md` 的 P0:WS 常驻 daemon、跨进程账号池控制与
+Windows 自恢复。规划命令在实现前不得写成现有能力。
 查看 `docs/architecture.md` 与本文件顶部的"仓库结构速查"对齐。
 每个 Phase 的验证证据记录在 `docs/验证记录.md`;测试套件为最新权威证据(`uv run pytest -q`)。

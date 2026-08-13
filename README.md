@@ -19,6 +19,17 @@ xianyu-agent 是一套**为 AI Agent 而设计**的闲鱼(Goofish / 闲鱼)账�
 - **可插拔 AI** — 规则回复 / AI 回复可切换,OpenAI 兼容 API
 - **自托管、轻量** — 单进程 Python + SQLite,不依赖 Docker、不依赖 MySQL
 
+## 当前状态与开发优先级
+
+扫码登录和正式在售商品只读同步已经过真实账号验证。WS 客户端目前只能由
+`pool start/start-all --seconds N` 在前台进程中运行:进程存活期间有心跳和断线重连,
+但终端关闭、进程异常或 Windows 重启后不会自行恢复。
+
+当前最高优先级是 **P0:WS 常驻 daemon + 跨进程账号池控制 + Windows 自恢复**。
+在 P0 的真实断网、杀进程、重启和 24 小时验收完成前,不会把系统描述为已具备无人值守能力。
+完整阶段顺序与验收标准见 [`docs/开发计划.md`](docs/开发计划.md),已完成证据见
+[`docs/验证记录.md`](docs/验证记录.md)。
+
 ## 不用做什么
 
 本项目**明确不做**(避免蔓延):
@@ -70,7 +81,7 @@ uv run xianyu-agent auth status
 
 # 启动账号
 uv run xianyu-agent account enable demo
-uv run xianyu-agent pool start demo
+uv run xianyu-agent pool start --account demo --seconds 120
 
 # 看实时消息
 uv run xianyu-agent message list --account demo --since 10m
@@ -117,6 +128,8 @@ xianyu-agent dashboard
 
 完整命令清单见 [`docs/api-reference.md`](docs/api-reference.md)。
 真实闲鱼联调需要 `XIANYU_WS_URL` 与账号 Cookie(见 `docs/protocol-notes.md`)。
+当前 `pool start/start-all` 是前台限时运行命令,不是后台常驻服务;规划中的 daemon/service
+命令见 [`docs/开发计划.md`](docs/开发计划.md)。
 
 ## 致谢
 
