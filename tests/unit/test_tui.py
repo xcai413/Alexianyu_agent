@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import database as db_mod
+from xianyu_agent.db.models import WorkerDesiredState
 from xianyu_agent.domain import (
     accounts as domain_accounts,
     cards as domain_cards,
     items as domain_items,
     messages as domain_messages,
 )
-from xianyu_agent.protocol.events import MessageContentType, MessageReceived
+from xianyu_agent.protocol.client import ClientConfig, WsClient
+from xianyu_agent.protocol.events import ConnectionState, MessageContentType, MessageReceived
 from xianyu_agent.protocol.items_client import RemoteItem
 from xianyu_agent.services.guardrails import write_guardrail_event
 from xianyu_agent.tui.app import DashboardApp
@@ -31,6 +33,9 @@ async def seeded_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_mod.reset_engine()
     await db_mod.init_db()
     await domain_accounts.create_account("acc-t", nickname="测试", remark="tui")
+    await domain_accounts.set_desired_state("acc-t", WorkerDesiredState.RUNNING)
+    client = WsClient("acc-t", config=ClientConfig(ws_url=""))
+    await client._update_worker_status(state=ConnectionState.CONNECTED, detail=None)
     await domain_cards.create_card("acc-t", "卡A", "T-1\nT-2", type_="text")
     await domain_items.apply_on_sale_snapshot(
         "acc-t",
@@ -79,6 +84,8 @@ async def test_dashboard_renders_data_and_quits(seeded_db) -> None:
         first_key = next(iter(accounts.rows))
         assert "acc-t" in accounts.get_row(first_key)
         assert "在售商品 1" in str(app._status.content)
+        assert "daemon:" in str(app._status.content)
+        assert "漂移 0" in str(app._status.content)
 
         messages = app.query_one(MessagesPanel)
         assert len(messages.rows) >= 1
@@ -98,6 +105,42 @@ async def test_dashboard_renders_data_and_quits(seeded_db) -> None:
         # q quits.
         await pilot.press("q")
     assert app.emergency is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_worker_drift_banner(
+    seeded_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await domain_accounts.set_desired_state("acc-t", WorkerDesiredState.STOPPED)
+    app = DashboardApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "漂移 1" in str(app._status.content)
+        assert "运行告警" in str(app._risk.content)
+        assert "期望 stopped" in str(app._risk.content)
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_stale_worker_banner(seeded_db) -> None:
+    row = await domain_accounts.worker_status_for("acc-t")
+    assert row is not None
+    async with db_mod.get_async_session() as session:
+        persisted = await session.get(type(row), row.id)
+        assert persisted is not None
+        persisted.last_heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+        await session.commit()
+    app = DashboardApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "漂移 1" in str(app._status.content)
+        assert "Worker 心跳过期" in str(app._risk.content)
+        accounts = app.query_one(AccountsPanel)
+        first_key = next(iter(accounts.rows))
+        assert "stale" in accounts.get_row(first_key)
+        await pilot.press("q")
 
 
 @pytest.mark.asyncio

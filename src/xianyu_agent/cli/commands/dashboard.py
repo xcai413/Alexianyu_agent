@@ -22,4 +22,4 @@ def run(
     if refresh <= 0:
         Console().print("[red]--refresh 必须 > 0[/red]")
         raise typer.Exit(code=1)
-    DashboardApp().run()
+    DashboardApp(refresh_seconds=refresh).run()

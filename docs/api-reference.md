@@ -61,7 +61,7 @@
 | 命令 | 当前语义 |
 |------|----------|
 | `daemon run` | 前台无时限运行单实例 daemon,管理全部启用账号;Ctrl+C 停止 |
-| `daemon status` | 查询最近 daemon 的心跳、PID、版本、状态与错误;90 秒未刷新标记 stale |
+| `daemon status` | 查询 daemon 心跳、PID、版本、运行时长及各账号期望/实际状态;90 秒未刷新标记 stale |
 | `daemon stop` | 通过 SQLite 请求活跃 daemon 有序停止 |
 | `daemon restart` | 请求活跃 daemon 有序停止并在同一启动进程内重建实例和账号池 |
 | `daemon logs --tail N` | 读取 `data/logs/xianyu-agent.log` 末尾 N 行并二次脱敏 |
@@ -83,9 +83,11 @@
 默认 `--startup user` 在当前用户登录后运行;`system` 为系统启动模式,需要管理员权限。
 Watchdog 每分钟检查数据库心跳与 PID,人工停止时由 `data/runtime/service.paused` 阻止自动拉起。
 
-### doctor — P0.4 规划命令(当前不可用)
+### doctor — P0.4 健康检查(当前可用)
 
-`doctor` 将检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划。
+`doctor [--output table|json]` 检查数据库连接与写锁、Alembic head、Fernet 密钥、每账号
+Cookie 可解密性、日志目录、重复/遗留 daemon、账号期望/实际状态和 Windows 双任务。
+存在 FAIL 时返回退出码 1;只有 WARN 时返回 0。输出不包含明文 Cookie、Token 或 Fernet key。
 
 P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 

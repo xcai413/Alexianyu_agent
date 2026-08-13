@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from xianyu_agent.utils.time_utils import format_local, to_local
+from xianyu_agent.utils.time_utils import format_duration, format_local, to_local
 
 
 def test_to_local_converts_utc() -> None:
@@ -29,6 +29,12 @@ def test_format_local_shape() -> None:
 
 def test_format_local_none_empty() -> None:
     assert format_local(None) == ""
+
+
+def test_format_duration() -> None:
+    assert format_duration(None) == "-"
+    assert format_duration(65) == "00:01:05"
+    assert format_duration(90_061) == "1d 01:01:01"
 
 
 def test_to_local_handles_naive_utc_from_sqlite() -> None:

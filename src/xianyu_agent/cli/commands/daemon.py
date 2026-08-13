@@ -10,11 +10,11 @@ from rich.table import Table
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import daemon as daemon_domain
-from xianyu_agent.services.daemon_health import observe_daemon
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError
 from xianyu_agent.services.logging_setup import redact_text
+from xianyu_agent.services.observability import build_runtime_snapshot
 from xianyu_agent.services.runtime_daemon import run_runtime_daemon
-from xianyu_agent.utils.time_utils import format_local
+from xianyu_agent.utils.time_utils import format_duration, format_local
 
 app = typer.Typer(help="常驻 daemon(无时限运行 / 状态 / 停止 / 日志)。")
 console = Console()
@@ -38,17 +38,19 @@ def status() -> None:
     """查询最近一次 daemon 的持久化状态和心跳。"""
 
     async def _run() -> None:
-        row = await daemon_domain.latest_instance()
+        snapshot = await build_runtime_snapshot()
+        row = snapshot.daemon
         if row is None:
             console.print("[dim]尚无 daemon 运行记录。[/dim]")
             return
-        health = observe_daemon(row)
+        health = snapshot.daemon_health
         table = Table(title="daemon 状态")
         table.add_column("instance_id", style="cyan")
         table.add_column("observed")
         table.add_column("db")
         table.add_column("pid")
         table.add_column("version")
+        table.add_column("uptime")
         table.add_column("started_at")
         table.add_column("heartbeat")
         table.add_column("age_s")
@@ -59,12 +61,35 @@ def status() -> None:
             row.status,
             f"{row.pid} ({'alive' if health.process_alive else 'dead' if health.active else 'historical'})",
             row.version,
+            format_duration(snapshot.daemon_uptime_s),
             format_local(row.started_at),
             format_local(row.last_heartbeat_at),
             f"{health.heartbeat_age_s:.1f}",
             redact_text(row.last_error or "-"),
         )
         console.print(table)
+
+        accounts = Table(title=f"账号运行状态 ({len(snapshot.accounts)})")
+        accounts.add_column("account_id", style="cyan")
+        accounts.add_column("enabled")
+        accounts.add_column("desired")
+        accounts.add_column("actual")
+        accounts.add_column("aligned")
+        accounts.add_column("heartbeat_age_s")
+        accounts.add_column("last_error", overflow="fold")
+        for account in snapshot.accounts:
+            accounts.add_row(
+                account.account_id,
+                "Y" if account.enabled else "N",
+                account.desired_state,
+                account.actual_state,
+                "Y" if account.aligned else "N",
+                f"{account.heartbeat_age_s:.1f}"
+                if account.heartbeat_age_s is not None
+                else "-",
+                redact_text(account.last_error or "-"),
+            )
+        console.print(accounts)
 
     asyncio.run(_run())
 

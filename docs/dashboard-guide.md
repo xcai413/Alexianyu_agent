@@ -14,8 +14,8 @@ uv run xianyu-agent dashboard --refresh 2
 
 ```
 ┌─ 闲鱼运营驾驶舱 ────────────────────────────────┐
-│ 账号 2  | 在售商品 10 | 模式: 正常 | 刷新: 10:32 │  ← 状态条
-│ 风险: acc-1 (order_amount) 金额超限 @ 10:30:01  │  ← 红色告警(有 guardrail 事件时)
+│ daemon: online (01:20:10) | 账号 2 | 漂移 0 | 在售商品 10 │ ← 状态条
+│ 运行告警: acc-1 Worker 心跳过期 | 风险: 金额超限       │ ← 红色告警
 ├───────────────┬────────────────────────────────┤
 │ 账号池        │ 消息流                         │
 │ acc-1 Y conn  │ 10:31:56 acc-1 in 买家: 你好…   │
@@ -27,8 +27,9 @@ uv run xianyu-agent dashboard --refresh 2
 └────────────────────────────────────────────────┘
 ```
 
-四区数据与状态条中的在售商品数每 2 秒从 SQLite 刷新(任何进程写入都会实时出现,
-不限于本终端启动的 Worker)。首次需运行 `item sync --account <id>` 建立商品镜像。
+四区数据、daemon 总状态、运行时长、账号期望/实际状态和在售商品数按 `--refresh` 间隔
+从 SQLite 刷新(任何进程写入都会实时出现,不限于本终端启动的 Worker)。首次需运行
+`item sync --account <id>` 建立商品镜像。
 
 ## 快捷键
 
@@ -41,7 +42,8 @@ uv run xianyu-agent dashboard --refresh 2
 
 ## 读告警
 
-红色风险条显示最近一条 guardrail 拦截事件,格式:
+红色风险条同时显示运行状态告警和最近一条 guardrail 拦截事件。运行告警包括 daemon
+不在线、账号期望/实际不一致及 Worker 心跳超过 90 秒;guardrail 格式:
 
 `风险: <账号> (<规则>) <原因> @ <时间>`
 
@@ -55,3 +57,4 @@ uv run xianyu-agent dashboard --refresh 2
   `XIANYU_WS_URL not configured` 或 `no cookie`。
 - 风险条一直亮:在 `audit_logs` 里看是哪个规则;夜间静默可调
   `XIANYU_GUARDRAIL_QUIET_HOURS`。
+- `漂移` 非 0:查看账号表的“期望/实际/一致”列,并执行 `xianyu-agent doctor` 获取诊断。
