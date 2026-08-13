@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -89,6 +90,15 @@ class Settings(BaseSettings):
     @property
     def service_pause_path(self) -> Path:
         return self.runtime_dir / "service.paused"
+
+    def account_lock_path(self, account_id: str) -> Path:
+        """Return the per-account WS lock path after removing unsafe path characters."""
+        safe = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in account_id
+        )[:32]
+        digest = hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+        return self.runtime_dir / "accounts" / f"{safe}-{digest}.lock"
 
     @property
     def log_dir(self) -> Path:

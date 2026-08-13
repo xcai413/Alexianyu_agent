@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -120,6 +121,45 @@ async def test_device_id_survives_failed_token_request(ws_db) -> None:
     with pytest.raises(WsAuthError, match="Session过期"):
         await second_provider.get_credentials("acc-ws", force_refresh=True)
     assert first_provider.calls[0][1] == second_provider.calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_new_cookie_invalidates_token_but_preserves_device(ws_db) -> None:
+    signer = CookieSigner()
+    await signer.save_cookie("acc-ws", "unb=user-1; _m_h5_tk=old_seed")
+    provider = StubTokenProvider(
+        [
+            httpx.Response(
+                200,
+                json={"ret": ["SUCCESS::调用成功"], "data": {"accessToken": "old-access"}},
+            )
+        ],
+        signer,
+    )
+    await provider.get_credentials("acc-ws")
+    before = await provider.status("acc-ws")
+    assert before.valid is True
+
+    await signer.save_cookie("acc-ws", "unb=user-1; _m_h5_tk=new_seed")
+    after = await provider.status("acc-ws")
+    assert after.token_cached is False
+    assert after.valid is False
+    assert after.device_id_masked == before.device_id_masked
+    assert before.device_id_masked is not None
+    assert before.device_id_masked.startswith("device#")
+
+
+@pytest.mark.asyncio
+async def test_cookie_fingerprint_does_not_expose_full_user_id(ws_db) -> None:
+    signer = CookieSigner()
+    await signer.save_cookie("acc-ws", "unb=user-identity-secret; _m_h5_tk=token_secret")
+    fingerprint = await signer.fingerprint("acc-ws")
+    assert fingerprint is not None
+    output = json.dumps(fingerprint)
+    assert "user-identity-secret" not in output
+    assert "token_secret" not in output
+    assert fingerprint["has_unb"] is True
+    assert fingerprint["unb_masked"] is not None
 
 
 def test_registration_and_sync_frames_contain_required_fields() -> None:

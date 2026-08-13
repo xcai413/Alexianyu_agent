@@ -54,6 +54,16 @@ class WsCredentials:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class WsCredentialStatus:
+    account_id: str
+    exists: bool
+    token_cached: bool
+    valid: bool
+    device_id_masked: str | None
+    expires_at: datetime | None
+
+
 def generate_device_id(user_id: str) -> str:
     """生成协议接受的 UUID 形设备标识,并绑定当前闲鱼 user id。"""
     if not user_id:
@@ -150,6 +160,36 @@ class WsTokenProvider:
         credentials = WsCredentials(token, device_id, user_id, expires_at)
         await self._save_cached(account_id, credentials)
         return credentials
+
+    async def status(self, account_id: str) -> WsCredentialStatus:
+        """Return a printable status without exposing token or device identifiers."""
+        async with get_async_session() as session:
+            row = (
+                await session.execute(
+                    select(WsCredential)
+                    .join(Account, Account.id == WsCredential.account_id)
+                    .where(Account.account_id == account_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return WsCredentialStatus(account_id, False, False, False, None, None)
+            token_cached = False
+            try:
+                token_cached = bool(
+                    self._signer.fernet.decrypt(row.encrypted_token.encode("utf-8"))
+                )
+            except Exception:
+                token_cached = False
+            expires_at = _as_utc(row.expires_at)
+            return WsCredentialStatus(
+                account_id=account_id,
+                exists=True,
+                token_cached=token_cached,
+                valid=token_cached and expires_at > datetime.now(UTC) + timedelta(minutes=5),
+                device_id_masked=_mask_device_id(row.device_id),
+                expires_at=expires_at,
+            )
 
     async def _request_token(self, cookie: str, device_id: str) -> tuple[httpx.Response, str]:
         data = json.dumps(
@@ -338,3 +378,8 @@ def _generate_mid() -> str:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _mask_device_id(value: str) -> str:
+    digest = __import__("hashlib").sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"device#{digest}"

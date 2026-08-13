@@ -40,3 +40,13 @@ def test_ensure_fernet_key_keeps_existing(tmp_path: Path, monkeypatch: pytest.Mo
     key = ensure_fernet_key()
     assert key == existing
     reset_settings_cache()
+
+
+def test_account_lock_path_is_collision_resistant(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path)
+    first = settings.account_lock_path("a/b")
+    second = settings.account_lock_path("a?b")
+    assert first != second
+    assert first.parent == tmp_path / "runtime" / "accounts"
+    assert "/" not in first.name
+    assert "?" not in second.name

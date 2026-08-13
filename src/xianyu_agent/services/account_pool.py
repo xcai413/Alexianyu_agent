@@ -10,15 +10,18 @@ the daemon reconciles this in-memory pool against that persistent control plane.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
+from xianyu_agent.services.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.services.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local
 
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
 WorkerFactory = Callable[[str], AccountWorker]
+logger = logging.getLogger(__name__)
 
 
 class AccountPool:
@@ -85,9 +88,14 @@ class AccountPool:
 
     def start_all(self) -> list[str]:
         started: list[str] = []
-        for account_id in self._workers:
-            self._workers[account_id].start()
-            started.append(account_id)
+        for account_id in list(self._workers):
+            try:
+                self._workers[account_id].start()
+            except AccountConnectionAlreadyRunningError:
+                self._workers.pop(account_id, None)
+                logger.warning("account connection lock busy account=%s", account_id)
+            else:
+                started.append(account_id)
         return started
 
     async def stop(self, account_id: str) -> bool:
@@ -115,8 +123,13 @@ class AccountPool:
         for account_id in sorted(desired - current):
             worker = self._worker_factory(account_id)
             self._workers[account_id] = worker
-            worker.start()
-            started.append(account_id)
+            try:
+                worker.start()
+            except AccountConnectionAlreadyRunningError:
+                self._workers.pop(account_id, None)
+                logger.warning("account connection lock busy account=%s", account_id)
+            else:
+                started.append(account_id)
         return {"started": started, "stopped": stopped}
 
     async def reconcile_enabled_accounts(self) -> dict[str, list[str]]:
@@ -131,7 +144,11 @@ class AccountPool:
             return "already_running"
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
-        worker.start()
+        try:
+            worker.start()
+        except Exception:
+            self._workers.pop(account_id, None)
+            raise
         return "started"
 
     async def ensure_stopped(self, account_id: str) -> str:
@@ -149,7 +166,11 @@ class AccountPool:
             await previous.stop()
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
-        worker.start()
+        try:
+            worker.start()
+        except Exception:
+            self._workers.pop(account_id, None)
+            raise
         return "restarted"
 
     def restart(self, account_id: str) -> bool:

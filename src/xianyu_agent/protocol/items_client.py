@@ -111,8 +111,7 @@ class XianyuItemsClient:
         if not cookie:
             msg = f"账号 {account_id} 无可用 Cookie"
             raise ItemSyncError(msg)
-        fingerprint = await self._signer.fingerprint(account_id)
-        unb = fingerprint.get("unb") if fingerprint is not None else None
+        unb = await self._signer.load_user_id(account_id)
         if not unb:
             msg = f"账号 {account_id} Cookie 缺少 unb,请重新扫码登录"
             raise ItemSyncError(msg)

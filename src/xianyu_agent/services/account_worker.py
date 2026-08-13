@@ -14,6 +14,7 @@ from sqlalchemy import select
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, get_async_session
 from xianyu_agent.domain import messages as domain_messages, orders as domain_orders
+from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
     ConnectionState,
@@ -67,8 +68,9 @@ class AccountWorker:
 
     async def _on_event(self, event: EventEnvelope) -> None:
         """Default persistence handler: write messages and orders to SQLite."""
+        persisted = event.model_copy(update={"raw": redact_structure(event.raw) if event.raw else None})
         if isinstance(event, MessageReceived):
-            message_id = await domain_messages.upsert_inbound(event)
+            message_id = await domain_messages.upsert_inbound(persisted)
             if self._reply_engine is not None and self._guardrails is not None:
                 decision = await self._guardrails.check_message(event.account_id, event.content)
                 if decision.allowed:
@@ -80,9 +82,9 @@ class AccountWorker:
                         detail=decision.reason or "",
                     )
         elif isinstance(event, MessageSent):
-            await domain_messages.record_outbound(event)
+            await domain_messages.record_outbound(persisted)
         elif isinstance(event, (OrderCreated, OrderPaid, OrderDelivered)):
-            await domain_orders.upsert_from_event(event)
+            await domain_orders.upsert_from_event(persisted)
             if isinstance(event, OrderPaid) and self._delivery_service is not None:
                 await self._delivery_service.deliver(event)
         elif isinstance(event, SystemNotice):

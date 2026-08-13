@@ -123,6 +123,7 @@ class QRLoginClient:
             return session.status
         async with self._client(session) as client:
             resp = await client.post(API_SCAN_STATUS, data=session.params, headers=self._headers)
+            _update_session_cookies(session, client, resp)
         try:
             data = resp.json().get("content", {}).get("data", {})
         except json.JSONDecodeError:
@@ -135,10 +136,7 @@ class QRLoginClient:
                 session.verification_url = data.get("iframeRedirectUrl")
             else:
                 session.status = QrStatus.SUCCESS
-                for k, v in _extract_set_cookies(resp).items():
-                    session.cookies[k] = v
-                    if k == "unb":
-                        session.unb = v
+                session.unb = session.cookies.get("unb")
         elif code == "SCANED":
             session.status = QrStatus.SCANNED
         elif code == "EXPIRED":
@@ -188,8 +186,7 @@ class QRLoginClient:
         """第一步:拿 m_h5_tk 并完成一次签名请求。"""
         async with self._client(session) as client:
             resp = await client.get(H5API_INDEX, headers=self._headers)
-            for k, v in _extract_set_cookies(resp).items():
-                session.cookies[k] = v
+            _update_session_cookies(session, client, resp)
             m_h5_tk = session.cookies.get("m_h5_tk", "")
             token = m_h5_tk.split("_", 1)[0] if "_" in m_h5_tk else ""
             data_str = json.dumps({"bizScene": "home"}, separators=(",", ":"))
@@ -207,7 +204,8 @@ class QRLoginClient:
                 "api": "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get",
                 "data": data_str,
             }
-            await client.post(H5API_INDEX, params=params, headers=self._headers)
+            signed_response = await client.post(H5API_INDEX, params=params, headers=self._headers)
+            _update_session_cookies(session, client, signed_response)
 
     async def _fetch_login_params(self, session: QRLoginSession) -> None:
         """第二步:从 mini_login.htm 提取 loginFormData。"""
@@ -226,6 +224,7 @@ class QRLoginClient:
         }
         async with self._client(session) as client:
             resp = await client.get(API_MINI_LOGIN, params=params, headers=self._headers)
+            _update_session_cookies(session, client, resp)
         match = re.search(r"window\.viewData\s*=\s*(\{.*?\});", resp.text)
         if not match:
             msg = "获取登录参数失败(未找到 viewData)"
@@ -242,6 +241,7 @@ class QRLoginClient:
         """第三步:generate.do 出二维码内容。"""
         async with self._client(session) as client:
             resp = await client.get(API_GENERATE_QR, params=session.params, headers=self._headers)
+            _update_session_cookies(session, client, resp)
         try:
             content = resp.json().get("content", {})
         except json.JSONDecodeError:
@@ -257,3 +257,13 @@ class QRLoginClient:
             msg = "获取登录二维码失败(无 codeContent)"
             raise QrLoginError(msg)
         session.status = QrStatus.WAITING
+
+
+def _update_session_cookies(
+    session: QRLoginSession, client: httpx.AsyncClient, response: httpx.Response
+) -> None:
+    """Carry every intermediate/redirect Cookie into the next QR-login request."""
+    for item in [*response.history, response]:
+        session.cookies.update(_extract_set_cookies(item))
+    for cookie in client.cookies.jar:
+        session.cookies[cookie.name] = cookie.value

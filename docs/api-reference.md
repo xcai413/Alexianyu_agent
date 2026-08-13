@@ -8,8 +8,8 @@
 |------|------|
 | `auth login --account <id> --cookie "<串>"` | 建账号并加密存 Cookie(Fernet) |
 | `auth qr-login --account <id> [--timeout] [--qr-out]` | 扫码登录:生成二维码(终端 ASCII + PNG)→ 轮询 → 自动保存 Cookie |
-| `auth status --account <id>` | 指纹(脱敏):unb / 有无 _m_h5_tk |
-| `auth refresh --account <id>` | 手动刷新占位(Phase 1:重新 login) |
+| `auth status --account <id>` | 脱敏 Cookie/IM token/设备 ID/过期状态;不输出完整身份与凭据 |
+| `auth refresh --account <id>` | 用当前 Cookie 换取并加密缓存 IM accessToken;Worker 运行时拒绝 |
 | `auth list` | 账号列表 |
 | `auth show/enable/disable/delete --account <id>` | 管理 |
 
@@ -69,6 +69,7 @@
 `daemon run` 启动时会加载 `enabled=true + desired_state=running` 的账号,并周期性对账。
 `account enable` 只允许运行,不会自动上线;需显式执行 `pool start`。
 同一数据目录的第二个 daemon 会因文件锁返回退出码 1。
+同一账号的第二个 WS/登录/刷新进程会因账号级锁返回退出码 2。
 
 ### service — P0.3 Windows 常驻(当前可用)
 
@@ -93,9 +94,15 @@ P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 
 ### protocol — 协议调试
 
+`protocol capture --account <id> [--seconds 300] [--target-messages 1] [--output x.jsonl]`
+(P1 前台观察模式;达到目标消息数可提前结束;
+要求 daemon 中同账号 stopped;消息落库但不回复/发货;原始帧仅输出不可逆脱敏结构)、
 `protocol connect --account <id> --seconds N`(前台连 WS 打印事件)、
 `protocol inject --account <id> --fixture x.jsonl [--count]`(离线注入帧,走完整 Worker 流水线)、
 `protocol watch --account <id>`(实时观察)
+
+capture 未连接或未达到目标消息数返回退出码 2;收到消息但必需字段缺失返回退出码 3;
+只有目标达到且字段完整时返回 0。
 
 ### dashboard / maintenance / mcp
 

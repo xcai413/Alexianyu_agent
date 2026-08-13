@@ -49,9 +49,11 @@ from xianyu_agent.protocol.ws_auth import (
     build_registration_frame,
     build_sync_frame,
 )
+from xianyu_agent.services.account_lock import AccountConnectionLock
 
 logger = logging.getLogger(__name__)
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
+FrameHandler = Callable[[WsFrame], Awaitable[None]]
 StateHandler = Callable[[ConnectionStateChanged], Awaitable[None]]
 ErrorHandler = Callable[[ErrorOccurred], Awaitable[None]]
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
@@ -80,6 +82,7 @@ class ClientConfig:
     max_backoff_s: float = MAX_BACKOFF_S
     registration_delay_s: float = 1.0
     auth_retry_delay_s: float = 300.0
+    stop_timeout_s: float = 10.0
 
     @classmethod
     def from_settings(cls) -> ClientConfig:
@@ -104,17 +107,23 @@ class WsClient:
         on_event: EventHandler | None = None,
         on_state: StateHandler | None = None,
         on_error: ErrorHandler | None = None,
+        on_frame: FrameHandler | None = None,
         config: ClientConfig | None = None,
         signer: CookieSigner | None = None,
         token_provider: WsTokenProvider | None = None,
+        account_lock: AccountConnectionLock | None = None,
     ) -> None:
         self.account_id = account_id
         self.config = config or ClientConfig.from_settings()
         self.signer = signer or CookieSigner()
         self.token_provider = token_provider or WsTokenProvider(self.signer)
+        self._account_lock = account_lock or AccountConnectionLock(
+            get_settings().account_lock_path(account_id)
+        )
         self.on_event = on_event
         self.on_state = on_state
         self.on_error = on_error
+        self.on_frame = on_frame
         self._state = ConnectionState.IDLE
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -122,6 +131,7 @@ class WsClient:
         self._injected_queue: asyncio.Queue | None = None
         self._reconnect_attempts = 0
         self._account_user_id: str | None = None
+        self._account_lock_held = False
 
     @property
     def state(self) -> ConnectionState:
@@ -191,13 +201,19 @@ class WsClient:
         """Spawn the background task. Idempotent."""
         if self._task is not None and not self._task.done():
             return
+        self._account_lock.acquire(owner_id=f"ws:{self.account_id}:{uuid.uuid4().hex}")
+        self._account_lock_held = True
         self._stop.clear()
-        if self._injected_queue is None:
-            self._injected_queue = asyncio.Queue()
-        self._inject_task = asyncio.create_task(
-            self._pump_injected(), name=f"ws-inject-{self.account_id}"
-        )
-        self._task = asyncio.create_task(self._run_forever(), name=f"ws-{self.account_id}")
+        try:
+            if self._injected_queue is None:
+                self._injected_queue = asyncio.Queue()
+            self._inject_task = asyncio.create_task(
+                self._pump_injected(), name=f"ws-inject-{self.account_id}"
+            )
+            self._task = asyncio.create_task(self._run_forever(), name=f"ws-{self.account_id}")
+        except Exception:
+            self._release_account_lock()
+            raise
 
     async def _drain_injected(self) -> None:
         """Cancel inject task."""
@@ -211,9 +227,17 @@ class WsClient:
         """Request clean shutdown and wait for the task to exit."""
         self._stop.set()
         if self._task is not None:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            if self._socket is not None:
+                with suppress(Exception):
+                    await self._socket.close()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._task), timeout=self.config.stop_timeout_s
+                )
+            except TimeoutError:
+                self._task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._task
             self._task = None
         await self._drain_injected()
         await self._emit_state(ConnectionState.DISCONNECTED, "stop() called")
@@ -268,6 +292,13 @@ class WsClient:
                 await self._sleep_or_stop(backoff)
         finally:
             await self._emit_state(ConnectionState.DISCONNECTED, "loop exited")
+            self._release_account_lock()
+
+    def _release_account_lock(self) -> None:
+        if not self._account_lock_held:
+            return
+        self._account_lock.release()
+        self._account_lock_held = False
 
     def _compute_backoff(self) -> float:
         base = min(
@@ -388,6 +419,9 @@ class WsClient:
         await self._handle_frame(frame)
 
     async def _handle_frame(self, frame: WsFrame) -> None:
+        if self.on_frame is not None:
+            with suppress(Exception):
+                await self.on_frame(frame)
         for event in parse_frame(
             frame, self.account_id, account_user_id=self._account_user_id
         ):
