@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from xianyu_agent.protocol.capture import CalibrationRecorder, redact_structure
+from xianyu_agent.protocol.capture import CalibrationRecorder, redact_structure, verify_capture
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import MessageReceived, WsFrame
 from xianyu_agent.services.account_lock import (
@@ -95,6 +95,64 @@ async def test_capture_salt_changes_digest_between_runs(tmp_path: Path) -> None:
     await first.record_event(event)
     await second.record_event(event)
     assert first.path.read_text(encoding="utf-8") != second.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_verify_capture_passes_complete_redacted_artifact(tmp_path: Path) -> None:
+    recorder = CalibrationRecorder(tmp_path / "complete.jsonl", account_id="account")
+    event = MessageReceived(
+        event_id="event",
+        account_id="account",
+        received_at=datetime.now(UTC),
+        chat_id="chat",
+        message_id="message",
+        item_id="item",
+        sent_at=datetime.now(UTC),
+        sender_id="buyer",
+        content="content",
+    )
+    await recorder.record_frame(_sync_frame("content"))
+    await recorder.record_event(event)
+    recorder.record_summary(
+        {
+            "connected": True,
+            "messages": 1,
+            "target_reached": True,
+            "missing_message_fields": [],
+            "duplicate_message_events": 0,
+            "errors": 0,
+        }
+    )
+    result = verify_capture(recorder.path)
+    assert result.ok is True
+    assert result.frames == 1
+    assert result.events == 1
+    assert result.messages == 1
+
+
+def test_verify_capture_rejects_plaintext_and_incomplete_summary(tmp_path: Path) -> None:
+    path = tmp_path / "bad.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "summary",
+                "payload": {"content": "plaintext buyer message"},
+                "summary": {
+                    "connected": True,
+                    "messages": 0,
+                    "target_reached": False,
+                    "missing_message_fields": ["item_id"],
+                    "duplicate_message_events": 1,
+                    "errors": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = verify_capture(path)
+    assert result.ok is False
+    assert any("未达到" in issue for issue in result.issues)
+    assert any("未脱敏" in issue for issue in result.issues)
 
 
 def test_redact_structure_keeps_only_protocol_shape() -> None:

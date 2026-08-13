@@ -201,7 +201,9 @@ def test_push_ack_preserves_correlation_headers() -> None:
         "code": 200,
         "headers": {"mid": "push-mid", "sid": "push-sid", "app-key": "app"},
     }
-    assert build_ack_frame(WsFrame(code=200, headers={"mid": "x"})) is None
+    response_ack = build_ack_frame(WsFrame(code=200, headers={"mid": "x"}))
+    assert response_ack == {"code": 200, "headers": {"mid": "x", "sid": ""}}
+    assert build_ack_frame(WsFrame(code=200, headers={})) is None
     push_with_code_200 = _sync_frame({"1": {}})
     push_with_code_200.code = 200
     assert build_ack_frame(push_with_code_200) is not None

@@ -10,7 +10,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
-from tests.integration.ws_test_support import cache_test_ws_token
+from tests.integration.ws_test_support import cache_test_ws_token, complete_test_registration
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import (
     Card,
@@ -31,6 +31,7 @@ class DeliveryServer:
 
     async def handle(self, ws) -> None:
         try:
+            self.received.extend(await complete_test_registration(ws))
             # Push a paid-order frame; then capture whatever the client sends.
             await ws.send(
                 json.dumps(

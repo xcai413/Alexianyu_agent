@@ -25,7 +25,7 @@ from xianyu_agent.domain import (
     messages as domain_messages,
     orders as domain_orders,
 )
-from xianyu_agent.protocol.capture import CalibrationRecorder
+from xianyu_agent.protocol.capture import CalibrationRecorder, verify_capture
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
     MessageReceived,
@@ -42,6 +42,26 @@ from xianyu_agent.utils.time_utils import format_local, to_local
 app = typer.Typer(help="协议层命令:连接 / 测试 / 录制回放。")
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+@app.command("capture-verify")
+def capture_verify(
+    fixture: str = typer.Option(..., "--fixture", "-f", help="capture 生成的 JSONL。"),
+) -> None:
+    """离线验证脱敏 capture 是否达到 P1 消息校准门槛。"""
+    result = verify_capture(Path(fixture))
+    table = Table(title="P1 捕获验收")
+    table.add_column("字段", style="cyan")
+    table.add_column("值")
+    table.add_row("result", "PASS" if result.ok else "FAIL")
+    table.add_row("records", str(result.records))
+    table.add_row("frames/events/messages", f"{result.frames}/{result.events}/{result.messages}")
+    table.add_row("target_reached", "Y" if result.target_reached else "N")
+    table.add_row("missing_fields", ",".join(result.missing_message_fields) or "-")
+    table.add_row("issues", "; ".join(result.issues) or "-")
+    console.print(table)
+    if not result.ok:
+        raise typer.Exit(code=1)
 
 
 @app.command("capture")

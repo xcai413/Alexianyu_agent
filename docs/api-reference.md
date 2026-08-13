@@ -104,6 +104,9 @@ P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 capture 未连接或未达到目标消息数返回退出码 2;收到消息但必需字段缺失返回退出码 3;
 只有目标达到且字段完整时返回 0。
 
+`protocol capture-verify --fixture data/captures/<file>.jsonl` 离线复核 summary、目标消息、
+字段完整性、重复事件、错误和常见敏感字段明文;通过返回 0,不通过返回 1。
+
 ### dashboard / maintenance / mcp
 
 `dashboard [--refresh 2.0]`、`maintenance purge-messages --older-than 24`、

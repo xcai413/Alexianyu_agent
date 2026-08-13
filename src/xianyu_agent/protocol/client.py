@@ -83,6 +83,7 @@ class ClientConfig:
     registration_delay_s: float = 1.0
     auth_retry_delay_s: float = 300.0
     stop_timeout_s: float = 10.0
+    registration_timeout_s: float = 5.0
 
     @classmethod
     def from_settings(cls) -> ClientConfig:
@@ -333,16 +334,48 @@ class WsClient:
             ping_interval=None,
             ping_timeout=None,
         ) as ws:
-            await ws.send(json.dumps(build_registration_frame(credentials)))
-            await self._sleep_or_stop(self.config.registration_delay_s)
-            if self._stop.is_set():
-                return
-            await ws.send(json.dumps(build_sync_frame()))
+            await self._register_and_sync(ws, credentials)
             self._socket = ws
             self._account_user_id = credentials.user_id
             self._reconnect_attempts = 0
             await self._emit_state(ConnectionState.CONNECTED)
             await self._serve(ws)
+
+    async def _register_and_sync(self, ws: Any, credentials: Any) -> None:
+        """Require the matching `/reg` response before declaring the session connected."""
+        registration = build_registration_frame(credentials)
+        reg_mid = str(registration["headers"]["mid"])
+        await ws.send(json.dumps(registration))
+        deadline = time.monotonic() + self.config.registration_timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = "IM registration response timeout"
+                raise TimeoutError(msg)
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
+            headers = frame.headers if isinstance(frame.headers, dict) else {}
+            if str(headers.get("mid") or "") == reg_mid:
+                ack = build_ack_frame(frame)
+                if ack is not None:
+                    await ws.send(json.dumps(ack))
+                await self._handle_frame(frame)
+                code = int(data.get("code", 200)) if isinstance(data, dict) else 200
+                if code != 200:
+                    msg = f"IM registration rejected code={code}"
+                    raise RuntimeError(msg)
+                break
+            await self._ack_and_handle(ws, frame)
+        await self._sleep_or_stop(self.config.registration_delay_s)
+        if self._stop.is_set():
+            return
+        await ws.send(json.dumps(build_sync_frame()))
 
     async def _serve(self, ws: Any) -> None:
         if self._injected_queue is None:
@@ -413,9 +446,12 @@ class WsClient:
             logger.debug("non-JSON frame skipped: length=%d", len(raw))
             return
         frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
+        await self._ack_and_handle(self._socket, frame)
+
+    async def _ack_and_handle(self, ws: Any | None, frame: WsFrame) -> None:
         ack = build_ack_frame(frame)
-        if ack is not None and self._socket is not None:
-            await self._socket.send(json.dumps(ack))
+        if ack is not None and ws is not None:
+            await ws.send(json.dumps(ack))
         await self._handle_frame(frame)
 
     async def _handle_frame(self, frame: WsFrame) -> None:

@@ -39,6 +39,18 @@ class CaptureCounts:
     events: int = 0
 
 
+@dataclass(frozen=True)
+class CaptureVerification:
+    ok: bool
+    records: int
+    frames: int
+    events: int
+    messages: int
+    target_reached: bool
+    missing_message_fields: tuple[str, ...]
+    issues: tuple[str, ...]
+
+
 class CalibrationRecorder:
     """Append structural frame/event evidence without storing original string values."""
 
@@ -161,3 +173,90 @@ def _redact_url(value: str, *, salt: bytes | None) -> dict[str, Any]:
         "path_segments": len([part for part in parsed.path.split("/") if part]),
         "query_keys": sorted({name for name, _ in parse_qsl(parsed.query)}),
     }
+
+
+def verify_capture(path: Path) -> CaptureVerification:
+    """Verify a capture artifact without requiring source Cookie or buyer data."""
+    issues: list[str] = []
+    records: list[dict[str, Any]] = []
+    try:
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                issues.append(f"第 {line_number} 行不是有效 JSON")
+                continue
+            if not isinstance(record, dict):
+                issues.append(f"第 {line_number} 行不是对象")
+                continue
+            records.append(record)
+    except OSError as exc:
+        return CaptureVerification(False, 0, 0, 0, 0, False, (), (f"读取失败:{exc}",))
+
+    summaries = [record for record in records if record.get("kind") == "summary"]
+    if len(summaries) != 1:
+        issues.append(f"summary 数量应为 1,实际 {len(summaries)}")
+    summary = summaries[-1].get("summary", {}) if summaries else {}
+    if not isinstance(summary, dict):
+        issues.append("summary 格式异常")
+        summary = {}
+    frames = sum(record.get("kind") == "frame" for record in records)
+    events = sum(record.get("kind") == "event" for record in records)
+    messages = int(summary.get("messages") or 0)
+    target_reached = bool(summary.get("target_reached"))
+    missing = tuple(str(value) for value in summary.get("missing_message_fields", []) or [])
+    if not bool(summary.get("connected")):
+        issues.append("未确认 connected")
+    if not target_reached:
+        issues.append("未达到目标消息数")
+    if missing:
+        issues.append(f"消息字段缺失:{','.join(missing)}")
+    if int(summary.get("duplicate_message_events") or 0) > 0:
+        issues.append("捕获到重复消息事件")
+    if int(summary.get("errors") or 0) > 0:
+        issues.append("捕获期间存在错误")
+    _scan_for_plain_sensitive_values(records, issues)
+    return CaptureVerification(
+        ok=not issues,
+        records=len(records),
+        frames=frames,
+        events=events,
+        messages=messages,
+        target_reached=target_reached,
+        missing_message_fields=missing,
+        issues=tuple(issues),
+    )
+
+
+def _scan_for_plain_sensitive_values(value: Any, issues: list[str], *, key: str = "root") -> None:
+    if isinstance(value, dict):
+        for name, item in value.items():
+            _scan_for_plain_sensitive_values(item, issues, key=str(name))
+        return
+    if isinstance(value, list):
+        for item in value:
+            _scan_for_plain_sensitive_values(item, issues, key=key)
+        return
+    if not isinstance(value, str):
+        return
+    sensitive_key = key.lower() in {
+        "account",
+        "account_id",
+        "chat_id",
+        "message_id",
+        "item_id",
+        "sender_id",
+        "sender_name",
+        "receiver_id",
+        "content",
+        "token",
+        "cookie",
+        "encrypted_token",
+        "device_id",
+    }
+    if sensitive_key and not (
+        (value.startswith("<") and value.endswith(">")) or value in _SAFE_PROTOCOL_VALUES
+    ):
+        issues.append(f"敏感字段 {key} 包含未脱敏字符串")
