@@ -14,7 +14,11 @@ from typing import Any
 
 from xianyu_agent import __version__
 from xianyu_agent.config import get_settings
-from xianyu_agent.domain import daemon as daemon_domain
+from xianyu_agent.domain import (
+    accounts as domain_accounts,
+    daemon as daemon_domain,
+    worker_commands,
+)
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.daemon_lock import DaemonLock
 from xianyu_agent.services.logging_setup import configure_daemon_logging
@@ -40,7 +44,7 @@ class RuntimeDaemon:
         self.instance_id = uuid.uuid4().hex
         self.heartbeat_interval_s = heartbeat_interval_s
         self.reconcile_interval_s = reconcile_interval_s
-        self._pool_factory = pool_factory or AccountPool.from_enabled_accounts
+        self._pool_factory = pool_factory or AccountPool.from_desired_accounts
         self._lock = lock or DaemonLock(settings.daemon_lock_path)
         self._install_signals = install_signal_handlers
         self._configure_logging = configure_logging
@@ -87,6 +91,11 @@ class RuntimeDaemon:
             version=__version__,
         )
         self._instance_created = True
+        stale = await worker_commands.fail_stale_running(
+            reason="previous daemon exited before command completion"
+        )
+        if stale:
+            logger.warning("marked %d stale worker command(s) as failed", stale)
         self._pool = await self._pool_factory()
         started = self._pool.start_all()
         await daemon_domain.mark_running(self.instance_id)
@@ -106,6 +115,7 @@ class RuntimeDaemon:
             if control.shutdown_requested:
                 self.request_stop()
                 return control.restart_requested
+            await self._process_worker_commands()
             now = time.monotonic()
             if now >= next_reconcile_at:
                 await self._reconcile()
@@ -125,6 +135,71 @@ class RuntimeDaemon:
                 changes["started"],
                 changes["stopped"],
             )
+
+    async def _process_worker_commands(self) -> None:
+        if self._pool is None:  # pragma: no cover - guarded by _start
+            return
+        for command in await worker_commands.pending():
+            if not await worker_commands.claim(
+                command.command_id, daemon_instance_id=self.instance_id
+            ):
+                continue
+            account_id = await worker_commands.account_key(command)
+            if account_id is None:
+                await worker_commands.complete(
+                    command.command_id,
+                    success=False,
+                    error="account no longer exists",
+                )
+                continue
+            try:
+                result = await self._execute_worker_command(account_id, command.action)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                logger.exception(
+                    "worker command failed command=%s account=%s action=%s",
+                    command.command_id,
+                    account_id,
+                    command.action,
+                )
+                await worker_commands.complete(
+                    command.command_id,
+                    success=False,
+                    error=error,
+                )
+                continue
+            await worker_commands.complete(
+                command.command_id,
+                success=True,
+                result=result,
+            )
+            logger.info(
+                "worker command succeeded command=%s account=%s action=%s result=%s",
+                command.command_id,
+                account_id,
+                command.action,
+                result,
+            )
+
+    async def _execute_worker_command(self, account_id: str, action: str) -> str:
+        if self._pool is None:  # pragma: no cover - guarded by _start
+            msg = "account pool is unavailable"
+            raise RuntimeError(msg)
+        account = await domain_accounts.get_account(account_id)
+        if account is None:
+            msg = f"account no longer exists: {account_id}"
+            raise ValueError(msg)
+        if action in {"start", "restart"} and not account.enabled:
+            msg = f"account disabled before command execution: {account_id}"
+            raise ValueError(msg)
+        if action == "start":
+            return self._pool.ensure_started(account_id)
+        if action == "stop":
+            return await self._pool.ensure_stopped(account_id)
+        if action == "restart":
+            return await self._pool.restart_worker(account_id)
+        msg = f"unsupported worker action: {action}"
+        raise ValueError(msg)
 
     async def _shutdown(self, *, fatal_error: str | None, restart_requested: bool) -> None:
         if self._instance_created:

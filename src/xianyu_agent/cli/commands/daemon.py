@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ctypes
-import os
 from datetime import UTC, datetime
 
 import typer
@@ -16,6 +14,7 @@ from xianyu_agent.domain import daemon as daemon_domain
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError
 from xianyu_agent.services.logging_setup import redact_text
 from xianyu_agent.services.runtime_daemon import run_runtime_daemon
+from xianyu_agent.utils.process_utils import pid_alive
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="常驻 daemon(无时限运行 / 状态 / 停止 / 日志)。")
@@ -25,32 +24,6 @@ STALE_AFTER_S = 90.0
 
 def _aware_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if pid == os.getpid():
-        return True
-    if os.name == "nt":
-        process_query_limited_information = 0x1000
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
-        open_process.restype = ctypes.c_void_p
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = (ctypes.c_void_p,)
-        close_handle.restype = ctypes.c_int
-        handle = open_process(process_query_limited_information, False, pid)
-        if not handle:
-            return False
-        close_handle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 @app.command("run")
@@ -79,12 +52,12 @@ def status() -> None:
             return
         now = datetime.now(UTC)
         age_s = max(0.0, (now - _aware_utc(row.last_heartbeat_at)).total_seconds())
-        pid_alive = _pid_alive(row.pid)
+        process_alive = pid_alive(row.pid)
         active = row.status in daemon_domain.ACTIVE_STATUSES
-        observed = "online" if active and age_s <= STALE_AFTER_S and pid_alive else row.status
+        observed = "online" if active and age_s <= STALE_AFTER_S and process_alive else row.status
         if active and age_s > STALE_AFTER_S:
             observed = "stale"
-        elif active and not pid_alive:
+        elif active and not process_alive:
             observed = "dead"
         table = Table(title="daemon 状态")
         table.add_column("instance_id", style="cyan")
@@ -100,7 +73,7 @@ def status() -> None:
             row.instance_id[:12],
             observed,
             row.status,
-            f"{row.pid} ({'alive' if pid_alive else 'dead'})",
+            f"{row.pid} ({'alive' if process_alive else 'dead'})",
             row.version,
             format_local(row.started_at),
             format_local(row.last_heartbeat_at),

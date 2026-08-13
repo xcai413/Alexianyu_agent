@@ -21,9 +21,8 @@ xianyu-agent 是一套**为 AI Agent 而设计**的闲鱼(Goofish / 闲鱼)账�
 
 ## 当前状态与开发优先级
 
-扫码登录和正式在售商品只读同步已经过真实账号验证。WS 客户端目前只能由
-`pool start/start-all --seconds N` 在前台进程中运行:进程存活期间有心跳和断线重连,
-但终端关闭、进程异常或 Windows 重启后不会自行恢复。
+扫码登录和正式在售商品只读同步已经过真实账号验证。WS 现由无时限 `daemon run` 持有,
+`pool` 命令可跨进程控制账号 Worker;但终端关闭、进程异常或 Windows 重启后仍不会自行恢复。
 
 当前最高优先级是 **P0:WS 常驻 daemon + 跨进程账号池控制 + Windows 自恢复**。
 在 P0 的真实断网、杀进程、重启和 24 小时验收完成前,不会把系统描述为已具备无人值守能力。
@@ -39,6 +38,16 @@ uv run xianyu-agent daemon status   # 终端 B:查询
 uv run xianyu-agent daemon stop     # 终端 B:有序停止
 ```
 
+daemon 运行后,可在其他终端跨进程控制单个账号:
+
+```powershell
+uv run xianyu-agent pool stop --account xcaicai
+uv run xianyu-agent pool start --account xcaicai
+uv run xianyu-agent pool restart --account xcaicai
+uv run xianyu-agent pool status
+```
+
+命令只有收到 daemon 的 `succeeded` 回执才显示 OK;daemon 离线或等待超时会返回非零退出码。
 当前仍未安装 Windows 自启动与失败拉起;关闭 daemon 所在终端或强制结束进程后不会自动恢复。
 
 ## 不用做什么
@@ -92,7 +101,8 @@ uv run xianyu-agent auth status
 
 # 启动账号
 uv run xianyu-agent account enable demo
-uv run xianyu-agent pool start --account demo --seconds 120
+uv run xianyu-agent daemon run  # 终端 A
+uv run xianyu-agent pool start --account demo  # 终端 B
 
 # 看实时消息
 uv run xianyu-agent message list --account demo --since 10m
@@ -125,7 +135,7 @@ xianyu-agent rule add --name 在吗 --type keyword --pattern 还在吗 --reply "
 xianyu-agent card add --account demo --name 卡 --content "CODE-1"
 xianyu-agent item sync --account demo       # 只读同步闲鱼在售商品到本地镜像
 xianyu-agent item list --account demo
-xianyu-agent pool start-all --seconds 3600
+xianyu-agent pool start-all --wait 15
 xianyu-agent message list --since 10m
 xianyu-agent order list --account demo --status paid
 xianyu-agent maintenance purge-messages --older-than 24
@@ -139,7 +149,8 @@ xianyu-agent dashboard
 
 完整命令清单见 [`docs/api-reference.md`](docs/api-reference.md)。
 真实闲鱼联调需要 `XIANYU_WS_URL` 与账号 Cookie(见 `docs/protocol-notes.md`)。
-当前 `pool start/start-all` 仍是前台限时运行命令;长期连接请使用 `daemon run`。
+当前 `pool start/start-all/stop/restart` 是常驻 daemon 的账号级控制命令;长期连接需先运行
+`daemon run`。
 Windows `service` 命令仍是规划能力,见 [`docs/开发计划.md`](docs/开发计划.md)。
 
 ## 致谢

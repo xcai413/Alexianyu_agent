@@ -4,9 +4,8 @@ Workers are built from enabled accounts in the DB and started together (or
 individually). Heartbeats are persisted to the worker_status table by each
 WsClient, so status is queryable from any process.
 
-Cross-process note: `pool start-all` / `pool start` run in the foreground of
-one CLI process. `pool stop` cannot reach workers in another process; it marks
-the worker_status row offline (see domain.accounts.mark_worker_offline).
+P0.2: RuntimeDaemon owns this pool. CLI writes worker_commands and desired_state;
+the daemon reconciles this in-memory pool against that persistent control plane.
 """
 
 from __future__ import annotations
@@ -42,6 +41,26 @@ class AccountPool:
 
         pool = cls(worker_factory=_build_worker)
         accounts = await domain_accounts.list_accounts(only_enabled=True)
+        for acc in accounts:
+            pool._workers[acc.account_id] = pool._worker_factory(acc.account_id)
+        return pool
+
+    @classmethod
+    async def from_desired_accounts(
+        cls,
+        *,
+        on_event: EventHandler | None = None,
+    ) -> AccountPool:
+        """Build a pool from enabled accounts whose desired_state is running."""
+
+        def _build_worker(account_id: str) -> AccountWorker:
+            worker = AccountWorker(account_id, persist_events=on_event is None)
+            if on_event is not None:
+                worker._client.on_event = on_event
+            return worker
+
+        pool = cls(worker_factory=_build_worker)
+        accounts = await domain_accounts.list_desired_running_accounts()
         for acc in accounts:
             pool._workers[acc.account_id] = pool._worker_factory(acc.account_id)
         return pool
@@ -82,9 +101,9 @@ class AccountPool:
         for worker in self._workers.values():
             await worker.stop()
 
-    async def reconcile_enabled_accounts(self) -> dict[str, list[str]]:
-        """令内存 Worker 集合与数据库中的启用账号保持一致。"""
-        accounts = await domain_accounts.list_accounts(only_enabled=True)
+    async def reconcile_desired_accounts(self) -> dict[str, list[str]]:
+        """令内存 Worker 集合与持久化期望状态保持一致。"""
+        accounts = await domain_accounts.list_desired_running_accounts()
         desired = {account.account_id for account in accounts}
         current = set(self._workers)
         stopped: list[str] = []
@@ -99,6 +118,39 @@ class AccountPool:
             worker.start()
             started.append(account_id)
         return {"started": started, "stopped": stopped}
+
+    async def reconcile_enabled_accounts(self) -> dict[str, list[str]]:
+        """兼容旧调用;P0.2 起实际按 enabled + desired_state 对账。"""
+        return await self.reconcile_desired_accounts()
+
+    def ensure_started(self, account_id: str) -> str:
+        """确保一个 Worker 在池中运行。"""
+        worker = self._workers.get(account_id)
+        if worker is not None:
+            worker.start()
+            return "already_running"
+        worker = self._worker_factory(account_id)
+        self._workers[account_id] = worker
+        worker.start()
+        return "started"
+
+    async def ensure_stopped(self, account_id: str) -> str:
+        """确保一个 Worker 已从池中停止并移除。"""
+        worker = self._workers.pop(account_id, None)
+        if worker is None:
+            return "already_stopped"
+        await worker.stop()
+        return "stopped"
+
+    async def restart_worker(self, account_id: str) -> str:
+        """重建一个账号的 Worker,避免复用已停止 client 的瞬时状态。"""
+        previous = self._workers.pop(account_id, None)
+        if previous is not None:
+            await previous.stop()
+        worker = self._worker_factory(account_id)
+        self._workers[account_id] = worker
+        worker.start()
+        return "restarted"
 
     def restart(self, account_id: str) -> bool:
         worker = self._workers.get(account_id)
@@ -132,6 +184,7 @@ class AccountPool:
                 {
                     "account_id": acc.account_id,
                     "enabled": acc.enabled,
+                    "desired_state": acc.desired_state,
                     "worker_state": worker.state.value if worker else "no_worker",
                     "db_status": row.get("status", "offline"),
                     "reconnect_attempts": row.get("reconnect_attempts", 0),

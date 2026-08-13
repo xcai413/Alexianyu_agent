@@ -45,14 +45,16 @@
 
 ### pool — 账号池
 
-`pool start-all --seconds N [--refresh] [--purge-interval]`(前台实时看板)、
-`pool start --account <id> ...`、`pool stop/stop-all`(DB 标记)、`pool status`
+`pool start --account <id> [--wait 15]`、`pool stop --account <id> [--wait 15]`、
+`pool restart --account <id> [--wait 15]`、`pool start-all/stop-all [--wait 15]`、`pool status`
 
 当前语义:
 
-- `start/start-all` 只在当前终端进程内持有 WS 连接,达到 `--seconds` 或进程退出后停止。
-- `stop/stop-all` 只更新数据库状态,不能停止另一个进程中的 Worker。
-- `pool status` 显示的是数据库状态和当前调用进程可见的状态,不是后台服务存活证明。
+- `start/stop/restart` 写入 `worker_commands`,由常驻 daemon 跨进程执行。
+- 默认等待 15 秒;只有命令为 `succeeded` 才返回成功。失败返回退出码 1;daemon 离线或超时
+  返回退出码 2,命令保留在数据库供 Agent 查询。
+- `--wait 0` 只提交不等待,输出会明确标注“未等待执行”。
+- `pool status` 显示 `enabled`、`desired` 与数据库实际状态;CLI 进程不再伪造内存 Worker 状态。
 
 ### daemon — P0.1 常驻运行(当前可用)
 
@@ -64,7 +66,8 @@
 | `daemon restart` | 请求活跃 daemon 有序停止并在同一启动进程内重建实例和账号池 |
 | `daemon logs --tail N` | 读取 `data/logs/xianyu-agent.log` 末尾 N 行并二次脱敏 |
 
-`daemon run` 启动时会加载全部 `accounts.enabled=true` 的账号,并周期性对账启用状态。
+`daemon run` 启动时会加载 `enabled=true + desired_state=running` 的账号,并周期性对账。
+`account enable` 只允许运行,不会自动上线;需显式执行 `pool start`。
 同一数据目录的第二个 daemon 会因文件锁返回退出码 1。
 
 ### service / doctor — P0.3-P0.4 规划命令(当前不可用)
@@ -74,8 +77,7 @@
 | `service install/start/stop/status/uninstall` | 管理 Windows 任务计划中的自启动与失败恢复 |
 | `doctor` | 检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划 |
 
-P0.2 完成后,`pool start/stop/restart` 才会改为向 daemon 提交持久化账号级命令。
-目前 `daemon` 只支持进程级控制,不要把现有 `pool stop` 解释成能控制 daemon 中单个 Worker。
+P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 
 ### protocol — 协议调试
 

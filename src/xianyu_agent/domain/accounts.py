@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from xianyu_agent.db import Account, WorkerStatus, get_async_session
+from xianyu_agent.db.models import WorkerDesiredState
 
 
 async def create_account(
@@ -28,6 +29,7 @@ async def create_account(
             nickname=nickname,
             remark=remark,
             enabled=enabled,
+            desired_state=WorkerDesiredState.STOPPED,
         )
         session.add(row)
         await session.commit()
@@ -50,6 +52,18 @@ async def list_accounts(*, only_enabled: bool = False) -> Sequence[Account]:
         return list((await session.execute(stmt)).scalars().all())
 
 
+async def list_desired_running_accounts() -> Sequence[Account]:
+    """列出允许运行且期望在线的账号。"""
+    async with get_async_session() as session:
+        stmt = (
+            select(Account)
+            .where(Account.enabled.is_(True))
+            .where(Account.desired_state == WorkerDesiredState.RUNNING)
+            .order_by(Account.created_at.desc())
+        )
+        return list((await session.execute(stmt)).scalars().all())
+
+
 async def set_enabled(account_id: str, enabled: bool) -> bool:
     """Enable/disable an account. Returns False if account missing."""
     async with get_async_session() as session:
@@ -59,6 +73,24 @@ async def set_enabled(account_id: str, enabled: bool) -> bool:
         if row is None:
             return False
         row.enabled = enabled
+        if not enabled:
+            row.desired_state = WorkerDesiredState.STOPPED
+        await session.commit()
+        return True
+
+
+async def set_desired_state(account_id: str, desired_state: str) -> bool:
+    """设置 daemon 中账号 Worker 的期望状态。"""
+    if desired_state not in {WorkerDesiredState.RUNNING, WorkerDesiredState.STOPPED}:
+        msg = f"invalid desired_state: {desired_state}"
+        raise ValueError(msg)
+    async with get_async_session() as session:
+        row = (
+            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        row.desired_state = desired_state
         await session.commit()
         return True
 
