@@ -20,6 +20,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from random import random
 from typing import Any
 
@@ -36,6 +37,7 @@ API_SCAN_STATUS = f"{PASSPORT_HOST}/newlogin/qrcode/query.do"
 APP_KEY = "34839810"
 SESSION_TTL_S = 300
 POLL_INTERVAL_S = 0.8
+HTTP_RETRY_DELAYS_S = (0.0, 0.5, 1.5)
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -101,15 +103,25 @@ class QRLoginClient:
     """扫码登录 HTTP 客户端(纯流程,无 UI)。"""
 
     def __init__(self, *, timeout_s: float = 30.0) -> None:
+        self._timeout_s = timeout_s
         self._timeout = httpx.Timeout(timeout_s)
         self._headers = dict(BROWSER_HEADERS)
 
     async def generate(self) -> QRLoginSession:
         """执行前三步,返回含 qr_content 的会话。"""
         session = QRLoginSession()
-        await self._bootstrap_mh5tk(session)
-        await self._fetch_login_params(session)
-        await self._fetch_qr_code(session)
+        for stage, operation in (
+            ("mtop bootstrap", self._bootstrap_mh5tk),
+            ("passport login params", self._fetch_login_params),
+            ("passport QR code", self._fetch_qr_code),
+        ):
+            try:
+                await operation(session)
+            except QrLoginError:
+                raise
+            except httpx.HTTPError as exc:
+                msg = f"{stage} 网络请求失败({type(exc).__name__})"
+                raise QrLoginError(msg) from exc
         return session
 
     async def poll(self, session: QRLoginSession) -> str:
@@ -122,7 +134,14 @@ class QRLoginClient:
         }:
             return session.status
         async with self._client(session) as client:
-            resp = await client.post(API_SCAN_STATUS, data=session.params, headers=self._headers)
+            resp = await self._request_with_retry(
+                client,
+                "POST",
+                API_SCAN_STATUS,
+                stage="扫码状态轮询",
+                data=session.params,
+                headers=self._headers,
+            )
             _update_session_cookies(session, client, resp)
         try:
             data = resp.json().get("content", {}).get("data", {})
@@ -182,10 +201,58 @@ class QRLoginClient:
             cookies=session.cookies,
         )
 
+    async def _request_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        stage: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Retry transient transport failures without logging request secrets."""
+        last_error: httpx.TransportError | None = None
+        for delay in HTTP_RETRY_DELAYS_S:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await asyncio.wait_for(
+                    client.request(method, url, **kwargs), timeout=self._timeout_s + 2.0
+                )
+            except TimeoutError as exc:
+                last_error = httpx.ReadTimeout("hard timeout")
+                last_error.__cause__ = exc
+            except httpx.TransportError as exc:
+                last_error = exc
+        # Windows/AnyIO TLS occasionally hangs while synchronous httpx succeeds.
+        # Keep the fallback bounded and carry only the response cookies forward.
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    partial(
+                        httpx.request,
+                        method,
+                        url,
+                        timeout=self._timeout_s,
+                        follow_redirects=True,
+                        **kwargs,
+                    )
+                ),
+                timeout=self._timeout_s + 2.0,
+            )
+        except (TimeoutError, httpx.TransportError) as exc:
+            last_error = exc if isinstance(exc, httpx.TransportError) else last_error
+        error_name = type(last_error).__name__ if last_error is not None else "TransportError"
+        attempts = len(HTTP_RETRY_DELAYS_S) + 1
+        msg = f"{stage} 网络连接失败({error_name}),已尝试 {attempts} 次"
+        raise QrLoginError(msg) from last_error
+
     async def _bootstrap_mh5tk(self, session: QRLoginSession) -> None:
         """第一步:拿 m_h5_tk 并完成一次签名请求。"""
         async with self._client(session) as client:
-            resp = await client.get(H5API_INDEX, headers=self._headers)
+            resp = await self._request_with_retry(
+                client, "GET", H5API_INDEX, stage="mtop bootstrap", headers=self._headers
+            )
             _update_session_cookies(session, client, resp)
             m_h5_tk = session.cookies.get("m_h5_tk", "")
             token = m_h5_tk.split("_", 1)[0] if "_" in m_h5_tk else ""
@@ -204,7 +271,14 @@ class QRLoginClient:
                 "api": "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get",
                 "data": data_str,
             }
-            signed_response = await client.post(H5API_INDEX, params=params, headers=self._headers)
+            signed_response = await self._request_with_retry(
+                client,
+                "POST",
+                H5API_INDEX,
+                stage="mtop signed bootstrap",
+                params=params,
+                headers=self._headers,
+            )
             _update_session_cookies(session, client, signed_response)
 
     async def _fetch_login_params(self, session: QRLoginSession) -> None:
@@ -223,7 +297,14 @@ class QRLoginClient:
             "rnd": random(),
         }
         async with self._client(session) as client:
-            resp = await client.get(API_MINI_LOGIN, params=params, headers=self._headers)
+            resp = await self._request_with_retry(
+                client,
+                "GET",
+                API_MINI_LOGIN,
+                stage="登录参数",
+                params=params,
+                headers=self._headers,
+            )
             _update_session_cookies(session, client, resp)
         match = re.search(r"window\.viewData\s*=\s*(\{.*?\});", resp.text)
         if not match:
@@ -240,7 +321,14 @@ class QRLoginClient:
     async def _fetch_qr_code(self, session: QRLoginSession) -> None:
         """第三步:generate.do 出二维码内容。"""
         async with self._client(session) as client:
-            resp = await client.get(API_GENERATE_QR, params=session.params, headers=self._headers)
+            resp = await self._request_with_retry(
+                client,
+                "GET",
+                API_GENERATE_QR,
+                stage="二维码生成",
+                params=session.params,
+                headers=self._headers,
+            )
             _update_session_cookies(session, client, resp)
         try:
             content = resp.json().get("content", {})
