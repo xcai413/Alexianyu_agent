@@ -51,6 +51,8 @@ token 由 _m_h5_tk 字段拆分得到:
 
 - 连接建立后必须先获取 IM `accessToken`,发送 `/reg`,随后发送
   `/r/SyncStatus/ackDiff`;当前实现完成这两帧后才标记 connected。
+- `/reg` 必须等待相同 `headers.mid` 的服务端响应;响应 code 缺省按 200,明确非 200 则
+  注册失败。客户端回 ACK 后再发送 `ackDiff`,不能以固定 sleep 代替注册确认。
 - 服务端推送需回 code=200 ACK(复用 mid/sid),否则连接可能被服务端关闭。
 - 实时数据位于 `body.syncPushPackage.data[*].data`,当前支持 Base64 JSON 与 MessagePack。
 

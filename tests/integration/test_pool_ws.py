@@ -10,7 +10,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
-from tests.integration.ws_test_support import cache_test_ws_token
+from tests.integration.ws_test_support import cache_test_ws_token, complete_test_registration
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Message, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
@@ -27,6 +27,7 @@ class FakeServer:
         self.connections.append(str(ws.remote_address))
         self._counter += 1
         try:
+            await complete_test_registration(ws)
             # Push one message immediately, then read until close.
             await ws.send(
                 json.dumps(

@@ -74,7 +74,7 @@ def _make_envelope(account_id, raw):  # noqa: ARG001
 def build_ack_frame(frame) -> dict | None:
     """为服务端推送构造 ACK;客户端主动帧和普通响应无需 ACK。"""
     headers = frame.headers if isinstance(frame.headers, dict) else {}
-    if not headers or (frame.code == 200 and frame.body is None):
+    if not headers:
         return None
     mid = headers.get("mid")
     sid = headers.get("sid")

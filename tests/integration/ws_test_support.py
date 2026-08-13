@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -29,3 +30,26 @@ async def cache_test_ws_token(
             )
         )
         await session.commit()
+
+
+async def complete_test_registration(ws) -> list[str]:
+    """Complete `/reg` confirmation and receive `ackDiff` for local WS tests."""
+    registration_text = await ws.recv()
+    registration = json.loads(registration_text)
+    assert registration["lwp"] == "/reg"
+    await ws.send(
+        json.dumps(
+            {
+                "code": 200,
+                "headers": {"mid": registration["headers"]["mid"], "sid": "test-session"},
+            }
+        )
+    )
+    ack_text = await ws.recv()
+    ack = json.loads(ack_text)
+    assert ack["code"] == 200
+    assert ack["headers"]["mid"] == registration["headers"]["mid"]
+    sync_text = await ws.recv()
+    sync = json.loads(sync_text)
+    assert sync["lwp"] == "/r/SyncStatus/ackDiff"
+    return [registration_text, ack_text, sync_text]

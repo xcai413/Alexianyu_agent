@@ -11,6 +11,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from tests.integration.ws_test_support import complete_test_registration
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Account, Message, Order, database as db_mod, get_async_session
 from xianyu_agent.db.models import OrderStatus
@@ -31,10 +32,7 @@ class FakeServer:
         try:
             if ws.request is not None:
                 self.request_headers = {k.lower(): v for k, v in ws.request.headers.items()}
-            registration = await ws.recv()
-            self.received.append(registration)
-            sync = await ws.recv()
-            self.received.append(sync)
+            self.received.extend(await complete_test_registration(ws))
             for f in self.frames:
                 await ws.send(json.dumps(f))
             async for msg in ws:
@@ -95,6 +93,7 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
     signer = CookieSigner()
     await signer.save_cookie("s-1", "unb=s-1; _m_h5_tk=fake_seed_token_xyz; cookie2=abc")
     received_events = []
+    received_frames = []
 
     async def on_event(ev):
         received_events.append(ev)
@@ -103,9 +102,13 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
         elif hasattr(ev, "order_id"):
             await do.upsert_from_event(ev)
 
+    async def on_frame(frame):
+        received_frames.append(frame)
+
     client = WsClient(
         "s-1",
         on_event=on_event,
+        on_frame=on_frame,
         config=ClientConfig(
             ws_url=url,
             heartbeat_interval_s=1.0,
@@ -130,8 +133,10 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
     assert any("lwp" in m for m in server.received), f"received={server.received}"
     decoded = [json.loads(message) for message in server.received]
     assert decoded[0]["lwp"] == "/reg"
-    assert decoded[1]["lwp"] == "/r/SyncStatus/ackDiff"
+    assert decoded[1]["code"] == 200
+    assert decoded[2]["lwp"] == "/r/SyncStatus/ackDiff"
     assert any(message.get("code") == 200 for message in decoded)
+    assert any(frame.headers.get("mid") == decoded[0]["headers"]["mid"] for frame in received_frames)
     assert any(isinstance(e, MessageReceived) for e in received_events), f"events={received_events}"
     assert any(isinstance(e, OrderPaid) for e in received_events), f"events={received_events}"
     async with get_async_session() as session:

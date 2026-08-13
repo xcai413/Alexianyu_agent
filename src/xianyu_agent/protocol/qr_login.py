@@ -227,6 +227,8 @@ class QRLoginClient:
         # Windows/AnyIO TLS occasionally hangs while synchronous httpx succeeds.
         # Keep the fallback bounded and carry only the response cookies forward.
         try:
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.setdefault("cookies", dict(client.cookies))
             return await asyncio.wait_for(
                 asyncio.to_thread(
                     partial(
@@ -235,7 +237,7 @@ class QRLoginClient:
                         url,
                         timeout=self._timeout_s,
                         follow_redirects=True,
-                        **kwargs,
+                        **fallback_kwargs,
                     )
                 ),
                 timeout=self._timeout_s + 2.0,
