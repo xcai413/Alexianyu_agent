@@ -1,7 +1,7 @@
 """SQLAlchemy 2.0 ORM 模型 — 14 张表。
 
 四类:
-  - 身份类: Account / Cookie / WorkerStatus / DaemonInstance / WorkerCommand
+  - 身份类: Account / Cookie / WsCredential / WorkerStatus / DaemonInstance / WorkerCommand
   - 业务类: Item / Message / Order / Card / CardConsumption / ReplyRule
   - 日志类: ReplyLog / TaskLog / AuditLog
 
@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -182,6 +183,9 @@ class Account(Base):
     cookies: Mapped[list[Cookie]] = relationship(
         back_populates="account", cascade="all, delete-orphan"
     )
+    ws_credential: Mapped[WsCredential | None] = relationship(
+        back_populates="account", cascade="all, delete-orphan", uselist=False
+    )
     messages: Mapped[list[Message]] = relationship(back_populates="account")
     orders: Mapped[list[Order]] = relationship(back_populates="account")
     cards: Mapped[list[Card]] = relationship(back_populates="account")
@@ -225,6 +229,31 @@ class Cookie(Base):
 
     def __repr__(self) -> str:
         return f"<Cookie account_id={self.account_id}>"
+
+
+class WsCredential(Base):
+    """闲鱼 IM Access Token 与稳定设备 ID;Token 仅保存 Fernet 密文。"""
+
+    __tablename__ = "ws_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account: Mapped[Account] = relationship(back_populates="ws_credential")
 
 
 class WorkerStatus(Base):
@@ -330,7 +359,8 @@ class Message(Base):
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
     )
     chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    message_id: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     sender_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sender_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     direction: Mapped[str] = mapped_column(
@@ -345,6 +375,7 @@ class Message(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     account: Mapped[Account] = relationship(back_populates="messages")
@@ -352,6 +383,7 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_account_received", "account_id", "received_at"),
         Index("ix_messages_chat_received", "chat_id", "received_at"),
+        UniqueConstraint("account_id", "message_id", name="uq_messages_account_message"),
     )
 
 

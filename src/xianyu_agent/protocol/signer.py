@@ -66,7 +66,14 @@ def extract_mtop_token(cookie: str) -> str | None:
     The platform has used both ``_m_h5_tk`` and ``m_h5_tk`` in different
     flows. Callers receive only the value in memory and must never log it.
     """
-    return _extract_field(cookie, "_m_h5_tk") or _extract_field(cookie, "m_h5_tk")
+    return extract_cookie_field(cookie, "_m_h5_tk") or extract_cookie_field(
+        cookie, "m_h5_tk"
+    )
+
+
+def extract_cookie_field(cookie: str, name: str, *, prefix_only: bool = False) -> str | None:
+    """从 Cookie header 中读取一个字段;调用方不得记录返回的敏感值。"""
+    return _extract_field(cookie, name, prefix_only=prefix_only)
 
 
 def make_headers(m_h5_tk: str, *, data: str = "") -> MtopHeaders:
@@ -106,7 +113,7 @@ class CookieSigner:
                 select(Cookie)
                 .join(Account, Account.id == Cookie.account_id)
                 .where(Account.account_id == account_id)
-                .order_by(Cookie.updated_at.desc())
+                .order_by(Cookie.updated_at.desc(), Cookie.id.desc())
                 .limit(1)
             )
             row = (await session.execute(stmt)).scalar_one_or_none()

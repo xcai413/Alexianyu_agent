@@ -10,6 +10,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from tests.integration.ws_test_support import cache_test_ws_token
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Message, ReplyLog, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts, rules as domain_rules
@@ -66,6 +67,7 @@ async def test_auto_reply_roundtrip(
     monkeypatch.setenv("XIANYU_DB_PATH", str(db))
     monkeypatch.setenv("XIANYU_FERNET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("XIANYU_WS_URL", url)
+    monkeypatch.setenv("XIANYU_AUTOMATION_MODE", "active")
     reset_settings_cache()
     db_mod.reset_engine()
     await db_mod.init_db()
@@ -73,6 +75,7 @@ async def test_auto_reply_roundtrip(
     await domain_accounts.create_account("acc-r", enabled=True)
     signer = CookieSigner()
     await signer.save_cookie("acc-r", "unb=acc-r; _m_h5_tk=seed_r_xyz; cookie2=abc")
+    await cache_test_ws_token("acc-r", signer)
     await domain_rules.create_rule(
         "在吗规则",
         "keyword",

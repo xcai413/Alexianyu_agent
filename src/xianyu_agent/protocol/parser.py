@@ -15,6 +15,9 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
+
+import msgpack
 
 from xianyu_agent.protocol.events import (
     ConnectionState,
@@ -68,6 +71,57 @@ def _make_envelope(account_id, raw):  # noqa: ARG001
     return uuid.uuid4().hex, datetime.now(UTC)
 
 
+def build_ack_frame(frame) -> dict | None:
+    """为服务端推送构造 ACK;客户端主动帧和普通响应无需 ACK。"""
+    headers = frame.headers if isinstance(frame.headers, dict) else {}
+    if not headers or (frame.code == 200 and frame.body is None):
+        return None
+    mid = headers.get("mid")
+    sid = headers.get("sid")
+    if not mid and not sid:
+        return None
+    ack_headers = {"mid": str(mid or _fallback_mid()), "sid": str(sid or "")}
+    for key in ("app-key", "ua", "dt"):
+        if key in headers:
+            ack_headers[key] = headers[key]
+    return {"code": 200, "headers": ack_headers}
+
+
+def unpack_sync_payloads(frame) -> list[dict]:
+    """解包 `body.syncPushPackage.data[*].data`,支持 Base64 JSON/MessagePack。"""
+    body = _decode_body(frame.body)
+    if not isinstance(body, dict):
+        return []
+    package = body.get("syncPushPackage")
+    if not isinstance(package, dict) or not isinstance(package.get("data"), list):
+        return []
+    payloads = []
+    for entry in package["data"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("data"), str):
+            continue
+        decoded = _decode_sync_data(entry["data"])
+        if isinstance(decoded, dict):
+            payloads.append(decoded)
+    return payloads
+
+
+def _decode_sync_data(value: str) -> dict | None:
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except ValueError:
+        return None
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    try:
+        decoded = msgpack.unpackb(raw, raw=False, strict_map_key=False)
+    except (ValueError, TypeError, msgpack.ExtraData, msgpack.FormatError, msgpack.StackError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
 def _truncate_raw(raw, *, limit=4096):
     if raw is None:
         return None
@@ -105,6 +159,8 @@ def _parse_message(payload, *, account_id, direction, raw):
         else None,
         "content_type": content_type,
         "content": content,
+        "item_id": _extract_item_id(payload),
+        "sent_at": _timestamp_from_ms(ts_id.get("time")) if isinstance(ts_id, dict) else None,
     }
     extra = payload.get(KEY_EXTRA)
     image_url = None
@@ -120,6 +176,52 @@ def _parse_message(payload, *, account_id, direction, raw):
         )
     receiver = str(payload.get(KEY_RECEIVER) or "")
     return MessageSent(**common, receiver_id=receiver or "unknown")
+
+
+def _parse_live_message(payload, *, account_id, account_user_id, raw):
+    """解析闲鱼 syncPushPackage 内的标准聊天结构。"""
+    message_1 = payload.get("1")
+    if not isinstance(message_1, dict):
+        return None
+    meta = message_1.get("10")
+    if not isinstance(meta, dict):
+        return None
+    content = str(meta.get("reminderContent") or "")
+    chat_id = _strip_domain(message_1.get("2"))
+    sender_id = str(meta.get("senderUserId") or "")
+    if not content or not chat_id or not sender_id:
+        return None
+    if _is_system_tip(meta):
+        event_id, received_at = _make_envelope(account_id, raw)
+        return SystemNotice(
+            event_id=event_id,
+            account_id=account_id,
+            received_at=received_at,
+            raw=_truncate_raw(raw),
+            notice_type="system_tip",
+            content=content,
+        )
+
+    event_id, received_at = _make_envelope(account_id, raw)
+    common = {
+        "event_id": event_id,
+        "account_id": account_id,
+        "received_at": received_at,
+        "raw": _truncate_raw(raw),
+        "chat_id": chat_id,
+        "message_id": _extract_message_id(meta),
+        "item_id": _extract_item_id(meta),
+        "sent_at": _timestamp_from_ms(message_1.get("5")),
+        "content_type": _content_type(content),
+        "content": content,
+    }
+    if account_user_id and sender_id == account_user_id:
+        return MessageSent(**common, receiver_id="unknown")
+    return MessageReceived(
+        **common,
+        sender_id=sender_id,
+        sender_name=str(meta.get("senderNick") or meta.get("reminderTitle") or "") or None,
+    )
 
 
 def _parse_order(payload, *, account_id, raw, kind):
@@ -194,7 +296,23 @@ def _parse_system(payload, *, account_id, raw):
     )
 
 
-def parse_frame(frame, account_id):
+def parse_frame(  # noqa: PLR0912
+    frame, account_id, *, account_user_id: str | None = None
+):
+    sync_payloads = unpack_sync_payloads(frame)
+    if sync_payloads:
+        events = []
+        for payload in sync_payloads:
+            raw = {"code": frame.code, "headers": frame.headers, "body": payload}
+            event = _parse_live_message(
+                payload,
+                account_id=account_id,
+                account_user_id=account_user_id,
+                raw=raw,
+            )
+            if event is not None:
+                events.append(event)
+        return events
     body = _decode_body(frame.body)
     if body is None:
         logger.debug("skipping frame with undecodable body (code=%s)", frame.code)
@@ -230,6 +348,63 @@ def parse_frame(frame, account_id):
         return events
     logger.debug("unhandled bizType=%r keys=%s", biz, list(body.keys())[:10])
     return events
+
+
+def _extract_json_object(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _extract_message_id(meta: dict) -> str | None:
+    for field in ("bizTag", "extJson"):
+        value = _extract_json_object(meta.get(field))
+        if value.get("messageId"):
+            return str(value["messageId"])
+    return None
+
+
+def _extract_item_id(meta: dict) -> str | None:
+    url = str(meta.get("reminderUrl") or "")
+    if url:
+        query = parse_qs(urlparse(url).query)
+        if query.get("itemId"):
+            return str(query["itemId"][0])
+    for field in ("bizTag", "extJson"):
+        value = _extract_json_object(meta.get(field))
+        if value.get("itemId"):
+            return str(value["itemId"])
+    return None
+
+
+def _timestamp_from_ms(value) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC) if value else None
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _strip_domain(value) -> str:
+    return str(value or "").split("@", 1)[0]
+
+
+def _content_type(content: str) -> MessageContentType:
+    return MessageContentType.CARD if content == "[卡片消息]" else MessageContentType.TEXT
+
+
+def _is_system_tip(meta: dict) -> bool:
+    ext = _extract_json_object(meta.get("extJson"))
+    return str(ext.get("msgArg1") or "") == "MsgTips"
+
+
+def _fallback_mid() -> str:
+    return f"{uuid.uuid4().int % 1000}{int(datetime.now(UTC).timestamp() * 1000)} 0"
 
 
 def parse_error(account_id, code, message):

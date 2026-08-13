@@ -49,7 +49,10 @@ token 由 _m_h5_tk 字段拆分得到:
 
       {"lwp": "/!", "headers": {"mid": "<随机3位><毫秒时间戳> 0"}}
 
-- 连接建立后需发初始化握手帧(当前实现未接,联调确认后补)。
+- 连接建立后必须先获取 IM `accessToken`,发送 `/reg`,随后发送
+  `/r/SyncStatus/ackDiff`;当前实现完成这两帧后才标记 connected。
+- 服务端推送需回 code=200 ACK(复用 mid/sid),否则连接可能被服务端关闭。
+- 实时数据位于 `body.syncPushPackage.data[*].data`,当前支持 Base64 JSON 与 MessagePack。
 
 消息推送帧格式 (以下结构为常见约定,实际以抓包为准):
 

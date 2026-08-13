@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+
+from xianyu_agent.config import get_settings
+from xianyu_agent.db import Account, AuditLog, get_async_session
 from xianyu_agent.domain import messages as domain_messages, orders as domain_orders
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
@@ -19,6 +23,7 @@ from xianyu_agent.protocol.events import (
     OrderCreated,
     OrderDelivered,
     OrderPaid,
+    SystemNotice,
 )
 from xianyu_agent.services.delivery_service import DeliveryService
 from xianyu_agent.services.guardrails import Guardrails, write_guardrail_event
@@ -35,21 +40,27 @@ class AccountWorker:
         reply_engine: ReplyEngine | None = None,
         delivery_service: DeliveryService | None = None,
         guardrails: Guardrails | None = None,
+        automation_mode: str | None = None,
     ) -> None:
         self.account_id = account_id
         self.started_at: datetime | None = None
         self._reply_engine = reply_engine
         self._delivery_service = delivery_service
         self._guardrails = guardrails
+        self._automation_mode = automation_mode or get_settings().automation_mode
         self._client = client or WsClient(
             account_id,
             on_event=self._on_event if persist_events else None,
         )
-        if self._guardrails is None:
+        if self._guardrails is None and self._automation_mode == "active":
             self._guardrails = Guardrails()
-        if self._reply_engine is None and persist_events:
+        if self._reply_engine is None and persist_events and self._automation_mode == "active":
             self._reply_engine = ReplyEngine(sender=self._send_reply)
-        if self._delivery_service is None and persist_events:
+        if (
+            self._delivery_service is None
+            and persist_events
+            and self._automation_mode == "active"
+        ):
             self._delivery_service = DeliveryService(
                 sender=self._send_reply, guardrails=self._guardrails
             )
@@ -74,6 +85,32 @@ class AccountWorker:
             await domain_orders.upsert_from_event(event)
             if isinstance(event, OrderPaid) and self._delivery_service is not None:
                 await self._delivery_service.deliver(event)
+        elif isinstance(event, SystemNotice):
+            await self._record_system_notice(event)
+
+    async def _record_system_notice(self, event: SystemNotice) -> None:
+        """系统提示单独入审计日志,永不进入买家消息自动化。"""
+        async with get_async_session() as session:
+            account = (
+                await session.execute(
+                    select(Account).where(Account.account_id == event.account_id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if account is None:
+                return
+            session.add(
+                AuditLog(
+                    actor="system",
+                    action="protocol.system_notice",
+                    target=event.account_id,
+                    params={
+                        "notice_type": event.notice_type,
+                        "content": event.content[:500],
+                    },
+                    result="observed",
+                )
+            )
+            await session.commit()
 
     async def _send_reply(self, _account_id: str, _chat_id: str, text: str) -> bool:
         """Best-effort send over the WS client.

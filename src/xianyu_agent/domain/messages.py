@@ -30,7 +30,12 @@ async def upsert_inbound(event: MessageReceived) -> int | None:
         if event.message_id:
             existing = (
                 await session.execute(
-                    select(Message).where(Message.message_id == event.message_id).limit(1)
+                    select(Message)
+                    .where(
+                        Message.account_id == account.id,
+                        Message.message_id == event.message_id,
+                    )
+                    .limit(1)
                 )
             ).scalar_one_or_none()
             if existing is not None:
@@ -39,6 +44,7 @@ async def upsert_inbound(event: MessageReceived) -> int | None:
             account_id=account.id,
             chat_id=event.chat_id,
             message_id=event.message_id,
+            item_id=event.item_id,
             sender_id=event.sender_id,
             sender_name=event.sender_name,
             direction=MessageDirection.INBOUND.value,
@@ -49,6 +55,7 @@ async def upsert_inbound(event: MessageReceived) -> int | None:
             image_url=event.image_url,
             raw_payload=event.raw,
             received_at=event.received_at,
+            sent_at=event.sent_at,
         )
         session.add(msg)
         await session.commit()
@@ -66,6 +73,7 @@ async def record_outbound(event: MessageSent) -> int | None:
             account_id=account.id,
             chat_id=event.chat_id,
             message_id=event.message_id,
+            item_id=event.item_id,
             sender_id=event.account_id,
             sender_name=None,
             direction=MessageDirection.OUTBOUND.value,
@@ -74,6 +82,7 @@ async def record_outbound(event: MessageSent) -> int | None:
             else str(event.content_type),
             content=event.content,
             received_at=event.received_at,
+            sent_at=event.sent_at,
         )
         session.add(msg)
         await session.commit()

@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = ""
     reply_mode: Literal["rule", "rule_then_ai", "ai"] = "rule"
+    automation_mode: Literal["observe", "active"] = "observe"
 
     # === guardrails ===
     guardrail_max_msg_per_hour: int = 60

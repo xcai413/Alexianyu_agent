@@ -41,8 +41,14 @@ from xianyu_agent.protocol.events import (
     EventEnvelope,
     WsFrame,
 )
-from xianyu_agent.protocol.parser import parse_frame
+from xianyu_agent.protocol.parser import build_ack_frame, parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws_auth import (
+    WsAuthError,
+    WsTokenProvider,
+    build_registration_frame,
+    build_sync_frame,
+)
 
 logger = logging.getLogger(__name__)
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
@@ -72,6 +78,8 @@ class ClientConfig:
     heartbeat_builder: Callable[[], str] = _default_heartbeat
     min_backoff_s: float = MIN_BACKOFF_S
     max_backoff_s: float = MAX_BACKOFF_S
+    registration_delay_s: float = 1.0
+    auth_retry_delay_s: float = 300.0
 
     @classmethod
     def from_settings(cls) -> ClientConfig:
@@ -98,10 +106,12 @@ class WsClient:
         on_error: ErrorHandler | None = None,
         config: ClientConfig | None = None,
         signer: CookieSigner | None = None,
+        token_provider: WsTokenProvider | None = None,
     ) -> None:
         self.account_id = account_id
         self.config = config or ClientConfig.from_settings()
         self.signer = signer or CookieSigner()
+        self.token_provider = token_provider or WsTokenProvider(self.signer)
         self.on_event = on_event
         self.on_state = on_state
         self.on_error = on_error
@@ -111,6 +121,7 @@ class WsClient:
         self._socket: Any | None = None
         self._injected_queue: asyncio.Queue | None = None
         self._reconnect_attempts = 0
+        self._account_user_id: str | None = None
 
     @property
     def state(self) -> ConnectionState:
@@ -232,6 +243,7 @@ class WsClient:
                     await self._emit_state(ConnectionState.ERROR, "XIANYU_WS_URL not configured")
                     await self._sleep_or_stop(5.0)
                     continue
+                retry_delay: float | None = None
                 try:
                     await self._connect_and_serve()
                 except asyncio.CancelledError:
@@ -240,16 +252,19 @@ class WsClient:
                     self._reconnect_attempts += 1
                     msg = f"{type(exc).__name__}: {exc}"
                     logger.warning("ws loop error account=%s %s", self.account_id, msg)
+                    auth_failure = isinstance(exc, WsAuthError)
                     new_state = (
-                        ConnectionState.RECONNECTING
-                        if self._reconnect_attempts < 5
-                        else ConnectionState.ERROR
+                        ConnectionState.ERROR
+                        if auth_failure or self._reconnect_attempts >= 5
+                        else ConnectionState.RECONNECTING
                     )
+                    if auth_failure:
+                        retry_delay = self.config.auth_retry_delay_s
                     await self._emit_state(new_state, msg)
-                    await self._emit_error("ws_loop", msg)
+                    await self._emit_error("ws_auth" if auth_failure else "ws_loop", msg)
                 if self._stop.is_set():
                     break
-                backoff = self._compute_backoff()
+                backoff = retry_delay if retry_delay is not None else self._compute_backoff()
                 await self._sleep_or_stop(backoff)
         finally:
             await self._emit_state(ConnectionState.DISCONNECTED, "loop exited")
@@ -275,6 +290,7 @@ class WsClient:
         except ImportError as exc:  # pragma: no cover
             msg = "websockets package is required for live connections"
             raise RuntimeError(msg) from exc
+        credentials = await self.token_provider.get_credentials(self.account_id)
         cookie_value = await self.signer.load_cookie_value(self.account_id)
         if not cookie_value:
             msg = f"no cookie for account={self.account_id}"
@@ -286,7 +302,13 @@ class WsClient:
             ping_interval=None,
             ping_timeout=None,
         ) as ws:
+            await ws.send(json.dumps(build_registration_frame(credentials)))
+            await self._sleep_or_stop(self.config.registration_delay_s)
+            if self._stop.is_set():
+                return
+            await ws.send(json.dumps(build_sync_frame()))
             self._socket = ws
+            self._account_user_id = credentials.user_id
             self._reconnect_attempts = 0
             await self._emit_state(ConnectionState.CONNECTED)
             await self._serve(ws)
@@ -360,8 +382,13 @@ class WsClient:
             logger.debug("non-JSON frame skipped: length=%d", len(raw))
             return
         frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
+        ack = build_ack_frame(frame)
+        if ack is not None and self._socket is not None:
+            await self._socket.send(json.dumps(ack))
         await self._handle_frame(frame)
 
     async def _handle_frame(self, frame: WsFrame) -> None:
-        for event in parse_frame(frame, self.account_id):
+        for event in parse_frame(
+            frame, self.account_id, account_user_id=self._account_user_id
+        ):
             await self._emit_event(event)

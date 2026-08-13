@@ -7,6 +7,7 @@ import hashlib
 import json
 from datetime import datetime
 
+import msgpack
 import pytest
 
 from xianyu_agent.protocol.events import (
@@ -17,7 +18,14 @@ from xianyu_agent.protocol.events import (
     OrderDelivered,
     WsFrame,
 )
-from xianyu_agent.protocol.parser import _decode_body, parse_error, parse_frame, parse_state_change
+from xianyu_agent.protocol.parser import (
+    _decode_body,
+    build_ack_frame,
+    parse_error,
+    parse_frame,
+    parse_state_change,
+    unpack_sync_payloads,
+)
 from xianyu_agent.protocol.signer import (
     APP_KEY,
     MtopHeaders,
@@ -109,6 +117,94 @@ def test_parser_handles_base64_body() -> None:
     events = parse_frame(raw, "seller-1")
     assert len(events) == 1
     assert events[0].content == "from base64"
+
+
+def _sync_frame(payload: dict, *, use_msgpack: bool = False) -> WsFrame:
+    raw = (
+        msgpack.packb(payload, use_bin_type=True)
+        if use_msgpack
+        else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    )
+    encoded = base64.b64encode(raw).decode("ascii")
+    return WsFrame(
+        headers={"mid": "push-mid", "sid": "push-sid", "app-key": "app"},
+        body={"syncPushPackage": {"data": [{"data": encoded}]}},
+    )
+
+
+def test_sync_push_json_maps_real_chat_fields() -> None:
+    payload = {
+        "1": {
+            "2": "chat-real@goofish",
+            "5": 1700000000000,
+            "10": {
+                "senderUserId": "buyer-real",
+                "senderNick": "真实买家",
+                "reminderContent": "真实问价",
+                "reminderUrl": "https://www.goofish.com/item?id=x&itemId=ITEM-9",
+                "bizTag": '{"messageId":"MSG-9"}',
+            },
+        }
+    }
+    events = parse_frame(_sync_frame(payload), "alias", account_user_id="seller-unb")
+    assert len(events) == 1
+    event = events[0]
+    assert event.chat_id == "chat-real"
+    assert event.message_id == "MSG-9"
+    assert event.item_id == "ITEM-9"
+    assert event.sender_id == "buyer-real"
+    assert event.sender_name == "真实买家"
+    assert event.content == "真实问价"
+    assert event.sent_at is not None
+    assert event.received_at >= event.sent_at
+
+
+def test_sync_push_msgpack_and_outbound_direction() -> None:
+    payload = {
+        "1": {
+            "2": "chat-msgpack@goofish",
+            "10": {
+                "senderUserId": "seller-unb",
+                "reminderContent": "卖家回复",
+                "extJson": '{"messageId":"MSG-MP","itemId":"ITEM-MP"}',
+            },
+        }
+    }
+    frame = _sync_frame(payload, use_msgpack=True)
+    assert unpack_sync_payloads(frame) == [payload]
+    events = parse_frame(frame, "alias", account_user_id="seller-unb")
+    assert len(events) == 1
+    assert events[0].direction == MessageDirection.OUTBOUND
+    assert events[0].message_id == "MSG-MP"
+
+
+def test_sync_system_tip_is_not_buyer_message() -> None:
+    payload = {
+        "1": {
+            "2": "chat-tip@goofish",
+            "10": {
+                "senderUserId": "platform",
+                "reminderContent": "活动提醒",
+                "extJson": '{"msgArg1":"MsgTips"}',
+            },
+        }
+    }
+    events = parse_frame(_sync_frame(payload), "alias", account_user_id="seller-unb")
+    assert len(events) == 1
+    assert events[0].notice_type == "system_tip"
+
+
+def test_push_ack_preserves_correlation_headers() -> None:
+    frame = _sync_frame({"1": {}})
+    ack = build_ack_frame(frame)
+    assert ack == {
+        "code": 200,
+        "headers": {"mid": "push-mid", "sid": "push-sid", "app-key": "app"},
+    }
+    assert build_ack_frame(WsFrame(code=200, headers={"mid": "x"})) is None
+    push_with_code_200 = _sync_frame({"1": {}})
+    push_with_code_200.code = 200
+    assert build_ack_frame(push_with_code_200) is not None
 
 
 def test_parser_order_paid() -> None:

@@ -10,6 +10,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from tests.integration.ws_test_support import cache_test_ws_token
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import (
     Card,
@@ -75,6 +76,7 @@ async def test_order_paid_triggers_delivery(
     monkeypatch.setenv("XIANYU_DB_PATH", str(db))
     monkeypatch.setenv("XIANYU_FERNET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("XIANYU_WS_URL", url)
+    monkeypatch.setenv("XIANYU_AUTOMATION_MODE", "active")
     reset_settings_cache()
     db_mod.reset_engine()
     await db_mod.init_db()
@@ -82,6 +84,7 @@ async def test_order_paid_triggers_delivery(
     await domain_accounts.create_account("acc-d", enabled=True)
     signer = CookieSigner()
     await signer.save_cookie("acc-d", "unb=acc-d; _m_h5_tk=seed_d_xyz; cookie2=abc")
+    await cache_test_ws_token("acc-d", signer)
     card = await domain_cards.create_card("acc-d", "虚拟卡", "DEL-CODE-1\nDEL-CODE-2", type_="text")
 
     pool = await AccountPool.from_enabled_accounts()
