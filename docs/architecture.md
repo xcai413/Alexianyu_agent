@@ -83,7 +83,7 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 P0.1 已引入单实例 `RuntimeDaemon`,由它持有长期 WS 连接。P0.2 已加入账号级控制面:
 
 ```text
-daemon / service / pool CLI       (P0.1-P0.3 已实现)
+daemon / service / pool / doctor CLI (P0.1-P0.4 已实现)
        │
        ▼
 SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker × N ──> 闲鱼 WS
@@ -91,7 +91,7 @@ SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker
                          └── Windows 主任务 + 每分钟 Watchdog:启动与失败恢复
 ```
 
-TUI/MCP 接入 daemon 总控制面与 `doctor` 仍属于 P0.4。
+TUI 已接入 daemon 总状态和 Worker 状态差异;MCP 的 daemon 总控制面仍留待后续接口阶段。
 
 当前已实现:
 
@@ -110,9 +110,12 @@ TUI/MCP 接入 daemon 总控制面与 `doctor` 仍属于 P0.4。
 - `data/runtime/service.paused`:人工 `service stop` 的暂停门,避免 Watchdog 将明确停机当作故障。
 - daemon 健康判定由数据库状态、90 秒心跳阈值和 PID 三项共同决定,供 CLI、pool 和
   Watchdog 复用。
+- `services/observability.py` 从 SQLite 构造 daemon 与账号 Worker 的统一运行快照;
+  `daemon status`、`doctor` 和 TUI 共用,避免跨进程界面伪造内存 Worker 状态。
+- `doctor` 只读检查数据库写锁、Alembic head、Fernet、Cookie 可解密性、日志目录、
+  daemon 单实例、账号状态漂移与 Windows 双任务;不打印明文 Cookie/Token。
 
-尚未实现(P0.4-P0.5):`doctor`、TUI daemon 总状态和完整真实长稳
-验收。详细顺序见 `docs/开发计划.md`。
+尚未完成(P0.5):断网、Windows 重启和完整真实长稳验收。详细顺序见 `docs/开发计划.md`。
 
 ## 已知边界(如实)
 

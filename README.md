@@ -30,7 +30,8 @@ Windows 重启恢复、断网恢复和 24 小时长稳仍未验收。
 完整阶段顺序与验收标准见 [`docs/开发计划.md`](docs/开发计划.md),已完成证据见
 [`docs/验证记录.md`](docs/验证记录.md)。
 
-P0.1-P0.3 已实现。开发时可前台运行 daemon;Windows 无人值守使用 `service`:
+P0.1-P0.4 已实现。开发时可前台运行 daemon;Windows 常驻使用 `service`,健康诊断使用
+`doctor`:
 
 ```powershell
 uv run alembic upgrade head
@@ -42,6 +43,8 @@ uv run xianyu-agent service install --startup user --start-now
 uv run xianyu-agent service status
 uv run xianyu-agent service stop
 uv run xianyu-agent service start
+uv run xianyu-agent doctor
+uv run xianyu-agent doctor --output json
 ```
 
 daemon 运行后,可在其他终端跨进程控制单个账号:

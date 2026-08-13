@@ -19,7 +19,9 @@ from textual.widgets import Footer, Header, Static
 from xianyu_agent.db import AuditLog, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts, items as domain_items
 from xianyu_agent.services.guardrails import recent_guardrail_events
+from xianyu_agent.services.observability import build_runtime_snapshot
 from xianyu_agent.tui.widgets import AccountsPanel, CardsPanel, MessagesPanel, OrdersPanel
+from xianyu_agent.utils.time_utils import format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,9 @@ class DashboardApp(App):
         Binding("r", "refresh_now", "刷新"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, *, refresh_seconds: float = REFRESH_SECONDS) -> None:
         super().__init__()
+        self.refresh_seconds = refresh_seconds
         self.emergency = False
         self._status: Static | None = None
         self._risk: Static | None = None
@@ -57,36 +60,45 @@ class DashboardApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.set_interval(REFRESH_SECONDS, self.refresh_dashboard)
+        self.set_interval(self.refresh_seconds, self.refresh_dashboard)
         await self.refresh_dashboard()
 
     async def refresh_dashboard(self) -> None:
         """Query all four panels and update the status line."""
         try:
             accounts = await domain_accounts.list_accounts()
+            snapshot = await build_runtime_snapshot()
             account_ids = [a.account_id for a in accounts]
             on_sale_total = 0
             for account_id in account_ids:
                 on_sale_total += len(
                     await domain_items.list_items(account_id, on_sale_only=True)
                 )
-            await self.query_one(AccountsPanel).reload()
+            await self.query_one(AccountsPanel).reload(snapshot)
             await self.query_one(MessagesPanel).reload(account_ids)
             await self.query_one(OrdersPanel).reload(account_ids)
             await self.query_one(CardsPanel).reload(account_ids)
             now = datetime.now(UTC).strftime("%H:%M:%S")
             mode = "紧急暂停" if self.emergency else "正常"
+            daemon = snapshot.daemon_health.observed
             self._status.update(
-                f"账号 {len(account_ids)}  |  在售商品 {on_sale_total}  |  "
-                f"模式: {mode}  |  刷新: {now}"
+                f"daemon: {daemon} ({format_duration(snapshot.daemon_uptime_s)})  |  "
+                f"账号 {len(account_ids)}  |  漂移 {len(snapshot.drifted_accounts)}  |  "
+                f"在售商品 {on_sale_total}  |  模式: {mode}  |  刷新: {now}"
             )
             events = await recent_guardrail_events(limit=5)
+            alerts = snapshot.operational_alerts
+            banners: list[str] = []
+            if alerts:
+                banners.append(f"运行告警: {'; '.join(alerts[:3])}")
             if events:
                 latest = events[0]
-                self._risk.update(
-                    f"[red]风险: {latest['account_id']} ({latest['rule']}) "
-                    f"{latest['detail']} @ {latest['at']}[/red]"
+                banners.append(
+                    f"风险: {latest['account_id']} ({latest['rule']}) "
+                    f"{latest['detail']} @ {latest['at']}"
                 )
+            if banners:
+                self._risk.update(f"[red]{' | '.join(banners)}[/red]")
             else:
                 self._risk.update("")
         except Exception as exc:

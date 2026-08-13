@@ -13,7 +13,7 @@ from xianyu_agent.domain import (
     messages as domain_messages,
     orders as domain_orders,
 )
-from xianyu_agent.services.account_pool import AccountPool
+from xianyu_agent.services.observability import RuntimeSnapshot, build_runtime_snapshot
 from xianyu_agent.utils.time_utils import to_local
 
 
@@ -25,21 +25,21 @@ class AccountsPanel(DataTable):
         self.cursor_type = "row"
 
     async def on_mount(self) -> None:
-        self.add_columns("账号", "启用", "worker", "db", "重连", "最后心跳", "错误")
+        self.add_columns("账号", "启用", "期望", "实际", "一致", "心跳(s)", "错误")
 
-    async def reload(self) -> None:
-        rows = await AccountPool().status()
+    async def reload(self, snapshot: RuntimeSnapshot | None = None) -> None:
+        runtime = snapshot or await build_runtime_snapshot()
         self.clear()
-        for r in rows:
+        for row in runtime.accounts:
             self.add_row(
-                r["account_id"],
-                "Y" if r["enabled"] else "N",
-                r["worker_state"],
-                r["db_status"],
-                str(r["reconnect_attempts"]),
-                (r["last_heartbeat_at"] or "-")[:19],
-                (r["last_error"] or "-")[:30],
-                key=r["account_id"],
+                row.account_id,
+                "Y" if row.enabled else "N",
+                row.desired_state,
+                row.actual_state,
+                "Y" if row.aligned else "N",
+                f"{row.heartbeat_age_s:.0f}" if row.heartbeat_age_s is not None else "-",
+                (row.last_error or row.issue or "-")[:30],
+                key=row.account_id,
             )
 
 

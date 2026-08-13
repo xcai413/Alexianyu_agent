@@ -82,8 +82,8 @@ uv run alembic upgrade head
 
 ## 当前阶段
 
-当前 P0.1-P0.3 已实现,P0-C 强杀恢复已通过;下一步是 `docs/开发计划.md` 的 P0.4
-可观测性与 P0.5 剩余真实验收。
-Windows `service` 与 `doctor` 目前仍是规划命令,不得写成现有能力。
+当前 P0.1-P0.4 已实现,P0-C 强杀恢复已通过;下一步是 `docs/开发计划.md` 的 P0.5
+剩余真实验收。Windows `service` 与 `doctor` 均为现有命令;P0 尚未通过 Windows 重启、
+断网和 24 小时长稳,不得写成完整无人值守已验收。
 查看 `docs/architecture.md` 与本文件顶部的"仓库结构速查"对齐。
 每个 Phase 的验证证据记录在 `docs/验证记录.md`;测试套件为最新权威证据(`uv run pytest -q`)。

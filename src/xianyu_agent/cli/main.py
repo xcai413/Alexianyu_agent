@@ -12,6 +12,7 @@ Subcommand groups:
   - pool      账号池管理 (Phase 2 起)
   - daemon    常驻运行与进程级控制 (P0.1)
   - service   Windows 任务计划与失败恢复 (P0.3)
+  - doctor    本地健康检查 (P0.4)
   - dashboard Textual 驾驶舱 (Phase 5 起)
   - mcp       MCP Server (Phase 6 起)
 """
@@ -31,6 +32,7 @@ from xianyu_agent.cli.commands import (
     card as card_cmd,
     daemon as daemon_cmd,
     dashboard as dashboard_cmd,
+    doctor as doctor_cmd,
     item as item_cmd,
     maintenance as maintenance_cmd,
     mcp as mcp_cmd,
@@ -55,6 +57,7 @@ app.add_typer(account_cmd.app, name="account")
 app.add_typer(card_cmd.app, name="card")
 app.add_typer(dashboard_cmd.app, name="dashboard")
 app.add_typer(daemon_cmd.app, name="daemon")
+app.command(name="doctor")(doctor_cmd.doctor)
 app.add_typer(item_cmd.app, name="item")
 app.add_typer(maintenance_cmd.app, name="maintenance")
 app.add_typer(mcp_cmd.app, name="mcp")

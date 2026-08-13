@@ -23,3 +23,16 @@ def format_local(dt: datetime | None) -> str:
     if dt is None:
         return ""
     return to_local(dt).isoformat(timespec="seconds")
+
+
+def format_duration(seconds: float | None) -> str:
+    """把秒数格式化为紧凑且稳定的运行时长。"""
+    if seconds is None:
+        return "-"
+    total = max(0, int(seconds))
+    days, remainder = divmod(total, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, secs = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
