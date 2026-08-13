@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,9 +21,11 @@ from xianyu_agent.config import get_settings
 from xianyu_agent.db import get_async_session
 from xianyu_agent.db.models import WorkerStatus as DbWorkerStatus
 from xianyu_agent.domain import (
+    accounts as domain_accounts,
     messages as domain_messages,
     orders as domain_orders,
 )
+from xianyu_agent.protocol.capture import CalibrationRecorder
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
     MessageReceived,
@@ -32,12 +35,160 @@ from xianyu_agent.protocol.events import (
     SystemNotice,
     WsFrame,
 )
+from xianyu_agent.services.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.services.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local, to_local
 
 app = typer.Typer(help="协议层命令:连接 / 测试 / 录制回放。")
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+@app.command("capture")
+def capture(  # noqa: PLR0915
+    account_id: str = typer.Option(..., "--account", "-a"),
+    seconds: float = typer.Option(300.0, "--seconds", "-s", min=1.0),
+    output: str = typer.Option("", "--output", "-o", help="脱敏 JSONL 路径。"),
+    target_messages: int = typer.Option(
+        1, "--target-messages", min=0, help="收到该数量买家消息后提前结束;0=只按时长。"
+    ),
+) -> None:
+    """前台捕获真实推送并写入不可逆脱敏 fixture;不执行回复或发货。"""
+
+    async def _run() -> None:  # noqa: PLR0915
+        account = await domain_accounts.get_account(account_id)
+        if account is None:
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        if account.desired_state == "running":
+            console.print(
+                "[red]同账号 daemon Worker 仍期望 running。[/red] 请先执行 "
+                f"[cyan]pool stop --account {account_id}[/cyan]。"
+            )
+            raise typer.Exit(code=2)
+        path = (
+            Path(output)
+            if output
+            else get_settings().data_dir
+            / "captures"
+            / f"{account_id}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.jsonl"
+        )
+        recorder = CalibrationRecorder(path, account_id=account_id)
+        counts = {"message": 0, "order": 0, "system": 0, "error": 0}
+        connected = asyncio.Event()
+        finished = asyncio.Event()
+        terminal_error = False
+        seen_message_ids: set[str] = set()
+        duplicate_message_events = 0
+        missing_fields: set[str] = set()
+
+        async def on_event(event) -> None:
+            nonlocal duplicate_message_events
+            await recorder.record_event(event)
+            persisted = event.model_copy(update={"raw": None})
+            if isinstance(event, MessageReceived):
+                counts["message"] += 1
+                required = {
+                    "message_id": event.message_id,
+                    "chat_id": event.chat_id,
+                    "buyer_id": event.sender_id,
+                    "item_id": event.item_id,
+                    "sent_at": event.sent_at,
+                    "content": event.content,
+                }
+                missing_fields.update(name for name, value in required.items() if not value)
+                if event.message_id:
+                    if event.message_id in seen_message_ids:
+                        duplicate_message_events += 1
+                    seen_message_ids.add(event.message_id)
+                await domain_messages.upsert_inbound(persisted)
+                console.print(
+                    "[cyan]MSG[/cyan] 已收到并落库:"
+                    f"chat={_masked(event.chat_id)} message={_masked(event.message_id)} "
+                    f"item={_masked(event.item_id)}"
+                )
+                if target_messages > 0 and counts["message"] >= target_messages:
+                    finished.set()
+            elif isinstance(event, (OrderCreated, OrderPaid, OrderDelivered)):
+                counts["order"] += 1
+                await domain_orders.upsert_from_event(persisted)
+                console.print(f"[magenta]ORDER[/magenta] {type(event).__name__} 已落库")
+            elif isinstance(event, SystemNotice):
+                counts["system"] += 1
+                console.print(f"[yellow]SYSTEM[/yellow] {event.notice_type}")
+
+        async def on_state(state) -> None:
+            console.print(f"[dim]STATE {state.state.value} {state.detail or ''}[/dim]")
+            if state.state.value == "connected":
+                connected.set()
+
+        async def on_error(error) -> None:
+            nonlocal terminal_error
+            counts["error"] += 1
+            if error.code in {"duplicate_connection", "ws_auth"}:
+                terminal_error = True
+                finished.set()
+            console.print(f"[red]ERROR {error.code}:{error.message}[/red]")
+
+        client = WsClient(
+            account_id,
+            on_event=on_event,
+            on_frame=recorder.record_frame,
+            on_state=on_state,
+            on_error=on_error,
+        )
+        console.print(
+            f"[bold]观察模式[/bold]:{seconds:.0f} 秒;不自动回复/发货;脱敏证据:{path}"
+        )
+        try:
+            client.start()
+        except AccountConnectionAlreadyRunningError as exc:
+            console.print(f"[red]账号连接已被占用:{exc}[/red]")
+            raise typer.Exit(code=2) from exc
+        try:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(finished.wait(), timeout=seconds)
+        finally:
+            await client.stop()
+        summary = {
+            "connected": connected.is_set(),
+            "frames": recorder.counts.frames,
+            "events": recorder.counts.events,
+            "messages": counts["message"],
+            "orders": counts["order"],
+            "system_notices": counts["system"],
+            "errors": counts["error"],
+            "duplicate_message_events": duplicate_message_events,
+            "missing_message_fields": sorted(missing_fields),
+            "target_messages": target_messages,
+            "target_reached": target_messages == 0 or counts["message"] >= target_messages,
+        }
+        recorder.record_summary(summary)
+        console.print(
+            "[bold]捕获汇总[/bold]:"
+            f"connected={'Y' if connected.is_set() else 'N'} frames={recorder.counts.frames} "
+            f"events={recorder.counts.events} messages={counts['message']} "
+            f"orders={counts['order']} system={counts['system']} errors={counts['error']}"
+        )
+        if missing_fields:
+            console.print(f"[yellow]字段缺失:{','.join(sorted(missing_fields))}[/yellow]")
+        if terminal_error or not connected.is_set():
+            raise typer.Exit(code=2)
+        if target_messages > 0 and counts["message"] < target_messages:
+            console.print(
+                f"[red]未达到目标消息数:{counts['message']}/{target_messages}[/red]"
+            )
+            raise typer.Exit(code=2)
+        if missing_fields:
+            raise typer.Exit(code=3)
+
+    asyncio.run(_run())
+
+
+def _masked(value: str | None) -> str:
+    if not value:
+        return "-"
+    return f"{value[:4]}...{uuid.uuid5(uuid.NAMESPACE_OID, value).hex[:6]}"
 
 
 @app.command("connect")
@@ -104,7 +255,11 @@ def connect(
             on_state=on_state,
             on_error=on_error,
         )
-        client.start()
+        try:
+            client.start()
+        except AccountConnectionAlreadyRunningError as exc:
+            console.print(f"[red]账号连接已被占用:{exc}[/red]")
+            raise typer.Exit(code=2) from exc
         stop_event = asyncio.Event()
         try:
             while not stop_event.is_set() and time.monotonic() < stop_at:

@@ -153,3 +153,7 @@ body 通常是 base64 编码的 JSON,需要先解码再解析。常见字段:
 
 - passport 接口字段可能随版本变化(与 WS 协议同理),实测为准。
 - 风控(手机验证)不在自动化范围内,CLI 会打印验证 URL 并退出码 2。
+- 扫码成功保存新 Cookie 时,旧 IM accessToken 会立即失效;稳定 device ID 保留,随后用
+  `auth refresh --account <id>` 换取新 token。
+- 真实帧校准使用 `protocol capture`;该命令不保存原始字符串值,仅保存字段结构、类型、长度
+  与不可逆 SHA-256 摘要,并由账号级文件锁防止重复连接。

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import uuid
 from pathlib import Path
 
 import qrcode as qrcode_lib
@@ -18,6 +18,11 @@ from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.qr_login import QRLoginClient, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws_auth import WsAuthError, WsTokenProvider
+from xianyu_agent.services.account_lock import (
+    AccountConnectionAlreadyRunningError,
+    AccountConnectionLock,
+)
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="管理账号 Cookie 与 token 签名。")
@@ -51,6 +56,12 @@ def login(
             elif remark:
                 account.remark = remark
                 await session.commit()
+        if account.desired_state == "running":
+            console.print(
+                "[red]账号 Worker 期望状态为 running。[/red] 请先执行 "
+                f"[cyan]pool stop --account {account_id}[/cyan]。"
+            )
+            raise typer.Exit(code=2)
         signer = CookieSigner()
         ok = await signer.save_cookie(account_id, cookie)
         if not ok:
@@ -58,7 +69,11 @@ def login(
             raise typer.Exit(code=1)
         console.print(f"[green]OK[/green] 账号 [cyan]{account_id}[/cyan] Cookie 已加密保存。")
 
-    asyncio.run(_run())
+    lock = _acquire_auth_lock(account_id, "manual-login")
+    try:
+        asyncio.run(_run())
+    finally:
+        lock.release()
 
 
 @app.command("status")
@@ -78,27 +93,57 @@ def status(
         table.add_column("value")
         for k, v in fp.items():
             table.add_row(k, str(v))
+        ws_status = await WsTokenProvider(signer).status(account_id)
+        table.add_row("ws_credential_exists", "Y" if ws_status.exists else "N")
+        table.add_row("ws_token_cached", "Y" if ws_status.token_cached else "N")
+        table.add_row("ws_token_valid", "Y" if ws_status.valid else "N")
+        table.add_row("ws_device_id", ws_status.device_id_masked or "-")
+        table.add_row("ws_token_expires_at", format_local(ws_status.expires_at) or "-")
         console.print(table)
 
-    asyncio.run(_run())
+    lock = _acquire_auth_lock(account_id, "token-refresh")
+    try:
+        asyncio.run(_run())
+    finally:
+        lock.release()
 
 
 @app.command("refresh")
 def refresh(
     account_id: str = typer.Option(..., "--account", "-a"),
 ) -> None:
-    """手动刷新 Cookie(Phase 1 占位:打印当前指纹)。"""
+    """用当前 Cookie 换取新的 IM accessToken;不会启动 WS Worker。"""
 
     async def _run() -> None:
+        account = await domain_accounts.get_account(account_id)
+        if account is None:
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        if account.desired_state == "running":
+            console.print(
+                "[red]账号 Worker 期望状态为 running。[/red] 请先执行 "
+                f"[cyan]pool stop --account {account_id}[/cyan],避免并发刷新。"
+            )
+            raise typer.Exit(code=2)
         signer = CookieSigner()
-        fp = await signer.fingerprint(account_id)
-        if fp is None:
+        if await signer.fingerprint(account_id) is None:
             console.print("[red]无 Cookie 可刷新。[/red] 请先 [cyan]auth login[/cyan]。")
             raise typer.Exit(code=1)
+        try:
+            credentials = await WsTokenProvider(signer).get_credentials(
+                account_id, force_refresh=True
+            )
+        except WsAuthError as exc:
+            console.print(f"[red]IM Token 刷新失败:{exc}[/red]")
+            if "Session过期" in str(exc):
+                console.print(
+                    f"请执行 [cyan]auth qr-login --account {account_id}[/cyan] 重新扫码。"
+                )
+            raise typer.Exit(code=2) from exc
         console.print(
-            "[yellow]手动刷新未实现。[/yellow] Phase 1 通过重新 [cyan]auth login --cookie <新值>[/cyan] 替换。"
+            f"[green]OK[/green] 账号 [cyan]{account_id}[/cyan] IM Token 已加密缓存;"
+            f"有效期至 {format_local(credentials.expires_at)}。"
         )
-        console.print(json.dumps(fp, ensure_ascii=False, indent=2))
 
     asyncio.run(_run())
 
@@ -237,7 +282,7 @@ def delete(
 
 
 @app.command("qr-login")
-def qr_login(
+def qr_login(  # noqa: PLR0915
     account_id: str = typer.Option(..., "--account", "-a", help="登录后保存到的账号标识。"),
     timeout: float = typer.Option(300.0, "--timeout", help="等待扫码总时长(秒)。"),
     qr_out: str = typer.Option(
@@ -248,6 +293,13 @@ def qr_login(
     """扫码登录闲鱼账号:生成二维码 -> 手机扫码确认 -> 自动保存 Cookie。"""
 
     async def _run() -> None:
+        existing = await domain_accounts.get_account(account_id)
+        if existing is not None and existing.desired_state == "running":
+            console.print(
+                "[red]账号 Worker 期望状态为 running。[/red] 请先执行 "
+                f"[cyan]pool stop --account {account_id}[/cyan]。"
+            )
+            raise typer.Exit(code=2)
         client = QRLoginClient()
         console.print("[dim]正在生成二维码...[/dim]")
         try:
@@ -308,7 +360,11 @@ def qr_login(
                 raise typer.Exit(code=1)
             console.print(
                 f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
-                f"(unb={session.unb}),Cookie 已加密保存。"
+                "(闲鱼身份已确认),Cookie 已加密保存。"
+            )
+            console.print(
+                "旧 IM Token 已失效,设备 ID 保持不变。下一步:"
+                f"[cyan]auth refresh --account {account_id}[/cyan]。"
             )
         elif final == QrStatus.VERIFICATION_REQUIRED:
             console.print(
@@ -319,4 +375,21 @@ def qr_login(
             console.print(f"[red]扫码未完成: {final}[/red]")
             raise typer.Exit(code=1)
 
-    asyncio.run(_run())
+    lock = _acquire_auth_lock(account_id, "qr-login")
+    try:
+        asyncio.run(_run())
+    finally:
+        lock.release()
+
+
+def _acquire_auth_lock(account_id: str, operation: str) -> AccountConnectionLock:
+    lock = AccountConnectionLock(get_settings().account_lock_path(account_id))
+    try:
+        lock.acquire(owner_id=f"auth:{operation}:{uuid.uuid4().hex}")
+    except AccountConnectionAlreadyRunningError as exc:
+        console.print(
+            f"[red]账号 {account_id} 正被另一个 WS/认证进程使用。[/red] "
+            "请先停止对应 Worker 后重试。"
+        )
+        raise typer.Exit(code=2) from exc
+    return lock

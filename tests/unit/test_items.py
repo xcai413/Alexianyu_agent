@@ -25,8 +25,8 @@ class FakeSigner:
     async def load_cookie_value(self, _account_id: str) -> str:
         return "unb=123; _m_h5_tk=seed_abc"
 
-    async def fingerprint(self, _account_id: str) -> dict[str, str]:
-        return {"unb": "123"}
+    async def load_user_id(self, _account_id: str) -> str:
+        return "123"
 
     async def make_headers(self, _account_id: str, *, data: str) -> MtopHeaders:
         assert '"groupName":"在售"' in data

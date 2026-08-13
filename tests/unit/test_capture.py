@@ -1,0 +1,135 @@
+"""Protocol capture redaction and account connection lock tests."""
+
+from __future__ import annotations
+
+import base64
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from xianyu_agent.protocol.capture import CalibrationRecorder, redact_structure
+from xianyu_agent.protocol.client import ClientConfig, WsClient
+from xianyu_agent.protocol.events import MessageReceived, WsFrame
+from xianyu_agent.services.account_lock import (
+    AccountConnectionAlreadyRunningError,
+    AccountConnectionLock,
+)
+
+
+def _sync_frame(secret: str) -> WsFrame:
+    decoded = {
+        "1": {
+            "2": "chat-secret@goofish",
+            "5": 1700000000000,
+            "10": {
+                "senderUserId": "buyer-secret",
+                "reminderContent": secret,
+                "bizTag": '{"messageId":"message-secret","itemId":"item-secret"}',
+            },
+        }
+    }
+    encoded = base64.b64encode(json.dumps(decoded).encode()).decode()
+    return WsFrame(
+        headers={"mid": "mid-secret", "sid": "sid-secret"},
+        body={"syncPushPackage": {"data": [{"data": encoded}]}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_calibration_recorder_never_writes_plaintext(tmp_path: Path) -> None:
+    path = tmp_path / "capture.jsonl"
+    recorder = CalibrationRecorder(path, account_id="account-secret")
+    frame = _sync_frame("buyer-content-secret")
+    event = MessageReceived(
+        event_id="event-secret",
+        account_id="account-secret",
+        received_at=datetime.now(UTC),
+        chat_id="chat-secret",
+        message_id="message-secret",
+        item_id="item-secret",
+        sender_id="buyer-secret",
+        sender_name="nickname-secret",
+        content="buyer-content-secret",
+        raw={"token": "token-secret", "Cookie": "cookie-secret"},
+    )
+    await recorder.record_frame(frame)
+    await recorder.record_event(event)
+    recorder.record_summary({"messages": 1, "missing_message_fields": []})
+
+    content = path.read_text(encoding="utf-8")
+    for secret in (
+        "account-secret",
+        "buyer-content-secret",
+        "buyer-secret",
+        "chat-secret",
+        "message-secret",
+        "item-secret",
+        "nickname-secret",
+        "mid-secret",
+        "sid-secret",
+        "token-secret",
+        "cookie-secret",
+    ):
+        assert secret not in content
+    records = [json.loads(line) for line in content.splitlines()]
+    assert [record["kind"] for record in records] == ["frame", "event", "summary"]
+    assert records[0]["decoded_sync"] is not None
+    assert recorder.counts.frames == 1
+    assert recorder.counts.events == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_salt_changes_digest_between_runs(tmp_path: Path) -> None:
+    first = CalibrationRecorder(tmp_path / "first.jsonl", account_id="same-account")
+    second = CalibrationRecorder(tmp_path / "second.jsonl", account_id="same-account")
+    event = MessageReceived(
+        event_id="same-event",
+        account_id="same-account",
+        received_at=datetime.now(UTC),
+        chat_id="same-chat",
+        sender_id="same-buyer",
+        content="same-content",
+    )
+    await first.record_event(event)
+    await second.record_event(event)
+    assert first.path.read_text(encoding="utf-8") != second.path.read_text(encoding="utf-8")
+
+
+def test_redact_structure_keeps_only_protocol_shape() -> None:
+    redacted = redact_structure(
+        {
+            "code": 200,
+            "timestamp": 1700000000000,
+            "amount": 9.9,
+            "type": "text",
+            "bizTag": '{"messageId":"m-secret","itemId":"i-secret"}',
+            "reminderUrl": "https://example.test/a/b?itemId=i-secret&foo=bar",
+        }
+    )
+    assert redacted["code"] == 200
+    assert redacted["timestamp"] == "<timestamp>"
+    assert redacted["amount"] == "<number>"
+    assert redacted["type"] == "text"
+    assert redacted["bizTag"]["_encoding"] == "json"
+    assert set(redacted["bizTag"]["value"]) == {"messageId", "itemId"}
+    assert redacted["reminderUrl"]["_encoding"] == "url"
+    assert redacted["reminderUrl"]["query_keys"] == ["foo", "itemId"]
+
+
+@pytest.mark.asyncio
+async def test_second_client_fails_account_lock_without_network(tmp_path: Path) -> None:
+    path = tmp_path / "account.lock"
+    first_lock = AccountConnectionLock(path)
+    first_lock.acquire(owner_id="first")
+    client = WsClient(
+        "same-account",
+        config=ClientConfig(ws_url="ws://unused"),
+        account_lock=AccountConnectionLock(path),
+    )
+    try:
+        with pytest.raises(AccountConnectionAlreadyRunningError):
+            client.start()
+    finally:
+        first_lock.release()

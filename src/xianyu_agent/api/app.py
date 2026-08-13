@@ -7,12 +7,14 @@ Conventions:
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from xianyu_agent.config import get_settings
 from xianyu_agent.domain import (
     accounts as domain_accounts,
     cards as domain_cards,
@@ -23,6 +25,10 @@ from xianyu_agent.domain import (
 )
 from xianyu_agent.protocol.items_client import ItemSyncError, XianyuItemsClient
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.services.account_lock import (
+    AccountConnectionAlreadyRunningError,
+    AccountConnectionLock,
+)
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.heartbeat import purge_old_messages
 from xianyu_agent.utils.time_utils import format_local
@@ -159,10 +165,21 @@ async def account_delete(account_id: str) -> dict[str, Any]:
 
 @app.post("/api/v1/auth/login", operation_id="auth_login")
 async def auth_login(body: CookieLogin) -> dict[str, Any]:
+    lock = AccountConnectionLock(get_settings().account_lock_path(body.account_id))
+    try:
+        lock.acquire(owner_id=f"api:auth-login:{uuid.uuid4().hex}")
+    except AccountConnectionAlreadyRunningError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"账号 {body.account_id} 正在运行,请先停止 Worker",
+        ) from exc
     signer = CookieSigner()
-    saved = await signer.save_cookie(body.account_id, body.cookie)
-    if not saved:
-        _err(ValueError(f"账号 {body.account_id} 不存在或 Fernet 未配置"))
+    try:
+        saved = await signer.save_cookie(body.account_id, body.cookie)
+        if not saved:
+            _err(ValueError(f"账号 {body.account_id} 不存在或 Fernet 未配置"))
+    finally:
+        lock.release()
     return _ok({"account_id": body.account_id, "cookie_saved": True})
 
 

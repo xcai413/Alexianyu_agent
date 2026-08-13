@@ -112,6 +112,23 @@ async def test_poll_success_collects_cookies(mock_passport) -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_success_carries_client_cookie_jar(mock_passport) -> None:
+    mock_passport.post(API_SCAN_STATUS).mock(
+        return_value=httpx.Response(
+            200,
+            json={"content": {"data": {"qrCodeStatus": "CONFIRMED"}}},
+            headers=[
+                ("set-cookie", "unb=2214350705775; Path=/"),
+                ("set-cookie", "session-extra=kept; Path=/"),
+            ],
+        )
+    )
+    session = await QRLoginClient().generate()
+    assert await QRLoginClient().poll(session) == QrStatus.SUCCESS
+    assert session.cookies["session-extra"] == "kept"
+
+
+@pytest.mark.asyncio
 async def test_poll_verification_required(mock_passport) -> None:
     mock_passport.post(API_SCAN_STATUS).mock(
         return_value=httpx.Response(

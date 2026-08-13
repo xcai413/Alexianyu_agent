@@ -25,6 +25,10 @@ xianyu-agent 是一套**为 AI Agent 而设计**的闲鱼(Goofish / 闲鱼)账�
 `pool` 命令可跨进程控制账号 Worker;Windows 任务计划与 Watchdog 已通过真实强杀恢复测试。
 Windows 重启恢复、断网恢复和 24 小时长稳仍未验收。
 
+WS 已补齐 IM token、`/reg`、`ackDiff`、推送 ACK 和 `syncPushPackage` 解包;但当前真实
+Cookie 已返回 Session 过期,仍需重新扫码后完成真实买家消息校准,不能将 transport
+connected 当作消息订阅通过。
+
 当前最高优先级是 **P0:WS 常驻 daemon + 跨进程账号池控制 + Windows 自恢复**。
 在 P0 的真实断网、杀进程、重启和 24 小时验收完成前,不会把系统描述为已具备无人值守能力。
 完整阶段顺序与验收标准见 [`docs/开发计划.md`](docs/开发计划.md),已完成证据见
@@ -57,6 +61,17 @@ uv run xianyu-agent pool start --account account-live
 uv run xianyu-agent pool restart --account account-live
 uv run xianyu-agent pool status
 ```
+
+真实入站校准使用安全观察模式:
+
+```powershell
+uv run xianyu-agent pool stop --account account-live
+uv run xianyu-agent auth qr-login --account account-live
+uv run xianyu-agent auth refresh --account account-live
+uv run xianyu-agent protocol capture --account account-live --seconds 300 --target-messages 1
+```
+
+同一账号有跨进程连接锁;capture 不自动回复/发货,证据文件只包含不可逆脱敏结构。
 
 命令只有收到 daemon 的 `succeeded` 回执才显示 OK;daemon 离线或等待超时会返回非零退出码。
 `service install` 会创建 `XianyuAgent-Daemon` 与每分钟巡检的 `XianyuAgent-Watchdog` 两个

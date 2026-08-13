@@ -20,7 +20,7 @@ from typing import Any
 from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
-from xianyu_agent.db import Account, Cookie, get_async_session
+from xianyu_agent.db import Account, Cookie, WsCredential, get_async_session
 from xianyu_agent.protocol.events import ErrorOccurred
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,12 @@ class CookieSigner:
                 return None
 
     async def save_cookie(self, account_id: str, cookie_value: str) -> bool:
-        """Persist a fresh cookie value (encrypted)."""
+        """Persist a fresh cookie and invalidate the old IM token.
+
+        The device ID is deliberately retained so a QR refresh does not create a
+        new device fingerprint. The next WS start must exchange the new Cookie
+        for a fresh accessToken.
+        """
         async with get_async_session() as session:
             stmt = select(Account).where(Account.account_id == account_id).limit(1)
             account = (await session.execute(stmt)).scalar_one_or_none()
@@ -139,6 +144,16 @@ class CookieSigner:
                     encrypted_value=encrypted,
                 )
             )
+            credential = (
+                await session.execute(
+                    select(WsCredential)
+                    .where(WsCredential.account_id == account.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if credential is not None:
+                credential.encrypted_token = self.fernet.encrypt(b"").decode("utf-8")
+                credential.expires_at = datetime.now(UTC)
             account.last_login_at = datetime.now(UTC)
             await session.commit()
             return True
@@ -153,6 +168,13 @@ class CookieSigner:
             return None
         return make_headers(m_h5_tk, data=data)
 
+    async def load_user_id(self, account_id: str) -> str | None:
+        """Load the upstream user ID for protocol calls; callers must not log it."""
+        cookie = await self.load_cookie_value(account_id)
+        if not cookie:
+            return None
+        return _extract_field(cookie, "unb") or _extract_field(cookie, "munb")
+
     async def fingerprint(self, account_id: str) -> dict[str, Any] | None:
         """Return a safe-to-print summary of the cookie for diagnostics."""
         cookie = await self.load_cookie_value(account_id)
@@ -160,13 +182,13 @@ class CookieSigner:
             return None
         return {
             "account_id": account_id,
-            "unb": _extract_field(cookie, "unb"),
+            "has_unb": bool(_extract_field(cookie, "unb") or _extract_field(cookie, "munb")),
+            "unb_masked": _mask_identifier(
+                _extract_field(cookie, "unb") or _extract_field(cookie, "munb")
+            ),
             "has_m_h5_tk": bool(extract_mtop_token(cookie)),
             "has_cookie2": bool(_extract_field(cookie, "cookie2")),
-            "m_h5_tk_prefix": (
-                _extract_field(cookie, "_m_h5_tk", prefix_only=True)
-                or _extract_field(cookie, "m_h5_tk", prefix_only=True)
-            ),
+            "m_h5_tk_digest": _secret_digest(extract_mtop_token(cookie)),
             "loaded_at": datetime.now(UTC).isoformat(),
         }
 
@@ -185,6 +207,17 @@ def _extract_field(cookie: str, name: str, *, prefix_only: bool = False) -> str 
                 return value[:12] + "..."
             return value
     return None
+
+
+def _mask_identifier(value: str | None) -> str | None:
+    if not value:
+        return None
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"{value[:2]}***{value[-2:]}#{digest}"
+
+
+def _secret_digest(value: str | None) -> str | None:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else None
 
 
 def make_error(account_id: str, code: str, message: str) -> ErrorOccurred:
