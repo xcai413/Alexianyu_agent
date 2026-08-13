@@ -58,7 +58,7 @@ async def test_recorded_replay_full_pipeline(
     ]
     assert len(frames) == 5
 
-    worker = AccountWorker("demo")
+    worker = AccountWorker("demo", automation_mode="active")
     worker.start()
     for f in frames:
         worker.inject_frame(f)

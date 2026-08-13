@@ -24,6 +24,7 @@ from xianyu_agent.db.models import (
     TaskLog,
     WorkerCommand,
     WorkerStatus,
+    WsCredential,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "TaskLog",
     "WorkerCommand",
     "WorkerStatus",
+    "WsCredential",
     "async_engine",
     "async_session_factory",
     "get_async_session",

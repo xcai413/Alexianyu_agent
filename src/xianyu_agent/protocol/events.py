@@ -93,6 +93,8 @@ class MessageReceived(EventEnvelope):
 
     chat_id: str
     message_id: str | None = None
+    item_id: str | None = None
+    sent_at: datetime | None = None
     sender_id: str
     sender_name: str | None = None
     direction: Literal[MessageDirection.INBOUND] = MessageDirection.INBOUND
@@ -106,6 +108,8 @@ class MessageSent(EventEnvelope):
 
     chat_id: str
     message_id: str | None = None
+    item_id: str | None = None
+    sent_at: datetime | None = None
     receiver_id: str
     direction: Literal[MessageDirection.OUTBOUND] = MessageDirection.OUTBOUND
     content_type: MessageContentType = MessageContentType.TEXT

@@ -263,6 +263,8 @@ def test_configure_logging_writes_redacted_rotating_file(tmp_path: Path) -> None
         assert "CARD-SECRET" not in content
         assert "buyer-secret" not in content
         assert "Cookie: <redacted>" in content
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("httpcore").level == logging.WARNING
     finally:
         for handler in list(root.handlers):
             if getattr(handler, "_xianyu_daemon_handler", False):

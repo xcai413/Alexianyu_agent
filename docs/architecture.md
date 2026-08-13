@@ -114,12 +114,16 @@ TUI 已接入 daemon 总状态和 Worker 状态差异;MCP 的 daemon 总控制�
   `daemon status`、`doctor` 和 TUI 共用,避免跨进程界面伪造内存 Worker 状态。
 - `doctor` 只读检查数据库写锁、Alembic head、Fernet、Cookie 可解密性、日志目录、
   daemon 单实例、账号状态漂移与 Windows 双任务;不打印明文 Cookie/Token。
+- `ws_credentials` 仅保存 Fernet 加密的 IM accessToken、稳定设备 ID 与过期时间。
+- WS 只有在 transport 握手、`/reg` 与 `ackDiff` 全部完成后才进入 connected;推送先 ACK,
+  再解包 `syncPushPackage` 并标准化事件。
+- `XIANYU_AUTOMATION_MODE=observe` 为默认值,只落库和审计;显式 active 才允许规则回复/发货。
 
 尚未完成(P0.5):断网、Windows 重启和完整真实长稳验收。详细顺序见 `docs/开发计划.md`。
 
 ## 已知边界(如实)
 
 - `pool` 已能跨进程控制 daemon 中的账号 Worker;Windows 用户登录启动与强杀恢复已通过。
-- Windows 重启、断网恢复和 24 小时长稳尚未验收,因此仍不能宣称完整无人值守能力。
+- Windows 重启、断网恢复、真实消息订阅和 24 小时长稳尚未验收,因此仍不能宣称完整无人值守能力。
 - guardrails 熔断计数为进程内;多进程部署时语义需扩展。
 - 发送协议(`send_text`)目前是原始文本帧,真实路由待联调。

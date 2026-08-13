@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import websockets
@@ -17,6 +18,7 @@ from xianyu_agent.domain import messages as dm, orders as do
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState, MessageReceived, OrderPaid
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws_auth import WsCredentials
 
 
 class FakeServer:
@@ -29,6 +31,10 @@ class FakeServer:
         try:
             if ws.request is not None:
                 self.request_headers = {k.lower(): v for k, v in ws.request.headers.items()}
+            registration = await ws.recv()
+            self.received.append(registration)
+            sync = await ws.recv()
+            self.received.append(sync)
             for f in self.frames:
                 await ws.send(json.dumps(f))
             async for msg in ws:
@@ -39,20 +45,23 @@ class FakeServer:
             await ws.close()
 
 
+class FakeTokenProvider:
+    async def get_credentials(self, _account_id: str) -> WsCredentials:
+        return WsCredentials(
+            access_token="test-access-token",
+            device_id="test-device-id",
+            user_id="s-1",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+
 @pytest.fixture
 async def fake_ws_server():
     frames = [
         {
             "code": 0,
-            "body": {
-                "bizType": "text",
-                "1": "买家问价",
-                "2": "b-1",
-                "3": "s-1",
-                "4": "text",
-                "6": {"mid": "INT-1"},
-                "10": "chat-int",
-            },
+            "headers": {"mid": "push-1", "sid": "session-1"},
+            "body": {"syncPushPackage": {"data": [{"data": "eyIxIjp7IjIiOiJjaGF0LWludEBnb29maXNoIiwiNSI6MTcwMDAwMDAwMDAwMCwiMTAiOnsic2VuZGVyVXNlcklkIjoiYi0xIiwic2VuZGVyTmljayI6IuS5sOWutuWQjeensCIsInJlbWluZGVyQ29udGVudCI6IuS5sOWutuWPlumUpSIsImJpelRhZyI6IntcIm1lc3NhZ2VJZFwiOlwiSU5ULTFcIixcIml0ZW1JZFwiOlwiSS0xXCJ9In19fQ=="}]}},
         },
         {
             "code": 0,
@@ -98,8 +107,13 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
         "s-1",
         on_event=on_event,
         config=ClientConfig(
-            ws_url=url, heartbeat_interval_s=1.0, min_backoff_s=0.1, max_backoff_s=1.0
+            ws_url=url,
+            heartbeat_interval_s=1.0,
+            min_backoff_s=0.1,
+            max_backoff_s=1.0,
+            registration_delay_s=0,
         ),
+        token_provider=FakeTokenProvider(),
     )
     client.start()
     await asyncio.sleep(2.5)
@@ -114,12 +128,17 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
     assert "unb=s-1" in server.request_headers["cookie"]
     # 心跳帧必须是 lwp 格式
     assert any("lwp" in m for m in server.received), f"received={server.received}"
+    decoded = [json.loads(message) for message in server.received]
+    assert decoded[0]["lwp"] == "/reg"
+    assert decoded[1]["lwp"] == "/r/SyncStatus/ackDiff"
+    assert any(message.get("code") == 200 for message in decoded)
     assert any(isinstance(e, MessageReceived) for e in received_events), f"events={received_events}"
     assert any(isinstance(e, OrderPaid) for e in received_events), f"events={received_events}"
     async with get_async_session() as session:
         msgs = list((await session.execute(select(Message))).scalars().all())
         orders = list((await session.execute(select(Order))).scalars().all())
     assert any(m.chat_id == "chat-int" for m in msgs)
+    assert any(m.item_id == "I-1" for m in msgs)
     assert len(orders) == 1
     assert orders[0].order_id == "INT-O-1"
     assert orders[0].status == OrderStatus.PAID.value

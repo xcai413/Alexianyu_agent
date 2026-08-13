@@ -59,9 +59,13 @@ Copyright 2025 Usagi-org
 
 cv-cat/XianYuApis(https://github.com/cv-cat/XianYuApis)
 zhinianboke/xianyu-auto-reply(https://github.com/zhinianboke/xianyu-auto-reply)
+zhinianboke/GoofishEngine(本地参考仓库,AGPL-3.0)
 
-仅参考 mtop / WebSocket 协议字段命名约定;**未引用任何源代码**。
-前者项目未声明 License,后者为 AGPL-3.0(与本项目 MIT 不兼容)。
+仅参考 mtop / WebSocket 协议字段命名和公开运行流程约定;**未引用任何源代码**。
+XianYuApis 未声明 License;其余上述参考为 AGPL-3.0(与本项目 MIT 不兼容)。
+
+MessagePack 解码使用独立依赖 msgpack/msgpack-python(Apache-2.0),未复用 AGPL 项目的
+自定义 MessagePackDecoder。
 
 ================================================================================
 xianyu-agent 自有代码

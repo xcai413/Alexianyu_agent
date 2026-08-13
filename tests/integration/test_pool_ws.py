@@ -10,6 +10,7 @@ import websockets
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from tests.integration.ws_test_support import cache_test_ws_token
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Message, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
@@ -78,6 +79,7 @@ async def test_pool_three_accounts_online(
         acc = f"acc-{i}"
         await domain_accounts.create_account(acc, enabled=True)
         await signer.save_cookie(acc, f"unb={acc}; _m_h5_tk=seed_{i}_xyz; cookie2=abc")
+        await cache_test_ws_token(acc, signer, token=f"test-token-{i}")
 
     pool = await AccountPool.from_enabled_accounts()
     started = pool.start_all()

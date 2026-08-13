@@ -57,3 +57,6 @@ def configure_daemon_logging(log_path: Path, *, level: str) -> None:
     )
     root.addHandler(handler)
     root.setLevel(getattr(logging, level, logging.INFO))
+    # httpx 的 INFO 会打印完整 URL 查询串,其中 mtop sign/timestamp 不应进入持久日志。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
