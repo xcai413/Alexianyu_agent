@@ -75,8 +75,34 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 - **真实闲鱼联调**:配 `XIANYU_WS_URL` + `auth login` 录入 cookie;字段编号按
   `docs/protocol-notes.md` 校准。
 
+## 下一阶段架构:WS 常驻控制面(规划中)
+
+当前 `AccountPool` 与 Worker 的连接生命周期归属于执行 `pool start/start-all` 的前台进程。
+进程结束后连接随之结束,SQLite 中的 `worker_status` 只记录状态,不能让 Worker 跨进程继续运行。
+
+P0 将引入一个单实例 `RuntimeDaemon`,由它持有长期 WS 连接;CLI、TUI 和 MCP 只负责写命令、
+读状态。目标链路如下,当前尚未实现:
+
+```text
+CLI / TUI / MCP
+       │
+       ▼
+SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker × N ──> 闲鱼 WS
+                         ▲
+                         └── Windows 任务计划程序:启动与失败恢复
+```
+
+计划新增两类持久化状态:
+
+- daemon 实例状态:实例 ID、PID、版本、启动时间、心跳、停止请求、最后错误。
+- Worker 控制命令:账号级 `start/stop/restart`、执行状态、结果和审计时间。
+
+账号的期望状态与实际连接状态将分开记录,避免“数据库已标记停止”被误解为远端进程已经停止。
+详细子阶段、命令草案和真实验收标准见 `docs/开发计划.md`。
+
 ## 已知边界(如实)
 
 - `pool stop` 是 DB 层标记;前台 `start-all` 需在运行终端 Ctrl+C 真正停止。
+- 当前没有 daemon 或 Windows 常驻服务;终端关闭、进程异常与系统重启后不能自动恢复。
 - guardrails 熔断计数为进程内;多进程部署时语义需扩展。
 - 发送协议(`send_text`)目前是原始文本帧,真实路由待联调。

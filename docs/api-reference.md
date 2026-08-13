@@ -48,6 +48,28 @@
 `pool start-all --seconds N [--refresh] [--purge-interval]`(前台实时看板)、
 `pool start --account <id> ...`、`pool stop/stop-all`(DB 标记)、`pool status`
 
+当前语义:
+
+- `start/start-all` 只在当前终端进程内持有 WS 连接,达到 `--seconds` 或进程退出后停止。
+- `stop/stop-all` 只更新数据库状态,不能停止另一个进程中的 Worker。
+- `pool status` 显示的是数据库状态和当前调用进程可见的状态,不是后台服务存活证明。
+
+### daemon / service / doctor — P0 规划命令(当前不可用)
+
+下列命令属于 WS 常驻阶段的目标接口,当前版本尚未注册,不能执行:
+
+| 计划命令 | 目标语义 |
+|----------|----------|
+| `daemon run` | 前台运行无时限的单实例 daemon,管理全部期望在线账号 |
+| `daemon status` | 查询 daemon 心跳、PID、版本、运行时长与账号实际状态 |
+| `daemon stop/restart` | 跨进程请求 daemon 有序停止或重启 |
+| `daemon logs --tail N` | 查看脱敏后的 daemon/Worker 本地日志 |
+| `service install/start/stop/status/uninstall` | 管理 Windows 任务计划中的自启动与失败恢复 |
+| `doctor` | 检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划 |
+
+P0 完成后,`pool start/stop/restart` 将改为向 daemon 提交持久化账号级命令;接口迁移与
+验收口径见 `docs/开发计划.md`。在此之前不要用上述规划语义解释现有命令输出。
+
 ### protocol — 协议调试
 
 `protocol connect --account <id> --seconds N`(前台连 WS 打印事件)、
@@ -77,6 +99,8 @@
 | `card_create` / `card_list` / `card_restock` / `card_consume` / `card_set_enabled` / `card_delete` | 卡密 |
 | `maintenance_purge_messages` | 消息清理 |
 | `pool_status` | 账号池状态 |
+
+daemon/service 的 MCP tools 尚未实现;只有 P0 CLI 和跨进程控制通过真实验收后才会暴露。
 
 Codex 接入示例(`~/.codex/config.toml` 或桌面端 MCP 配置):
 
