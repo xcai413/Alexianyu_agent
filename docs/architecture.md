@@ -83,15 +83,15 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 P0.1 已引入单实例 `RuntimeDaemon`,由它持有长期 WS 连接。P0.2 已加入账号级控制面:
 
 ```text
-daemon CLI / pool CLI             (P0.1-P0.2 已实现)
+daemon / service / pool CLI       (P0.1-P0.3 已实现)
        │
        ▼
 SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker × N ──> 闲鱼 WS
                          ▲
-                         └── Windows 任务计划程序:启动与失败恢复
+                         └── Windows 主任务 + 每分钟 Watchdog:启动与失败恢复
 ```
 
-TUI/MCP 和 Windows 任务计划接入此控制面仍属于 P0.3-P0.4。
+TUI/MCP 接入 daemon 总控制面与 `doctor` 仍属于 P0.4。
 
 当前已实现:
 
@@ -105,13 +105,18 @@ TUI/MCP 和 Windows 任务计划接入此控制面仍属于 P0.3-P0.4。
 - `worker_commands`:账号级 `start/stop/restart` 的 pending/running/succeeded/failed 全过程,
   包含领取 daemon、结果、错误和完成时间。
 - `pool` CLI 等待 daemon 回执;daemon 不在线、执行失败或等待超时均不会伪造成功。
+- `XianyuAgent-Daemon`:当前用户登录或系统启动时隐藏运行固定解释器与工作目录。
+- `XianyuAgent-Watchdog`:独立每分钟检查 daemon 的数据库心跳和 PID;不健康时启动主任务。
+- `data/runtime/service.paused`:人工 `service stop` 的暂停门,避免 Watchdog 将明确停机当作故障。
+- daemon 健康判定由数据库状态、90 秒心跳阈值和 PID 三项共同决定,供 CLI、pool 和
+  Watchdog 复用。
 
-尚未实现(P0.3-P0.5):Windows 任务计划自恢复、`doctor`、TUI daemon 总状态和完整真实长稳
+尚未实现(P0.4-P0.5):`doctor`、TUI daemon 总状态和完整真实长稳
 验收。详细顺序见 `docs/开发计划.md`。
 
 ## 已知边界(如实)
 
-- `pool` 已能跨进程控制 daemon 中的账号 Worker,但 daemon 本身仍需前台运行或手工启动。
-- 已有前台无时限 daemon,但没有 Windows 自启动/失败拉起;强制结束进程与系统重启后不能自动恢复。
+- `pool` 已能跨进程控制 daemon 中的账号 Worker;Windows 用户登录启动与强杀恢复已通过。
+- Windows 重启、断网恢复和 24 小时长稳尚未验收,因此仍不能宣称完整无人值守能力。
 - guardrails 熔断计数为进程内;多进程部署时语义需扩展。
 - 发送协议(`send_text`)目前是原始文本帧,真实路由待联调。

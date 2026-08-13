@@ -70,12 +70,22 @@
 `account enable` 只允许运行,不会自动上线;需显式执行 `pool start`。
 同一数据目录的第二个 daemon 会因文件锁返回退出码 1。
 
-### service / doctor — P0.3-P0.4 规划命令(当前不可用)
+### service — P0.3 Windows 常驻(当前可用)
 
-| 计划命令 | 目标语义 |
-|----------|----------|
-| `service install/start/stop/status/uninstall` | 管理 Windows 任务计划中的自启动与失败恢复 |
-| `doctor` | 检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划 |
+| 命令 | 当前语义 |
+|------|----------|
+| `service install [--startup user\|system] [--start-now]` | 安装/更新两个 Windows 任务;默认保持暂停,加 `--start-now` 才立即运行 |
+| `service start [--wait 20]` | 清除暂停门,启动主任务并等待 daemon online |
+| `service stop [--wait 20]` | 写入暂停门,优雅停止 daemon;超时才强制结束任务 |
+| `service status` | 显示主任务、Watchdog、最后结果及统一 daemon 健康状态 |
+| `service uninstall [-y]` | 停止 daemon 并删除两个任务及生成的 XML |
+
+默认 `--startup user` 在当前用户登录后运行;`system` 为系统启动模式,需要管理员权限。
+Watchdog 每分钟检查数据库心跳与 PID,人工停止时由 `data/runtime/service.paused` 阻止自动拉起。
+
+### doctor — P0.4 规划命令(当前不可用)
+
+`doctor` 将检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划。
 
 P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 

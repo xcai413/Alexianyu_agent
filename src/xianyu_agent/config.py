@@ -86,6 +86,10 @@ class Settings(BaseSettings):
         return self.runtime_dir / "daemon.lock"
 
     @property
+    def service_pause_path(self) -> Path:
+        return self.runtime_dir / "service.paused"
+
+    @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
 

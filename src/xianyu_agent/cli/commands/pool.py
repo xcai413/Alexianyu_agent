@@ -12,7 +12,7 @@ from rich.table import Table
 
 from xianyu_agent.domain import daemon as daemon_domain, worker_commands
 from xianyu_agent.services.account_pool import AccountPool
-from xianyu_agent.utils.process_utils import pid_alive
+from xianyu_agent.services.daemon_health import observe_daemon
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="账号级 Worker 池(通过常驻 daemon 跨进程启停)。")
@@ -163,11 +163,4 @@ async def _report_commands(command_ids: list[str], *, wait: float) -> None:
 
 async def _daemon_is_fresh() -> bool:
     row = await daemon_domain.latest_instance()
-    if row is None or row.status not in daemon_domain.ACTIVE_STATUSES:
-        return False
-    if not pid_alive(row.pid):
-        return False
-    heartbeat = row.last_heartbeat_at
-    if heartbeat.tzinfo is None:
-        heartbeat = heartbeat.replace(tzinfo=UTC)
-    return (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds() <= 90.0
+    return observe_daemon(row).healthy

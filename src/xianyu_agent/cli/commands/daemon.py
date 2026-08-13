@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 import typer
 from rich.console import Console
@@ -11,21 +10,14 @@ from rich.table import Table
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import daemon as daemon_domain
+from xianyu_agent.services.daemon_health import observe_daemon
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError
 from xianyu_agent.services.logging_setup import redact_text
 from xianyu_agent.services.runtime_daemon import run_runtime_daemon
-from xianyu_agent.utils.process_utils import pid_alive
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="常驻 daemon(无时限运行 / 状态 / 停止 / 日志)。")
 console = Console()
-STALE_AFTER_S = 90.0
-
-
-def _aware_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
 @app.command("run")
 def run() -> None:
     """前台运行无时限 daemon;Ctrl+C 或 `daemon stop` 有序退出。"""
@@ -50,15 +42,7 @@ def status() -> None:
         if row is None:
             console.print("[dim]尚无 daemon 运行记录。[/dim]")
             return
-        now = datetime.now(UTC)
-        age_s = max(0.0, (now - _aware_utc(row.last_heartbeat_at)).total_seconds())
-        process_alive = pid_alive(row.pid)
-        active = row.status in daemon_domain.ACTIVE_STATUSES
-        observed = "online" if active and age_s <= STALE_AFTER_S and process_alive else row.status
-        if active and age_s > STALE_AFTER_S:
-            observed = "stale"
-        elif active and not process_alive:
-            observed = "dead"
+        health = observe_daemon(row)
         table = Table(title="daemon 状态")
         table.add_column("instance_id", style="cyan")
         table.add_column("observed")
@@ -71,13 +55,13 @@ def status() -> None:
         table.add_column("last_error", overflow="fold")
         table.add_row(
             row.instance_id[:12],
-            observed,
+            health.observed,
             row.status,
-            f"{row.pid} ({'alive' if process_alive else 'dead'})",
+            f"{row.pid} ({'alive' if health.process_alive else 'dead' if health.active else 'historical'})",
             row.version,
             format_local(row.started_at),
             format_local(row.last_heartbeat_at),
-            f"{age_s:.1f}",
+            f"{health.heartbeat_age_s:.1f}",
             redact_text(row.last_error or "-"),
         )
         console.print(table)
