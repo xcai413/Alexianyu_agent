@@ -16,7 +16,7 @@ from sqlalchemy import select
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
-from xianyu_agent.protocol.qr_login import QRLoginClient, QrStatus
+from xianyu_agent.protocol.qr_login import QRLoginClient, QRLoginSession, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws_auth import WsAuthError, WsTokenProvider
 from xianyu_agent.services.account_lock import (
@@ -359,20 +359,7 @@ def qr_login(  # noqa: PLR0915
         final = await client.wait_for_login(session, timeout_s=timeout, on_status=on_status)
 
         if final == QrStatus.SUCCESS and session.unb:
-            # 建账号(幂等)并保存加密 Cookie
-            await domain_accounts.create_account(account_id, remark=remark or None)
-            saved = await CookieSigner().save_cookie(account_id, session.cookie_string())
-            if not saved:
-                console.print("[red]Cookie 保存失败。[/red]")
-                raise typer.Exit(code=1)
-            console.print(
-                f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
-                "(闲鱼身份已确认),Cookie 已加密保存。"
-            )
-            console.print(
-                "旧 IM Token 已失效,设备 ID 保持不变。下一步:"
-                f"[cyan]auth refresh --account {account_id}[/cyan]。"
-            )
+            await _persist_qr_login_session(account_id, remark, session)
         elif final == QrStatus.VERIFICATION_REQUIRED:
             console.print(
                 f"[red]账号被风控,需要手机验证:[/red] {session.verification_url or '未知'}"
@@ -387,6 +374,37 @@ def qr_login(  # noqa: PLR0915
         asyncio.run(_run())
     finally:
         lock.release()
+
+
+async def _persist_qr_login_session(
+    account_id: str,
+    remark: str,
+    session: QRLoginSession,
+    *,
+    token_provider: WsTokenProvider | None = None,
+) -> None:
+    """保存扫码会话并立即校验 Cookie 可换取 IM Token。"""
+    await domain_accounts.create_account(account_id, remark=remark or None)
+    signer = CookieSigner()
+    if not await signer.save_cookie(account_id, session.cookie_string()):
+        console.print("[red]Cookie 保存失败。[/red]")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
+        "(闲鱼身份已确认),Cookie 已加密保存。"
+    )
+    try:
+        credentials = await (token_provider or WsTokenProvider(signer)).get_credentials(
+            account_id, force_refresh=True
+        )
+    except WsAuthError as exc:
+        console.print(f"[yellow]Cookie 已保存,但 IM Token 换取失败:{exc}[/yellow]")
+        console.print(f"稍后执行 [cyan]auth refresh --account {account_id}[/cyan]。")
+        raise typer.Exit(code=3) from exc
+    console.print(
+        "[green]OK[/green] IM Token 已加密缓存,设备 ID 保持不变;"
+        f"有效期至 {format_local(credentials.expires_at)}。"
+    )
 
 
 def _acquire_auth_lock(account_id: str, operation: str) -> AccountConnectionLock:
