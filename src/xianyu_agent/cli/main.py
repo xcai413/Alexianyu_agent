@@ -11,6 +11,7 @@ Subcommand groups:
   - protocol   协议层命令 (connect/inject/watch)
   - pool      账号池管理 (Phase 2 起)
   - daemon    常驻运行与进程级控制 (P0.1)
+  - service   Windows 任务计划与失败恢复 (P0.3)
   - dashboard Textual 驾驶舱 (Phase 5 起)
   - mcp       MCP Server (Phase 6 起)
 """
@@ -38,6 +39,7 @@ from xianyu_agent.cli.commands import (
     pool as pool_cmd,
     protocol as protocol_cmd,
     rule as rule_cmd,
+    service as service_cmd,
 )
 from xianyu_agent.config import ensure_fernet_key
 
@@ -61,6 +63,7 @@ app.add_typer(order_cmd.app, name="order")
 app.add_typer(pool_cmd.app, name="pool")
 app.add_typer(protocol_cmd.app, name="protocol")
 app.add_typer(rule_cmd.app, name="rule")
+app.add_typer(service_cmd.app, name="service")
 
 
 def _version_callback(value: bool) -> None:
