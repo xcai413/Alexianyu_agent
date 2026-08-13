@@ -7,7 +7,7 @@
 | 命令 | 说明 |
 |------|------|
 | `auth login --account <id> --cookie "<串>"` | 建账号并加密存 Cookie(Fernet) |
-| `auth qr-login --account <id> [--timeout] [--qr-out]` | 扫码登录:生成二维码(终端 ASCII + PNG)→ 轮询 → 自动保存 Cookie |
+| `auth qr-login --account <id> [--timeout] [--qr-out]` | 扫码登录:生成二维码(终端 ASCII + PNG)→ 轮询 → 加密保存 Cookie → 强制换取并缓存 IM token;token 失败退出码 3 |
 | `auth status --account <id>` | 脱敏 Cookie/IM token/设备 ID/过期状态;不输出完整身份与凭据 |
 | `auth refresh --account <id>` | 用当前 Cookie 换取并加密缓存 IM accessToken;Worker 运行时拒绝 |
 | `auth list` | 账号列表 |

@@ -11,9 +11,11 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from xianyu_agent.cli.commands.auth import _persist_qr_login_session
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Account, WsCredential, database as db_mod, get_async_session
 from xianyu_agent.protocol.client import ClientConfig, WsClient
+from xianyu_agent.protocol.qr_login import QRLoginSession, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
@@ -147,6 +149,32 @@ async def test_new_cookie_invalidates_token_but_preserves_device(ws_db) -> None:
     assert after.device_id_masked == before.device_id_masked
     assert before.device_id_masked is not None
     assert before.device_id_masked.startswith("device#")
+
+
+@pytest.mark.asyncio
+async def test_qr_login_persists_cookie_and_im_token_in_one_step(ws_db) -> None:
+    signer = CookieSigner()
+    provider = StubTokenProvider(
+        [
+            httpx.Response(
+                200,
+                json={"ret": ["SUCCESS::调用成功"], "data": {"accessToken": "qr-access"}},
+            )
+        ],
+        signer,
+    )
+    session = QRLoginSession(
+        status=QrStatus.SUCCESS,
+        unb="user-1",
+        cookies={"unb": "user-1", "_m_h5_tk": "seed_x", "cookie2": "c2"},
+    )
+
+    await _persist_qr_login_session("acc-ws", "扫码测试", session, token_provider=provider)
+
+    assert provider.calls[0][0].startswith("unb=user-1")
+    status = await provider.status("acc-ws")
+    assert status.token_cached is True
+    assert status.valid is True
 
 
 @pytest.mark.asyncio

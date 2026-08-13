@@ -138,12 +138,14 @@ def capture(  # noqa: PLR0915
                 console.print(f"[yellow]SYSTEM[/yellow] {event.notice_type}")
 
         async def on_state(state) -> None:
+            await recorder.record_state(state)
             console.print(f"[dim]STATE {state.state.value} {state.detail or ''}[/dim]")
             if state.state.value == "connected":
                 connected.set()
 
         async def on_error(error) -> None:
             nonlocal terminal_error
+            await recorder.record_error(error)
             counts["error"] += 1
             if error.code in {"duplicate_connection", "ws_auth"}:
                 terminal_error = True

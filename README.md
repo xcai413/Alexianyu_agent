@@ -67,11 +67,13 @@ uv run xianyu-agent pool status
 ```powershell
 uv run xianyu-agent pool stop --account xcaicai
 uv run xianyu-agent auth qr-login --account xcaicai
-uv run xianyu-agent auth refresh --account xcaicai
+uv run xianyu-agent auth status --account xcaicai
 uv run xianyu-agent protocol capture --account xcaicai --seconds 300 --target-messages 1
 ```
 
-同一账号有跨进程连接锁;capture 不自动回复/发货,证据文件只包含不可逆脱敏结构。
+扫码成功后会立即换取并加密缓存 IM token;若该步骤失败,命令返回非零并提示 `auth refresh`。
+同一账号有跨进程连接锁;capture 不自动回复/发货,证据文件只包含不可逆脱敏结构,离线验收会
+用实际状态/帧/事件/错误记录交叉核对 summary。
 
 命令只有收到 daemon 的 `succeeded` 回执才显示 OK;daemon 离线或等待超时会返回非零退出码。
 `service install` 会创建 `XianyuAgent-Daemon` 与每分钟巡检的 `XianyuAgent-Watchdog` 两个

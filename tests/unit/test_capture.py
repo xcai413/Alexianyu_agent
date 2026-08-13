@@ -11,7 +11,12 @@ import pytest
 
 from xianyu_agent.protocol.capture import CalibrationRecorder, redact_structure, verify_capture
 from xianyu_agent.protocol.client import ClientConfig, WsClient
-from xianyu_agent.protocol.events import MessageReceived, WsFrame
+from xianyu_agent.protocol.events import (
+    ConnectionState,
+    ConnectionStateChanged,
+    MessageReceived,
+    WsFrame,
+)
 from xianyu_agent.services.account_lock import (
     AccountConnectionAlreadyRunningError,
     AccountConnectionLock,
@@ -111,12 +116,24 @@ async def test_verify_capture_passes_complete_redacted_artifact(tmp_path: Path) 
         sender_id="buyer",
         content="content",
     )
+    await recorder.record_state(
+        ConnectionStateChanged(
+            event_id="state-event",
+            account_id="account",
+            state=ConnectionState.CONNECTED,
+            detail="connected with private session",
+        )
+    )
     await recorder.record_frame(_sync_frame("content"))
     await recorder.record_event(event)
     recorder.record_summary(
         {
             "connected": True,
+            "frames": 1,
+            "events": 1,
             "messages": 1,
+            "system_notices": 0,
+            "target_messages": 1,
             "target_reached": True,
             "missing_message_fields": [],
             "duplicate_message_events": 0,
@@ -139,7 +156,11 @@ def test_verify_capture_rejects_plaintext_and_incomplete_summary(tmp_path: Path)
                 "payload": {"content": "plaintext buyer message"},
                 "summary": {
                     "connected": True,
+                    "frames": 1,
+                    "events": 1,
                     "messages": 0,
+                    "system_notices": 0,
+                    "target_messages": 1,
                     "target_reached": False,
                     "missing_message_fields": ["item_id"],
                     "duplicate_message_events": 1,
@@ -153,6 +174,109 @@ def test_verify_capture_rejects_plaintext_and_incomplete_summary(tmp_path: Path)
     assert result.ok is False
     assert any("未达到" in issue for issue in result.issues)
     assert any("未脱敏" in issue for issue in result.issues)
+
+
+def test_verify_capture_rejects_forged_summary_counts(tmp_path: Path) -> None:
+    path = tmp_path / "forged.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "summary",
+                "summary": {
+                    "connected": True,
+                    "frames": 9,
+                    "events": 9,
+                    "messages": 1,
+                    "system_notices": 0,
+                    "target_messages": 1,
+                    "target_reached": True,
+                    "missing_message_fields": [],
+                    "duplicate_message_events": 0,
+                    "errors": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = verify_capture(path)
+    assert result.ok is False
+    assert any("summary.frames" in issue for issue in result.issues)
+    assert any("实际 MessageReceived=0" in issue for issue in result.issues)
+
+
+def test_verify_capture_rejects_plaintext_under_numbered_protocol_key(tmp_path: Path) -> None:
+    path = tmp_path / "numbered-plaintext.jsonl"
+    records = [
+        {
+            "kind": "state",
+            "account": "<account:len=1:hmac=abcdef>",
+            "state": "connected",
+            "detail": None,
+        },
+        {
+            "kind": "frame",
+            "account": "<account:len=1:hmac=abcdef>",
+            "payload": {"body": {"1": "buyer plaintext"}},
+        },
+        {
+            "kind": "summary",
+            "account": "<account:len=1:hmac=abcdef>",
+            "summary": {
+                "connected": True,
+                "frames": 1,
+                "events": 0,
+                "messages": 0,
+                "system_notices": 0,
+                "target_messages": 0,
+                "target_reached": True,
+                "missing_message_fields": [],
+                "duplicate_message_events": 0,
+                "errors": 0,
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+    result = verify_capture(path)
+
+    assert result.ok is False
+    assert any("payload.body.1 包含未脱敏字符串" in issue for issue in result.issues)
+
+
+def test_verify_capture_rejects_target_and_unknown_summary_fields(tmp_path: Path) -> None:
+    path = tmp_path / "bad-summary.jsonl"
+    records = [
+        {
+            "kind": "state",
+            "account": "<account:len=1:hmac=abcdef>",
+            "state": "connected",
+            "detail": None,
+        },
+        {
+            "kind": "summary",
+            "account": "<account:len=1:hmac=abcdef>",
+            "summary": {
+                "connected": True,
+                "frames": 0,
+                "events": 0,
+                "messages": 0,
+                "system_notices": 0,
+                "target_messages": 2,
+                "target_reached": True,
+                "missing_message_fields": [],
+                "duplicate_message_events": 0,
+                "errors": 0,
+                "buyer_plaintext": "secret buyer",
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+    result = verify_capture(path)
+
+    assert result.ok is False
+    assert any("summary 包含未知字段" in issue for issue in result.issues)
+    assert any("target_reached 与目标消息数量矛盾" in issue for issue in result.issues)
 
 
 def test_redact_structure_keeps_only_protocol_shape() -> None:
