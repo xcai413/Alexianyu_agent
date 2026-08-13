@@ -102,6 +102,18 @@ P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 `dashboard [--refresh 2.0]`、`maintenance purge-messages --older-than 24`、
 `mcp serve [--port]`
 
+### soak — P0-E 可恢复长稳验收
+
+| 命令 | 语义 |
+|------|------|
+| `soak start --account <id> [--hours 24]` | 要求 daemon/账号健康后创建持久化验收运行 |
+| `soak status [--output table\|json]` | 查看采样数、异常、重连、实例变化、消息/回复和敏感日志统计 |
+| `soak stop [-y]` | 提前停止,该次状态为 skipped,不会记为通过 |
+
+Windows Watchdog 每分钟采样;进度保存在 `task_logs`,原始脱敏样本写到受 `.gitignore` 保护的
+`data/logs/p0-e-soak-<run_id>.jsonl`。通过门包括 24 小时时长、≥90% 采样覆盖、无异常样本、
+无 daemon 实例变化、无重复成功回复、无真实 Cookie/Token/Fernet 值泄漏。
+
 ## MCP Server
 
 启动:`xianyu-agent mcp serve`(默认 `127.0.0.1:8090`,SSE 端点 `/sse`)

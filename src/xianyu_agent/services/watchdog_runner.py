@@ -6,6 +6,7 @@ import asyncio
 
 from xianyu_agent.domain import daemon as daemon_domain
 from xianyu_agent.services.daemon_health import observe_daemon
+from xianyu_agent.services.soak_monitor import sample_active_soaks
 from xianyu_agent.services.windows_service import (
     WindowsServiceError,
     end_task,
@@ -41,10 +42,15 @@ async def check_and_recover() -> bool:
 
 def main() -> int:
     try:
-        asyncio.run(check_and_recover())
+        asyncio.run(_run_once())
     except Exception:
         return 1
     return 0
+
+
+async def _run_once() -> None:
+    await check_and_recover()
+    await sample_active_soaks()
 
 
 if __name__ == "__main__":
