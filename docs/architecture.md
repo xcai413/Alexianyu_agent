@@ -75,16 +75,16 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 - **真实闲鱼联调**:配 `XIANYU_WS_URL` + `auth login` 录入 cookie;字段编号按
   `docs/protocol-notes.md` 校准。
 
-## 下一阶段架构:WS 常驻控制面(规划中)
+## P0 常驻控制面
 
 当前 `AccountPool` 与 Worker 的连接生命周期归属于执行 `pool start/start-all` 的前台进程。
 进程结束后连接随之结束,SQLite 中的 `worker_status` 只记录状态,不能让 Worker 跨进程继续运行。
 
-P0 将引入一个单实例 `RuntimeDaemon`,由它持有长期 WS 连接;CLI、TUI 和 MCP 只负责写命令、
-读状态。目标链路如下,当前尚未实现:
+P0.1 已引入单实例 `RuntimeDaemon`,由它持有长期 WS 连接。daemon CLI 可通过
+`daemon status/stop/restart/logs` 读写 daemon 级控制状态:
 
 ```text
-CLI / TUI / MCP
+daemon CLI                         (P0.1 已实现)
        │
        ▼
 SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker × N ──> 闲鱼 WS
@@ -92,17 +92,22 @@ SQLite 控制面 ──> RuntimeDaemon ──> AccountPool ──> AccountWorker
                          └── Windows 任务计划程序:启动与失败恢复
 ```
 
-计划新增两类持久化状态:
+TUI/MCP、账号级 `pool` 命令和 Windows 任务计划接入此控制面仍属于 P0.2-P0.4。
 
-- daemon 实例状态:实例 ID、PID、版本、启动时间、心跳、停止请求、最后错误。
-- Worker 控制命令:账号级 `start/stop/restart`、执行状态、结果和审计时间。
+当前已实现:
 
-账号的期望状态与实际连接状态将分开记录,避免“数据库已标记停止”被误解为远端进程已经停止。
-详细子阶段、命令草案和真实验收标准见 `docs/开发计划.md`。
+- `daemon_instances`:实例 ID、PID、版本、启动时间、心跳、停止/重启请求、最后错误。
+- `data/runtime/daemon.lock`:操作系统文件锁,同一数据目录只允许一个 daemon。
+- `data/logs/xianyu-agent.log`:5 MiB × 6 个文件的轮转日志,写入前脱敏 Cookie、Token、
+  Fernet key、卡密和消息正文。
+- daemon 周期性对账 `accounts.enabled`,新启用账号自动启动 Worker,禁用账号自动停止。
+
+尚未实现(P0.2-P0.5):账号级跨进程 `worker_commands/desired_state`、Windows 任务计划自恢复、
+`doctor`、TUI daemon 总状态和完整真实长稳验收。详细顺序见 `docs/开发计划.md`。
 
 ## 已知边界(如实)
 
 - `pool stop` 是 DB 层标记;前台 `start-all` 需在运行终端 Ctrl+C 真正停止。
-- 当前没有 daemon 或 Windows 常驻服务;终端关闭、进程异常与系统重启后不能自动恢复。
+- 已有前台无时限 daemon,但没有 Windows 自启动/失败拉起;强制结束进程与系统重启后不能自动恢复。
 - guardrails 熔断计数为进程内;多进程部署时语义需扩展。
 - 发送协议(`send_text`)目前是原始文本帧,真实路由待联调。

@@ -10,6 +10,7 @@ Subcommand groups:
   - card      卡密库存 CRUD (Phase 4 起)
   - protocol   协议层命令 (connect/inject/watch)
   - pool      账号池管理 (Phase 2 起)
+  - daemon    常驻运行与进程级控制 (P0.1)
   - dashboard Textual 驾驶舱 (Phase 5 起)
   - mcp       MCP Server (Phase 6 起)
 """
@@ -27,6 +28,7 @@ from xianyu_agent.cli.commands import (
     account as account_cmd,
     auth as auth_cmd,
     card as card_cmd,
+    daemon as daemon_cmd,
     dashboard as dashboard_cmd,
     item as item_cmd,
     maintenance as maintenance_cmd,
@@ -50,6 +52,7 @@ app.add_typer(auth_cmd.app, name="auth")
 app.add_typer(account_cmd.app, name="account")
 app.add_typer(card_cmd.app, name="card")
 app.add_typer(dashboard_cmd.app, name="dashboard")
+app.add_typer(daemon_cmd.app, name="daemon")
 app.add_typer(item_cmd.app, name="item")
 app.add_typer(maintenance_cmd.app, name="maintenance")
 app.add_typer(mcp_cmd.app, name="mcp")

@@ -64,6 +64,8 @@ data/qr_logins/
 data/cookies/*.json
 data/cards/*.txt
 data/backups/
+data/logs/
+data/runtime/
 outputs/
 logs/
 *.log

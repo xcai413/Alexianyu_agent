@@ -30,6 +30,17 @@ xianyu-agent 是一套**为 AI Agent 而设计**的闲鱼(Goofish / 闲鱼)账�
 完整阶段顺序与验收标准见 [`docs/开发计划.md`](docs/开发计划.md),已完成证据见
 [`docs/验证记录.md`](docs/验证记录.md)。
 
+P0.1 daemon 核心现已实现,可以无时限前台运行并由另一终端查询/停止/重启:
+
+```powershell
+uv run alembic upgrade head
+uv run xianyu-agent daemon run      # 终端 A:常驻运行
+uv run xianyu-agent daemon status   # 终端 B:查询
+uv run xianyu-agent daemon stop     # 终端 B:有序停止
+```
+
+当前仍未安装 Windows 自启动与失败拉起;关闭 daemon 所在终端或强制结束进程后不会自动恢复。
+
 ## 不用做什么
 
 本项目**明确不做**(避免蔓延):
@@ -128,8 +139,8 @@ xianyu-agent dashboard
 
 完整命令清单见 [`docs/api-reference.md`](docs/api-reference.md)。
 真实闲鱼联调需要 `XIANYU_WS_URL` 与账号 Cookie(见 `docs/protocol-notes.md`)。
-当前 `pool start/start-all` 是前台限时运行命令,不是后台常驻服务;规划中的 daemon/service
-命令见 [`docs/开发计划.md`](docs/开发计划.md)。
+当前 `pool start/start-all` 仍是前台限时运行命令;长期连接请使用 `daemon run`。
+Windows `service` 命令仍是规划能力,见 [`docs/开发计划.md`](docs/开发计划.md)。
 
 ## 致谢
 

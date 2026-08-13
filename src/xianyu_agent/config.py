@@ -78,6 +78,22 @@ class Settings(BaseSettings):
         return f"sqlite:///{self.resolved_db_path.as_posix()}"
 
     @property
+    def runtime_dir(self) -> Path:
+        return self.data_dir / "runtime"
+
+    @property
+    def daemon_lock_path(self) -> Path:
+        return self.runtime_dir / "daemon.lock"
+
+    @property
+    def log_dir(self) -> Path:
+        return self.data_dir / "logs"
+
+    @property
+    def daemon_log_path(self) -> Path:
+        return self.log_dir / "xianyu-agent.log"
+
+    @property
     def fernet(self) -> Fernet:
         if not self.fernet_key:
             msg = "FERNET_KEY 未配置"
