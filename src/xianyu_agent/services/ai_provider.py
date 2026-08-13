@@ -47,11 +47,11 @@ class NullProvider:
         chat_context: list[str] | None = None,
     ) -> str:
         logger.debug(
-            "null provider asked for reply: account=%s msg=%s ctx=%s",
+            "null provider asked for reply: account=%s context_messages=%d",
             account_id,
-            buyer_message,
             len(chat_context or []),
         )
+        _ = buyer_message
         msg = "AI 回复未配置(需 XIANYU_AI_BASE_URL / XIANYU_AI_API_KEY / XIANYU_AI_MODEL)"
         raise UnconfiguredError(msg)
 
@@ -105,7 +105,7 @@ class OpenAICompatibleProvider:
         try:
             return str(data["choices"][0]["message"]["content"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
-            msg = f"AI 响应格式异常: {data}"
+            msg = "AI 响应格式异常"
             raise RuntimeError(msg) from exc
 
 

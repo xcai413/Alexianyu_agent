@@ -111,7 +111,7 @@ class DeliveryService:
         # 4. record outcome on order + consumption
         await self._record_outcome(order_id, delivered=ok, code=code, fail_reason=fail_reason)
         if ok:
-            logger.info("delivered order=%s card=%s code=%s", event.order_id, card.id, code)
+            logger.info("delivered order=%s card=%s", event.order_id, card.id)
             return DeliveryResult(
                 delivered=True, order_id=event.order_id, card_id=card.id, code=code
             )
@@ -190,7 +190,7 @@ class DeliveryService:
             fail_reason = "未配置发送器(sender=None)"
         await self._record_outcome(row.id, delivered=ok, code=code, fail_reason=fail_reason)
         if ok:
-            logger.info("retry delivered order=%s code=%s", row.order_id, code)
+            logger.info("retry delivered order=%s", row.order_id)
             return DeliveryResult(delivered=True, order_id=row.order_id, code=code)
         return DeliveryResult(
             delivered=False,

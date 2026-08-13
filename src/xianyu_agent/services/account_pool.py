@@ -19,11 +19,13 @@ from xianyu_agent.services.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local
 
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
+WorkerFactory = Callable[[str], AccountWorker]
 
 
 class AccountPool:
-    def __init__(self) -> None:
+    def __init__(self, *, worker_factory: WorkerFactory | None = None) -> None:
         self._workers: dict[str, AccountWorker] = {}
+        self._worker_factory = worker_factory or AccountWorker
 
     @classmethod
     async def from_enabled_accounts(
@@ -32,13 +34,16 @@ class AccountPool:
         on_event: EventHandler | None = None,
     ) -> AccountPool:
         """Build a pool with one worker per enabled account."""
-        pool = cls()
-        accounts = await domain_accounts.list_accounts(only_enabled=True)
-        for acc in accounts:
-            worker = AccountWorker(acc.account_id, persist_events=on_event is None)
+        def _build_worker(account_id: str) -> AccountWorker:
+            worker = AccountWorker(account_id, persist_events=on_event is None)
             if on_event is not None:
                 worker._client.on_event = on_event
-            pool._workers[acc.account_id] = worker
+            return worker
+
+        pool = cls(worker_factory=_build_worker)
+        accounts = await domain_accounts.list_accounts(only_enabled=True)
+        for acc in accounts:
+            pool._workers[acc.account_id] = pool._worker_factory(acc.account_id)
         return pool
 
     @property
@@ -76,6 +81,24 @@ class AccountPool:
     async def stop_all(self) -> None:
         for worker in self._workers.values():
             await worker.stop()
+
+    async def reconcile_enabled_accounts(self) -> dict[str, list[str]]:
+        """令内存 Worker 集合与数据库中的启用账号保持一致。"""
+        accounts = await domain_accounts.list_accounts(only_enabled=True)
+        desired = {account.account_id for account in accounts}
+        current = set(self._workers)
+        stopped: list[str] = []
+        for account_id in sorted(current - desired):
+            worker = self._workers.pop(account_id)
+            await worker.stop()
+            stopped.append(account_id)
+        started: list[str] = []
+        for account_id in sorted(desired - current):
+            worker = self._worker_factory(account_id)
+            self._workers[account_id] = worker
+            worker.start()
+            started.append(account_id)
+        return {"started": started, "stopped": stopped}
 
     def restart(self, account_id: str) -> bool:
         worker = self._workers.get(account_id)

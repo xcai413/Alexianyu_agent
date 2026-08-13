@@ -54,21 +54,28 @@
 - `stop/stop-all` 只更新数据库状态,不能停止另一个进程中的 Worker。
 - `pool status` 显示的是数据库状态和当前调用进程可见的状态,不是后台服务存活证明。
 
-### daemon / service / doctor — P0 规划命令(当前不可用)
+### daemon — P0.1 常驻运行(当前可用)
 
-下列命令属于 WS 常驻阶段的目标接口,当前版本尚未注册,不能执行:
+| 命令 | 当前语义 |
+|------|----------|
+| `daemon run` | 前台无时限运行单实例 daemon,管理全部启用账号;Ctrl+C 停止 |
+| `daemon status` | 查询最近 daemon 的心跳、PID、版本、状态与错误;90 秒未刷新标记 stale |
+| `daemon stop` | 通过 SQLite 请求活跃 daemon 有序停止 |
+| `daemon restart` | 请求活跃 daemon 有序停止并在同一启动进程内重建实例和账号池 |
+| `daemon logs --tail N` | 读取 `data/logs/xianyu-agent.log` 末尾 N 行并二次脱敏 |
+
+`daemon run` 启动时会加载全部 `accounts.enabled=true` 的账号,并周期性对账启用状态。
+同一数据目录的第二个 daemon 会因文件锁返回退出码 1。
+
+### service / doctor — P0.3-P0.4 规划命令(当前不可用)
 
 | 计划命令 | 目标语义 |
 |----------|----------|
-| `daemon run` | 前台运行无时限的单实例 daemon,管理全部期望在线账号 |
-| `daemon status` | 查询 daemon 心跳、PID、版本、运行时长与账号实际状态 |
-| `daemon stop/restart` | 跨进程请求 daemon 有序停止或重启 |
-| `daemon logs --tail N` | 查看脱敏后的 daemon/Worker 本地日志 |
 | `service install/start/stop/status/uninstall` | 管理 Windows 任务计划中的自启动与失败恢复 |
 | `doctor` | 检查数据库、迁移、密钥、Cookie、日志、重复实例和任务计划 |
 
-P0 完成后,`pool start/stop/restart` 将改为向 daemon 提交持久化账号级命令;接口迁移与
-验收口径见 `docs/开发计划.md`。在此之前不要用上述规划语义解释现有命令输出。
+P0.2 完成后,`pool start/stop/restart` 才会改为向 daemon 提交持久化账号级命令。
+目前 `daemon` 只支持进程级控制,不要把现有 `pool stop` 解释成能控制 daemon 中单个 Worker。
 
 ### protocol — 协议调试
 
@@ -100,7 +107,7 @@ P0 完成后,`pool start/stop/restart` 将改为向 daemon 提交持久化账号
 | `maintenance_purge_messages` | 消息清理 |
 | `pool_status` | 账号池状态 |
 
-daemon/service 的 MCP tools 尚未实现;只有 P0 CLI 和跨进程控制通过真实验收后才会暴露。
+daemon/service 的 MCP tools 尚未实现;只有账号级跨进程控制通过真实验收后才会暴露。
 
 Codex 接入示例(`~/.codex/config.toml` 或桌面端 MCP 配置):
 

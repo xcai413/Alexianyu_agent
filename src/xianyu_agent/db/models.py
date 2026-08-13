@@ -1,7 +1,7 @@
-"""SQLAlchemy 2.0 ORM 模型 — 12 张表。
+"""SQLAlchemy 2.0 ORM 模型 — 13 张表。
 
 四类:
-  - 身份类: Account / Cookie / WorkerStatus
+  - 身份类: Account / Cookie / WorkerStatus / DaemonInstance
   - 业务类: Item / Message / Order / Card / CardConsumption / ReplyRule
   - 日志类: ReplyLog / TaskLog / AuditLog
 
@@ -230,6 +230,34 @@ class WorkerStatus(Base):
     )
 
     account: Mapped[Account] = relationship(back_populates="worker_status")
+
+
+class DaemonInstance(Base):
+    """常驻 daemon 的进程级状态与控制标记。"""
+
+    __tablename__ = "daemon_instances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    instance_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="starting", nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    shutdown_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    restart_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_daemon_status_heartbeat", "status", "last_heartbeat_at"),
+    )
 
 
 class Message(Base):

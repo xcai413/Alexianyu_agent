@@ -357,7 +357,7 @@ class WsClient:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            logger.debug("non-JSON frame skipped: %r", raw[:80])
+            logger.debug("non-JSON frame skipped: length=%d", len(raw))
             return
         frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
         await self._handle_frame(frame)
