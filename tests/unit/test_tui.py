@@ -21,7 +21,13 @@ from xianyu_agent.protocol.events import ConnectionState, MessageContentType, Me
 from xianyu_agent.protocol.items_client import RemoteItem
 from xianyu_agent.services.guardrails import write_guardrail_event
 from xianyu_agent.tui.app import DashboardApp
-from xianyu_agent.tui.widgets import AccountsPanel, CardsPanel, MessagesPanel, OrdersPanel
+from xianyu_agent.tui.widgets import (
+    AccountsPanel,
+    CardsPanel,
+    ItemsPanel,
+    MessagesPanel,
+    OrdersPanel,
+)
 
 
 @pytest.fixture
@@ -92,6 +98,17 @@ async def test_dashboard_renders_data_and_quits(seeded_db) -> None:
 
         cards = app.query_one(CardsPanel)
         assert len(cards.rows) >= 1
+
+        items = app.query_one(ItemsPanel)
+        assert len(items.rows) == 1
+        item_key = next(iter(items.rows))
+        assert items.get_row(item_key)[:5] == [
+            "acc-t",
+            "测试在售商品",
+            "9.9",
+            "0",
+            "item-t",
+        ]
 
         orders = app.query_one(OrdersPanel)
         assert orders is not None
