@@ -1,7 +1,7 @@
 """DashboardApp: Textual 驾驶舱。
 
-布局:顶栏 + 四区网格(账号池 / 消息流 / 订单 / 卡密)+ 页脚快捷键。
-数据:每 REFRESH_S 轮询 SQLite 刷新四区。
+布局:顶栏 + 五区网格(账号池 / 消息流 / 订单 / 卡密 / 在售商品)+ 页脚快捷键。
+数据:每 REFRESH_S 轮询 SQLite 刷新五区。
 按键:q 退出;! 紧急模式(暂停自动操作标记,写 audit_logs);r 手动刷新。
 """
 
@@ -17,10 +17,16 @@ from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
 from xianyu_agent.db import AuditLog, get_async_session
-from xianyu_agent.domain import accounts as domain_accounts, items as domain_items
+from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.services.guardrails import recent_guardrail_events
 from xianyu_agent.services.observability import build_runtime_snapshot
-from xianyu_agent.tui.widgets import AccountsPanel, CardsPanel, MessagesPanel, OrdersPanel
+from xianyu_agent.tui.widgets import (
+    AccountsPanel,
+    CardsPanel,
+    ItemsPanel,
+    MessagesPanel,
+    OrdersPanel,
+)
 from xianyu_agent.utils.time_utils import format_duration
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,7 @@ class DashboardApp(App):
             MessagesPanel(),
             OrdersPanel(),
             CardsPanel(),
+            ItemsPanel(),
             id="dashboard-grid",
         )
         yield Footer()
@@ -69,15 +76,11 @@ class DashboardApp(App):
             accounts = await domain_accounts.list_accounts()
             snapshot = await build_runtime_snapshot()
             account_ids = [a.account_id for a in accounts]
-            on_sale_total = 0
-            for account_id in account_ids:
-                on_sale_total += len(
-                    await domain_items.list_items(account_id, on_sale_only=True)
-                )
             await self.query_one(AccountsPanel).reload(snapshot)
             await self.query_one(MessagesPanel).reload(account_ids)
             await self.query_one(OrdersPanel).reload(account_ids)
             await self.query_one(CardsPanel).reload(account_ids)
+            on_sale_total = await self.query_one(ItemsPanel).reload(account_ids)
             now = datetime.now(UTC).strftime("%H:%M:%S")
             mode = "紧急暂停" if self.emergency else "正常"
             daemon = snapshot.daemon_health.observed

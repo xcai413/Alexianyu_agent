@@ -18,10 +18,15 @@ Screen {
 
 #dashboard-grid {
     layout: grid;
-    grid-size: 2 2;
+    grid-size: 2 3;
+    grid-rows: 1fr 1fr 1fr;
     grid-gutter: 1;
     padding: 0 1 1 1;
     height: 1fr;
+}
+
+#items-panel {
+    column-span: 2;
 }
 
 DataTable {

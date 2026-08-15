@@ -10,6 +10,7 @@ from textual.widgets import DataTable, Static
 
 from xianyu_agent.domain import (
     cards as domain_cards,
+    items as domain_items,
     messages as domain_messages,
     orders as domain_orders,
 )
@@ -117,6 +118,37 @@ class CardsPanel(DataTable):
                     str(c.remaining),
                     "Y" if c.enabled else "N",
                 )
+
+
+class ItemsPanel(DataTable):
+    """在售商品明细:本地只读镜像。"""
+
+    def __init__(self) -> None:
+        super().__init__(id="items-panel")
+        self.cursor_type = "row"
+
+    async def on_mount(self) -> None:
+        self.add_columns("账号", "标题", "价格", "状态", "商品 ID", "最后同步")
+
+    async def reload(self, accounts: list[str]) -> int:
+        """刷新全部账号的在售镜像并返回汇总数量。"""
+        self.clear()
+        total = 0
+        for account_id in accounts:
+            rows = await domain_items.list_items(account_id, on_sale_only=True)
+            total += len(rows)
+            for item in rows:
+                synced_at = to_local(item.last_synced_at).strftime("%m-%d %H:%M")
+                self.add_row(
+                    account_id,
+                    item.title[:42],
+                    item.price or "-",
+                    item.status or "-",
+                    item.item_id,
+                    synced_at,
+                    key=f"{account_id}:{item.id}",
+                )
+        return total
 
 
 class StatusBar(Static):
