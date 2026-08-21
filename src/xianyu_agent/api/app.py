@@ -24,6 +24,7 @@ from xianyu_agent.domain import (
     rules as domain_rules,
 )
 from xianyu_agent.protocol.items_client import ItemSyncError, XianyuItemsClient
+from xianyu_agent.protocol.orders_client import OrderSyncError, XianyuOrdersClient
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.services.account_lock import (
     AccountConnectionAlreadyRunningError,
@@ -97,6 +98,12 @@ class CardEnabled(BaseModel):
 class ItemSyncRequest(BaseModel):
     account_id: str
     page_size: int = Field(default=20, ge=1, le=50)
+    max_pages: int = Field(default=100, ge=1, le=100)
+
+
+class OrderSyncRequest(BaseModel):
+    account_id: str
+    page_size: int = Field(default=30, ge=1, le=50)
     max_pages: int = Field(default=100, ge=1, le=100)
 
 
@@ -222,7 +229,9 @@ async def order_list(account_id: str, status: str = "", limit: int = 20) -> dict
                 "order_id": o.order_id,
                 "item_title": o.item_title,
                 "amount": o.amount,
+                "quantity": o.quantity,
                 "status": o.status,
+                "placed_at": format_local(o.placed_at) or None,
                 "delivery_content": o.delivery_content,
                 "delivery_fail_reason": o.delivery_fail_reason,
             }
@@ -242,9 +251,35 @@ async def order_get(order_id: int) -> dict[str, Any]:
             "order_id": row.order_id,
             "item_title": row.item_title,
             "amount": row.amount,
+            "quantity": row.quantity,
             "status": row.status,
+            "placed_at": format_local(row.placed_at) or None,
             "delivery_content": row.delivery_content,
             "delivery_fail_reason": row.delivery_fail_reason,
+        }
+    )
+
+
+@app.post("/api/v1/orders/sync", operation_id="order_sync")
+async def order_sync(body: OrderSyncRequest) -> dict[str, Any]:
+    """只读同步卖家已售订单到本地镜像, 不触发发货。"""
+    try:
+        snapshot = await XianyuOrdersClient().fetch_all_sold(
+            body.account_id,
+            page_size=body.page_size,
+            max_pages=body.max_pages,
+        )
+        result = await domain_orders.apply_sold_orders_snapshot(body.account_id, snapshot.orders)
+    except (OrderSyncError, ValueError) as exc:
+        _err(exc)
+    return _ok(
+        {
+            "account_id": result.account_id,
+            "reported_total": snapshot.reported_total,
+            "pages": snapshot.pages,
+            "total": result.total,
+            "created": result.created,
+            "updated": result.updated,
         }
     )
 
@@ -280,6 +315,7 @@ async def item_list(
     rows = await domain_items.list_items(
         account_id, on_sale_only=not include_off_sale, limit=limit
     )
+    sales = await domain_orders.sales_by_item(account_id)
     return _ok(
         [
             {
@@ -287,7 +323,7 @@ async def item_list(
                 "item_id": item.item_id,
                 "title": item.title,
                 "price": item.price,
-                "status": item.status,
+                "sold_quantity": sales.get(item.item_id).sold_quantity if item.item_id in sales else 0,
                 "is_on_sale": item.is_on_sale,
                 "detail_url": item.detail_url,
                 "main_image_url": item.main_image_url,

@@ -15,12 +15,41 @@ from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import orders as domain_orders
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import ConnectionState
+from xianyu_agent.protocol.orders_client import OrderSyncError, XianyuOrdersClient
 from xianyu_agent.services.delivery_service import DeliveryService
 from xianyu_agent.services.guardrails import Guardrails
 from xianyu_agent.utils.time_utils import format_local
 
 app = typer.Typer(help="订单查询。")
 console = Console()
+
+
+@app.command("sync")
+def sync_orders(
+    account_id: str = typer.Option(..., "--account", "-a", help="已扫码登录的账号标识。"),
+    page_size: int = typer.Option(30, "--page-size", min=1, max=50),
+    max_pages: int = typer.Option(100, "--max-pages", min=1, max=100),
+) -> None:
+    """只读同步卖家已售订单到本地镜像, 不触发发货或修改闲鱼订单。"""
+
+    async def _run() -> None:
+        try:
+            snapshot = await XianyuOrdersClient().fetch_all_sold(
+                account_id,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+            result = await domain_orders.apply_sold_orders_snapshot(account_id, snapshot.orders)
+        except (OrderSyncError, ValueError) as exc:
+            console.print(f"[red]同步失败:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+        console.print(
+            f"[green]OK[/green] {account_id} 卖家订单镜像已同步: "
+            f"远端报告 {snapshot.reported_total} 条 / {snapshot.pages} 页, "
+            f"本次解析 {result.total} 条, 新增 {result.created}, 更新 {result.updated}。"
+        )
+
+    asyncio.run(_run())
 
 
 @app.command("list")
@@ -41,7 +70,9 @@ def list_orders(
         table.add_column("order_id")
         table.add_column("item", overflow="fold")
         table.add_column("amount")
+        table.add_column("quantity")
         table.add_column("status", style="magenta")
+        table.add_column("placed_at")
         table.add_column("paid_at")
         table.add_column("delivered_at")
         for r in rows:
@@ -50,7 +81,9 @@ def list_orders(
                 r.order_id,
                 (r.item_title or "-")[:30],
                 str(r.amount),
+                str(r.quantity),
                 r.status,
+                format_local(r.placed_at) or "-",
                 format_local(r.paid_at) or "-",
                 format_local(r.delivered_at) or "-",
             )
@@ -81,7 +114,9 @@ def show_order(order_id: int = typer.Argument(...)) -> None:
         console.print(f"item:       {r.item_title or '-'} ({r.item_id or '-'})")
         console.print(f"buyer:      {r.buyer_name or '-'} ({r.buyer_id or '-'})")
         console.print(f"amount:     {r.amount}")
+        console.print(f"quantity:   {r.quantity}")
         console.print(f"status:     {r.status}")
+        console.print(f"placed_at:  {format_local(r.placed_at) or '-'}")
         console.print(f"paid_at:    {format_local(r.paid_at) or '-'}")
         console.print(f"delivered:  {format_local(r.delivered_at) or '-'}")
         console.print(f"发货内容:   [cyan]{r.delivery_content or '(未发货)'}[/cyan]")

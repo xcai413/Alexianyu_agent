@@ -434,7 +434,11 @@ class Item(Base):
 
 
 class Order(Base):
-    """订单。"""
+    """订单本地镜像。
+
+    来源可以是实时 WS 推送或卖家已售订单的只读同步。订单同步不触发发货、
+    不写回闲鱼, 并且只保留展示和运营汇总所需字段。
+    """
 
     __tablename__ = "orders"
 
@@ -448,9 +452,11 @@ class Order(Base):
     buyer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     buyer_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), default=OrderStatus.PENDING_PAYMENT, nullable=False
     )
+    placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivery_content: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -472,6 +478,7 @@ class Order(Base):
     __table_args__ = (
         Index("uq_orders_account_order", "account_id", "order_id", unique=True),
         Index("ix_orders_status_paid", "status", "paid_at"),
+        Index("ix_orders_account_item_status", "account_id", "item_id", "status"),
     )
 
 

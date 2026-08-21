@@ -15,10 +15,12 @@ from xianyu_agent.domain import (
     cards as domain_cards,
     items as domain_items,
     messages as domain_messages,
+    orders as domain_orders,
 )
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState, MessageContentType, MessageReceived
 from xianyu_agent.protocol.items_client import RemoteItem
+from xianyu_agent.protocol.orders_client import RemoteSoldOrder
 from xianyu_agent.services.guardrails import write_guardrail_event
 from xianyu_agent.tui.app import DashboardApp
 from xianyu_agent.tui.widgets import (
@@ -56,6 +58,22 @@ async def seeded_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 None,
                 None,
                 {"id": "item-t"},
+            )
+        ],
+    )
+    await domain_orders.apply_sold_orders_snapshot(
+        "acc-t",
+        [
+            RemoteSoldOrder(
+                order_id="order-t",
+                item_id="item-t",
+                buyer_id="buyer-t",
+                buyer_name="买家",
+                amount=9.9,
+                quantity=2,
+                status="paid",
+                placed_at=datetime.now(UTC),
+                raw_payload={},
             )
         ],
     )
@@ -106,7 +124,7 @@ async def test_dashboard_renders_data_and_quits(seeded_db) -> None:
             "acc-t",
             "测试在售商品",
             "9.9",
-            "0",
+            "2",
             "item-t",
         ]
 

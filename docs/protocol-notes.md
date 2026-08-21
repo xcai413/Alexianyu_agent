@@ -159,3 +159,21 @@ body 通常是 base64 编码的 JSON,需要先解码再解析。常见字段:
   `auth refresh --account <id>` 换取新 token。
 - 真实帧校准使用 `protocol capture`;该命令不保存原始字符串值,仅保存字段结构、类型、长度
   与不可逆 SHA-256 摘要,并由账号级文件锁防止重复连接。
+
+## 9. 卖家已售订单读取(开发完成，待真实账号校准)
+
+入口:`xianyu-agent order sync --account <id>`。该命令只发送订单列表读取请求并写入本地
+SQLite 镜像；不会发货、退款、评价、修改订单或触发自动化。
+
+当前实现的待校准契约:
+
+| 项目 | 当前值 | 证据状态 |
+|------|--------|----------|
+| API | `mtop.taobao.idle.trade.merchant.sold.get` | 来自旧项目的只读架构审查，待本项目真实请求确认 |
+| 请求数据 | `pageNumber` / `rowsPerPage` / `queryCode=ALL` | 同上，待校准 |
+| 响应分页 | `data.module.items` / `totalCount` / `nextPage` | 同上，待校准 |
+| 每笔订单 | `commonData.orderId` / `itemId` / `orderStatus`；`priceVO.buyNum` | 同上，待校准 |
+
+本地保存时仅白名单化保留订单号、商品 ID、状态、下单时间、买家 ID/昵称、金额和数量。响应中
+可能存在的电话、收货地址等字段不会写入 `orders.raw_payload`。成功的真实同步后，需保存脱敏的
+字段结构证据，再把本节的“待校准”改为已验证。
