@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from xianyu_agent.db import DaemonInstance
 from xianyu_agent.domain import accounts as domain_accounts, daemon as daemon_domain
 from xianyu_agent.services.daemon_health import DaemonHealth, observe_daemon
+from xianyu_agent.utils.time_utils import format_duration
 
 WORKER_STALE_AFTER_S = 90.0
 ACTIVE_WORKER_STATES = {"connected", "connecting", "reconnecting"}
@@ -24,6 +25,9 @@ class AccountObservation:
     reconnect_attempts: int
     last_heartbeat_at: datetime | None
     last_error: str | None
+    risk_code: str | None
+    risk_cooldown_until: datetime | None
+    risk_status: str | None
     issue: str | None
 
 
@@ -51,6 +55,11 @@ class RuntimeSnapshot:
             for account in self.drifted_accounts
             if account.issue
         )
+        alerts.extend(
+            f"{account.account_id}: {account.risk_status}"
+            for account in self.accounts
+            if account.risk_status
+        )
         return tuple(alerts)
 
 
@@ -73,6 +82,14 @@ async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnaps
         actual = str(row.status) if row is not None else "offline"
         heartbeat = row.last_heartbeat_at if row is not None else None
         heartbeat_age_s = _age_seconds(heartbeat, current) if heartbeat else None
+        risk_code = row.risk_code if row is not None else None
+        risk_cooldown_until = row.risk_cooldown_until if row is not None else None
+        risk_status = _risk_status(
+            code=risk_code,
+            cooldown_until=risk_cooldown_until,
+            recovery_required=bool(row.risk_recovery_required) if row is not None else False,
+            now=current,
+        )
         if (
             actual == "connected"
             and heartbeat_age_s is not None
@@ -95,6 +112,9 @@ async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnaps
                 reconnect_attempts=row.reconnect_attempts if row is not None else 0,
                 last_heartbeat_at=heartbeat,
                 last_error=row.last_error if row is not None else None,
+                risk_code=risk_code,
+                risk_cooldown_until=risk_cooldown_until,
+                risk_status=risk_status,
                 issue=issue,
             )
         )
@@ -130,3 +150,20 @@ def _elapsed_seconds(start: datetime, end: datetime) -> float:
     started_at = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
     ended_at = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
     return max(0.0, (ended_at - started_at).total_seconds())
+
+
+def _risk_status(
+    *,
+    code: str | None,
+    cooldown_until: datetime | None,
+    recovery_required: bool,
+    now: datetime,
+) -> str | None:
+    if not code or not recovery_required:
+        return None
+    if cooldown_until is None:
+        return f"{code},需手动 auth refresh"
+    remaining = _elapsed_seconds(now, cooldown_until)
+    if remaining > 0:
+        return f"{code} 验证冷却 {format_duration(remaining)}"
+    return f"{code} 冷却结束,需手动 auth refresh"

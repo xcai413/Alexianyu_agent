@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, get_async_session
-from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.domain import accounts as domain_accounts, worker_risk
 from xianyu_agent.protocol.qr_login import QRLoginClient, QRLoginSession, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws_auth import WsAuthError, WsTokenProvider
@@ -99,6 +99,13 @@ def status(
         table.add_row("ws_token_valid", "Y" if ws_status.valid else "N")
         table.add_row("ws_device_id", ws_status.device_id_masked or "-")
         table.add_row("ws_token_expires_at", format_local(ws_status.expires_at) or "-")
+        risk = await worker_risk.get(account_id)
+        if risk is not None:
+            table.add_row("ws_risk_code", risk.code)
+            table.add_row(
+                "ws_risk_cooldown_until", format_local(risk.cooldown_until) or "-"
+            )
+            table.add_row("ws_risk_recovery_required", "Y")
         console.print(table)
 
     lock = _acquire_auth_lock(account_id, "token-refresh")
@@ -125,6 +132,14 @@ def refresh(
                 f"[cyan]pool stop --account {account_id}[/cyan],避免并发刷新。"
             )
             raise typer.Exit(code=2)
+        risk = await worker_risk.get(account_id)
+        if risk is not None and risk.is_cooling():
+            console.print(
+                "[yellow]账号处于 FAIL_SYS_USER_VALIDATE 验证冷却。[/yellow] "
+                f"请在 {format_local(risk.cooldown_until)} 后完成 App 人工验证,"
+                "再执行一次 auth refresh。"
+            )
+            raise typer.Exit(code=2)
         signer = CookieSigner()
         if await signer.fingerprint(account_id) is None:
             console.print("[red]无 Cookie 可刷新。[/red] 请先 [cyan]auth login[/cyan]。")
@@ -135,11 +150,15 @@ def refresh(
             )
         except WsAuthError as exc:
             console.print(f"[red]IM Token 刷新失败:{exc}[/red]")
+            await _record_user_validate_circuit(account_id, exc)
             if "Session过期" in str(exc):
                 console.print(
                     f"请执行 [cyan]auth qr-login --account {account_id}[/cyan] 重新扫码。"
                 )
             raise typer.Exit(code=2) from exc
+        cleared = await worker_risk.clear_after_refresh(account_id)
+        if cleared:
+            console.print("[green]验证熔断已解除;可在确认后启动该账号 Worker。[/green]")
         console.print(
             f"[green]OK[/green] 账号 [cyan]{account_id}[/cyan] IM Token 已加密缓存;"
             f"有效期至 {format_local(credentials.expires_at)}。"
@@ -393,18 +412,45 @@ async def _persist_qr_login_session(
         f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
         "(闲鱼身份已确认),Cookie 已加密保存。"
     )
+    risk = await worker_risk.get(account_id)
+    if risk is not None and risk.is_cooling():
+        console.print(
+            "[yellow]账号仍处于 FAIL_SYS_USER_VALIDATE 验证冷却,未自动请求 IM Token。[/yellow] "
+            f"请在 {format_local(risk.cooldown_until)} 后完成 App 人工验证,"
+            "再执行一次 auth refresh。"
+        )
+        raise typer.Exit(code=3)
     try:
         credentials = await (token_provider or WsTokenProvider(signer)).get_credentials(
             account_id, force_refresh=True
         )
     except WsAuthError as exc:
         console.print(f"[yellow]Cookie 已保存,但 IM Token 换取失败:{exc}[/yellow]")
-        console.print(f"稍后执行 [cyan]auth refresh --account {account_id}[/cyan]。")
+        opened = await _record_user_validate_circuit(account_id, exc)
+        if not opened:
+            console.print(f"稍后执行 [cyan]auth refresh --account {account_id}[/cyan]。")
         raise typer.Exit(code=3) from exc
+    cleared = await worker_risk.clear_after_refresh(account_id)
+    if cleared:
+        console.print("[green]验证熔断已解除;可在确认后启动该账号 Worker。[/green]")
     console.print(
         "[green]OK[/green] IM Token 已加密缓存,设备 ID 保持不变;"
         f"有效期至 {format_local(credentials.expires_at)}。"
     )
+
+
+async def _record_user_validate_circuit(account_id: str, exc: WsAuthError) -> bool:
+    """记录明确的 IM 人工验证错误;不对其他认证错误改变既有策略。"""
+    if not worker_risk.is_user_validate_error(exc):
+        return False
+    circuit = await worker_risk.open_user_validate(account_id)
+    if circuit is not None:
+        console.print(
+            "[yellow]已暂停该账号的 WS 重试。[/yellow] "
+            f"验证冷却至 {format_local(circuit.cooldown_until)};"
+            "完成 App 人工验证后仅执行一次 auth refresh。"
+        )
+    return True
 
 
 def _acquire_auth_lock(account_id: str, operation: str) -> AccountConnectionLock:

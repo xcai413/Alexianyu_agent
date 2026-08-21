@@ -13,7 +13,11 @@ from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, get_async_session
-from xianyu_agent.domain import messages as domain_messages, orders as domain_orders
+from xianyu_agent.domain import (
+    messages as domain_messages,
+    orders as domain_orders,
+    worker_risk,
+)
 from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
@@ -26,6 +30,7 @@ from xianyu_agent.protocol.events import (
     OrderPaid,
     SystemNotice,
 )
+from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.services.delivery_service import DeliveryService
 from xianyu_agent.services.guardrails import Guardrails, write_guardrail_event
 from xianyu_agent.services.reply_engine import ReplyEngine
@@ -52,7 +57,9 @@ class AccountWorker:
         self._client = client or WsClient(
             account_id,
             on_event=self._on_event if persist_events else None,
+            on_auth_failure=self._on_auth_failure,
         )
+        self._client.on_auth_failure = self._on_auth_failure
         if self._guardrails is None and self._automation_mode == "active":
             self._guardrails = Guardrails()
         if self._reply_engine is None and persist_events and self._automation_mode == "active":
@@ -65,6 +72,13 @@ class AccountWorker:
             self._delivery_service = DeliveryService(
                 sender=self._send_reply, guardrails=self._guardrails
             )
+
+    async def _on_auth_failure(self, error: WsAuthError) -> bool:
+        """将明确的人工验证错误交给持久化熔断器处理。"""
+        if not worker_risk.is_user_validate_error(error):
+            return False
+        await worker_risk.open_user_validate(self.account_id)
+        return True
 
     async def _on_event(self, event: EventEnvelope) -> None:
         """Default persistence handler: write messages and orders to SQLite."""

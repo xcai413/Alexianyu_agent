@@ -63,6 +63,20 @@
   返回退出码 2,命令保留在数据库供 Agent 查询。
 - `--wait 0` 只提交不等待,输出会明确标注“未等待执行”。
 - `pool status` 显示 `enabled`、`desired` 与数据库实际状态;CLI 进程不再伪造内存 Worker 状态。
+- `FAIL_SYS_USER_VALIDATE` 时，`pool status` 额外显示风险代码和冷却截止；`pool start/restart`
+  会拒绝该账号，直到一次成功的 `auth refresh` 解除人工恢复闸门。
+
+### IM 人工验证熔断
+
+当 `auth refresh`、扫码后的 IM Token 校验或后台 Worker 收到
+`FAIL_SYS_USER_VALIDATE` 时，系统只做本地保护：停止该账号的期望 Worker、记录 20 分钟冷却和
+审计事件，不刷新 Cookie、不改 device ID、不改请求头、不更换网络。冷却内 `auth refresh` 会直接
+拒绝且不请求远端；冷却结束后管理员在闲鱼 App 完成人工验证，再执行一次：
+
+    uv run xianyu-agent auth refresh --account <id>
+    uv run xianyu-agent auth status --account <id>
+
+只有 `ws_token_valid=Y` 且刷新命令成功后，`pool start --account <id>` 才会解除阻断并可运行。
 
 ### daemon — P0.1 常驻运行(当前可用)
 

@@ -196,6 +196,9 @@ class AccountPool:
                 "last_heartbeat_at": format_local(row.last_heartbeat_at) or None,
                 "last_error": row.last_error,
                 "started_at": format_local(row.started_at) or None,
+                "risk_code": row.risk_code,
+                "risk_cooldown_until": format_local(row.risk_cooldown_until) or None,
+                "risk_recovery_required": row.risk_recovery_required,
             }
         result: list[dict] = []
         for acc in accounts:
@@ -214,6 +217,9 @@ class AccountPool:
                     "started_at": format_local(worker.started_at)
                     if worker and worker.started_at
                     else row.get("started_at"),
+                    "risk_code": row.get("risk_code"),
+                    "risk_cooldown_until": row.get("risk_cooldown_until"),
+                    "risk_recovery_required": row.get("risk_recovery_required", False),
                 }
             )
         return result

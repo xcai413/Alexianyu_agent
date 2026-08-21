@@ -26,7 +26,7 @@ class AccountsPanel(DataTable):
         self.cursor_type = "row"
 
     async def on_mount(self) -> None:
-        self.add_columns("账号", "启用", "期望", "实际", "一致", "心跳(s)", "错误")
+        self.add_columns("账号", "启用", "期望", "实际", "一致", "心跳(s)", "验证", "错误")
 
     async def reload(self, snapshot: RuntimeSnapshot | None = None) -> None:
         runtime = snapshot or await build_runtime_snapshot()
@@ -39,6 +39,7 @@ class AccountsPanel(DataTable):
                 row.actual_state,
                 "Y" if row.aligned else "N",
                 f"{row.heartbeat_age_s:.0f}" if row.heartbeat_age_s is not None else "-",
+                (row.risk_status or "-")[:34],
                 (row.last_error or row.issue or "-")[:30],
                 key=row.account_id,
             )

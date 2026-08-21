@@ -18,6 +18,7 @@ from xianyu_agent.domain import (
     accounts as domain_accounts,
     daemon as daemon_domain,
     worker_commands,
+    worker_risk,
 )
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.daemon_lock import DaemonLock
@@ -192,6 +193,10 @@ class RuntimeDaemon:
         if action in {"start", "restart"} and not account.enabled:
             msg = f"account disabled before command execution: {account_id}"
             raise ValueError(msg)
+        if action in {"start", "restart"}:
+            blocked = await worker_risk.start_block_reason(account_id)
+            if blocked:
+                raise ValueError(blocked)
         if action == "start":
             return self._pool.ensure_started(account_id)
         if action == "stop":

@@ -27,6 +27,7 @@ def _status_table(rows: list[dict]) -> Table:
     table.add_column("db", style="magenta")
     table.add_column("reconnects")
     table.add_column("last_heartbeat")
+    table.add_column("risk", overflow="fold")
     table.add_column("last_error", overflow="fold")
     for row in rows:
         table.add_row(
@@ -36,9 +37,19 @@ def _status_table(rows: list[dict]) -> Table:
             row["db_status"],
             str(row["reconnect_attempts"]),
             row["last_heartbeat_at"] or "-",
+            _risk_text(row),
             (row["last_error"] or "-")[:80],
         )
     return table
+
+
+def _risk_text(row: dict) -> str:
+    code = row.get("risk_code")
+    if not code:
+        return "-"
+    if row.get("risk_recovery_required"):
+        return f"{code} / {row.get('risk_cooldown_until') or '需手动刷新'}"
+    return str(code)
 
 
 @app.command("status")
