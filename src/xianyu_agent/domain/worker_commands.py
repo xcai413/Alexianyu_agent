@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 
-from xianyu_agent.db import Account, WorkerCommand, get_async_session
+from xianyu_agent.db import Account, WorkerCommand, WorkerStatus, get_async_session
 from xianyu_agent.db.models import WorkerCommandStatus, WorkerDesiredState
+from xianyu_agent.domain import worker_risk
 
 ACTIONS = {"start", "stop", "restart"}
 TERMINAL_STATUSES = {WorkerCommandStatus.SUCCEEDED, WorkerCommandStatus.FAILED}
@@ -34,6 +35,10 @@ async def submit(
         if action in {"start", "restart"} and not account.enabled:
             msg = f"账号 {account_id} 已禁用"
             raise ValueError(msg)
+        if action in {"start", "restart"}:
+            blocked = await worker_risk.start_block_reason(account_id)
+            if blocked:
+                raise ValueError(blocked)
         account.desired_state = (
             WorkerDesiredState.STOPPED if action == "stop" else WorkerDesiredState.RUNNING
         )
@@ -75,7 +80,21 @@ async def submit_many(
             WorkerDesiredState.STOPPED if action == "stop" else WorkerDesiredState.RUNNING
         )
         rows: list[WorkerCommand] = []
+        risk_rows = {
+            row.account_id: row
+            for row in (
+                await session.execute(
+                    select(WorkerStatus).where(WorkerStatus.account_id.in_([a.id for a in accounts]))
+                )
+            )
+            .scalars()
+            .all()
+        }
         for account in accounts:
+            if action in {"start", "restart"}:
+                risk = risk_rows.get(account.id)
+                if risk is not None and risk.risk_recovery_required:
+                    continue
             account.desired_state = desired_state
             row = WorkerCommand(
                 command_id=uuid.uuid4().hex,

@@ -16,6 +16,7 @@ from xianyu_agent.domain import (
     items as domain_items,
     messages as domain_messages,
     orders as domain_orders,
+    worker_risk,
 )
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState, MessageContentType, MessageReceived
@@ -187,4 +188,19 @@ async def test_dashboard_shows_guardrail_banner(seeded_db) -> None:
         await pilot.pause()
         assert "风险" in str(app._risk.content)
         assert "金额超限" in str(app._risk.content)
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_user_validate_cooldown(seeded_db) -> None:
+    _ = seeded_db
+    await worker_risk.open_user_validate("acc-t")
+    app = DashboardApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "FAIL_SYS_USER_VALIDATE" in str(app._risk.content)
+        accounts = app.query_one(AccountsPanel)
+        first_key = next(iter(accounts.rows))
+        assert any("验证冷却" in str(cell) for cell in accounts.get_row(first_key))
         await pilot.press("q")

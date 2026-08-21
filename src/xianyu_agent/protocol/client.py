@@ -56,6 +56,7 @@ EventHandler = Callable[[EventEnvelope], Awaitable[None]]
 FrameHandler = Callable[[WsFrame], Awaitable[None]]
 StateHandler = Callable[[ConnectionStateChanged], Awaitable[None]]
 ErrorHandler = Callable[[ErrorOccurred], Awaitable[None]]
+AuthFailureHandler = Callable[[WsAuthError], Awaitable[bool]]
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 MIN_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
@@ -108,6 +109,7 @@ class WsClient:
         on_event: EventHandler | None = None,
         on_state: StateHandler | None = None,
         on_error: ErrorHandler | None = None,
+        on_auth_failure: AuthFailureHandler | None = None,
         on_frame: FrameHandler | None = None,
         config: ClientConfig | None = None,
         signer: CookieSigner | None = None,
@@ -124,6 +126,7 @@ class WsClient:
         self.on_event = on_event
         self.on_state = on_state
         self.on_error = on_error
+        self.on_auth_failure = on_auth_failure
         self.on_frame = on_frame
         self._state = ConnectionState.IDLE
         self._stop = asyncio.Event()
@@ -185,6 +188,10 @@ class WsClient:
                 if row is None:
                     row = DbWorkerStatus(account_id=account.id, status=state)
                     session.add(row)
+                elif state == ConnectionState.DISCONNECTED and row.risk_recovery_required:
+                    # 熔断已写入风险状态; Worker 退出不能覆盖它。
+                    await session.commit()
+                    return
                 else:
                     row.status = state
                 if state == ConnectionState.CONNECTED:
@@ -287,6 +294,18 @@ class WsClient:
                         retry_delay = self.config.auth_retry_delay_s
                     await self._emit_state(new_state, msg)
                     await self._emit_error("ws_auth" if auth_failure else "ws_loop", msg)
+                    if auth_failure and self.on_auth_failure is not None:
+                        try:
+                            stop_retry = await self.on_auth_failure(exc)
+                        except Exception as handler_exc:
+                            logger.warning(
+                                "ws auth failure handler failed account=%s error=%s",
+                                self.account_id,
+                                handler_exc,
+                            )
+                        else:
+                            if stop_retry:
+                                break
                 if self._stop.is_set():
                     break
                 backoff = retry_delay if retry_delay is not None else self._compute_backoff()

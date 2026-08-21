@@ -272,6 +272,12 @@ class WorkerStatus(Base):
     )
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    risk_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    risk_detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    risk_cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    risk_recovery_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

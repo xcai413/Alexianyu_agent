@@ -10,7 +10,11 @@ import pytest
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import database as db_mod
 from xianyu_agent.db.models import WorkerDesiredState
-from xianyu_agent.domain import accounts as domain_accounts, daemon as daemon_domain
+from xianyu_agent.domain import (
+    accounts as domain_accounts,
+    daemon as daemon_domain,
+    worker_risk,
+)
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState
 from xianyu_agent.services import daemon_health
@@ -91,3 +95,20 @@ async def test_snapshot_flags_worker_running_when_stopped_is_expected(
 
     assert snapshot.accounts[0].aligned is False
     assert snapshot.accounts[0].issue == "期望 stopped,实际 connected"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reports_user_validate_cooldown_as_operational_alert(observability_db) -> None:
+    _ = observability_db
+    await domain_accounts.create_account("a")
+    now = datetime(2026, 8, 21, 4, 0, tzinfo=UTC)
+    await worker_risk.open_user_validate("a", now=now)
+
+    snapshot = await build_runtime_snapshot(now=now + timedelta(minutes=5))
+
+    observed = snapshot.accounts[0]
+    assert observed.actual_state == "risk_cooling"
+    assert observed.aligned is True
+    assert observed.risk_code == "FAIL_SYS_USER_VALIDATE"
+    assert observed.risk_status == "FAIL_SYS_USER_VALIDATE 验证冷却 00:15:00"
+    assert "a: FAIL_SYS_USER_VALIDATE 验证冷却 00:15:00" in snapshot.operational_alerts

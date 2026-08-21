@@ -118,6 +118,9 @@ TUI 已接入 daemon 总状态和 Worker 状态差异;MCP 的 daemon 总控制�
 - `doctor` 只读检查数据库写锁、Alembic head、Fernet、Cookie 可解密性、日志目录、
   daemon 单实例、账号状态漂移与 Windows 双任务;不打印明文 Cookie/Token。
 - `ws_credentials` 仅保存 Fernet 加密的 IM accessToken、稳定设备 ID 与过期时间。
+- `FAIL_SYS_USER_VALIDATE` 是独立的人工验证熔断：只停止触发它的账号，将风险代码、检测时间、
+  冷却截止和“需人工恢复”写入 `worker_status` 与审计日志；冷却期间不再自动请求 IM Token。
+  冷却结束后仍必须由管理员手动执行一次成功的 `auth refresh` 才能解除，其他账号不受影响。
 - WS 只有在 transport 握手、`/reg` 与 `ackDiff` 全部完成后才进入 connected;推送先 ACK,
   再解包 `syncPushPackage` 并标准化事件。
 - `XIANYU_AUTOMATION_MODE=observe` 为默认值,只落库和审计;显式 active 才允许规则回复/发货。
