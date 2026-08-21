@@ -23,7 +23,15 @@
 
 ### order — 订单
 
-`order list --account <id> [--status] [--limit]`、`order show <id>`(含发货内容/失败原因)
+`order sync --account <id> [--page-size 30] [--max-pages 100]` 只读同步卖家已售订单到本地镜像。
+它不会发货、退款、评价、删除订单或修改闲鱼端状态；接口失败时不会改写现有本地订单。
+多页同步默认每页间隔 1 秒，最大页数受 `--max-pages` 限制。
+
+`order list --account <id> [--status] [--limit]`、`order show <id>`(含数量、下单时间、发货内容/失败原因)。
+订单列表当前优先显示本地镜像；WS 实时订单与 `order sync` 历史订单按 `(账号, 订单号)` 幂等合并。
+
+商品明细“已售”口径为同一账号和商品 ID 下，状态为 `paid`、`delivered` 或 `completed` 的
+`quantity` 之和；已取消、退款和未知状态不计入，避免夸大已售件数。
 
 ### item — 在售商品镜像(只读)
 
@@ -137,7 +145,7 @@ Windows Watchdog 每分钟采样;进度保存在 `task_logs`,原始脱敏样本�
 | `auth_login` / `auth_status` | Cookie 录入 / 指纹 |
 | `message_list` | 最近消息 |
 | `item_sync` / `item_list` / `item_get` | 只读在售商品同步 / 本地镜像查询 |
-| `order_list` / `order_get` | 订单 |
+| `order_sync` / `order_list` / `order_get` | 只读订单同步 / 订单 |
 | `rule_create` / `rule_list` / `rule_set_enabled` / `rule_delete` / `rule_test` | 规则 |
 | `card_create` / `card_list` / `card_restock` / `card_consume` / `card_set_enabled` / `card_delete` | 卡密 |
 | `maintenance_purge_messages` | 消息清理 |

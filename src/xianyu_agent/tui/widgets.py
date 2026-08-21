@@ -128,7 +128,7 @@ class ItemsPanel(DataTable):
         self.cursor_type = "row"
 
     async def on_mount(self) -> None:
-        self.add_columns("账号", "标题", "价格", "状态", "商品 ID", "最后同步")
+        self.add_columns("账号", "标题", "价格", "已售", "商品 ID", "最后同步")
 
     async def reload(self, accounts: list[str]) -> int:
         """刷新全部账号的在售镜像并返回汇总数量。"""
@@ -136,14 +136,16 @@ class ItemsPanel(DataTable):
         total = 0
         for account_id in accounts:
             rows = await domain_items.list_items(account_id, on_sale_only=True)
+            sales = await domain_orders.sales_by_item(account_id)
             total += len(rows)
             for item in rows:
                 synced_at = to_local(item.last_synced_at).strftime("%m-%d %H:%M")
+                sale = sales.get(item.item_id)
                 self.add_row(
                     account_id,
                     item.title[:42],
                     item.price or "-",
-                    item.status or "-",
+                    str(sale.sold_quantity) if sale is not None else "0",
                     item.item_id,
                     synced_at,
                     key=f"{account_id}:{item.id}",

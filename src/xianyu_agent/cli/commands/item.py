@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.domain import items as domain_items
+from xianyu_agent.domain import items as domain_items, orders as domain_orders
 from xianyu_agent.protocol.items_client import ItemSyncError, XianyuItemsClient
 from xianyu_agent.utils.time_utils import format_local
 
@@ -68,16 +68,18 @@ def list_items(
         table.add_column("item_id", style="cyan")
         table.add_column("标题", overflow="fold")
         table.add_column("价格")
-        table.add_column("状态")
+        table.add_column("已售")
         table.add_column("在售")
         table.add_column("最后同步")
+        sales = await domain_orders.sales_by_item(account_id)
         for row in rows:
+            sale = sales.get(row.item_id)
             table.add_row(
                 str(row.id),
                 row.item_id,
                 row.title,
                 row.price or "-",
-                row.status or "-",
+                str(sale.sold_quantity) if sale is not None else "0",
                 "Y" if row.is_on_sale else "N",
                 format_local(row.last_synced_at) or "-",
             )

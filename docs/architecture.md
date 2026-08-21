@@ -49,7 +49,7 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 | `worker_status` | Worker 心跳(30s)与状态 | WsClient |
 | `items` | 账号在售商品只读镜像 | item sync |
 | `messages` | 聊天消息(幂等按 message_id) | Worker |
-| `orders` | 订单状态机 | Worker / DeliveryService |
+| `orders` | 订单本地镜像、数量与状态 | Worker / `order sync` / DeliveryService |
 | `cards` / `card_consumptions` | 卡密库存与消费 | CLI / DeliveryService |
 | `reply_rules` / `reply_logs` | 规则与回复记录 | CLI / ReplyEngine |
 | `audit_logs` | 审计与 guardrail 事件 | TUI / guardrails |
@@ -65,6 +65,9 @@ CLI / TUI / MCP ──> domain 层(同一事实源,无重复逻辑)
 - **状态机防伪**:上游 `delivered` 确认帧只在确有发货内容时更新订单状态,避免掩盖失败。
 - **商品只读镜像**:`item sync` 只调用闲鱼商品列表;完整快照成功才将未出现的历史商品标记为非在售,
   请求失败不改动原镜像,且不会向闲鱼写入商品变更。
+- **订单只读镜像**:`order sync` 读取卖家已售订单并按 `(账号,订单号)` 幂等合并；订单是历史记录，
+  本次快照中缺失的本地订单不会被删除或改状态。商品“已售”只汇总 `paid`、`delivered`、
+  `completed` 订单的数量，退款、取消和未知状态不计入。
 - **guardrails 事件进 audit_logs**:任何进程(含 TUI)都能看到被拦原因。
 
 ## 扩展点
