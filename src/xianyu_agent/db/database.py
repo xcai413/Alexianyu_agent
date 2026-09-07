@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from xianyu_agent.config import get_settings
-from xianyu_agent.db.models import Base
+from xianyu_agent.infrastructure.database.models import Base
 
 
 def _make_engine() -> AsyncEngine:
