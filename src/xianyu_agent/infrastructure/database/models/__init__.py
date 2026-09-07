@@ -26,6 +26,7 @@ from .inventory import Card, CardConsumption
 from .item import Item
 from .message import Message
 from .order import Order
+from .outbox import TransactionalOutbox
 from .rules import ReplyLog, ReplyRule
 from .runtime import DaemonInstance, WorkerCommand, WorkerStatus
 
@@ -52,6 +53,7 @@ __all__ = [
     "RuleType",
     "TaskLog",
     "TaskStatus",
+    "TransactionalOutbox",
     "WorkerCommand",
     "WorkerCommandStatus",
     "WorkerDesiredState",

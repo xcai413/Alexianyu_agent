@@ -6,6 +6,7 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import Protocol, Self
 
+from .outbox import OutboxRepository
 from .repositories import AccountRepository
 
 
@@ -18,6 +19,9 @@ class UnitOfWork(Protocol):
 
     @property
     def accounts(self) -> AccountRepository: ...
+
+    @property
+    def outbox(self) -> OutboxRepository: ...
 
     async def __aenter__(self) -> Self: ...
 
