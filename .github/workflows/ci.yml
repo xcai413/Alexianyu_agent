@@ -54,6 +54,7 @@ jobs:
           src/xianyu_agent/application/ports/secret_vault.py
           src/xianyu_agent/application/ports/unit_of_work.py
           src/xianyu_agent/composition.py
+          src/xianyu_agent/foundation
           src/xianyu_agent/runtime/scheduler
           src/xianyu_agent/infrastructure/database/models
           src/xianyu_agent/infrastructure/database/repositories/account.py
