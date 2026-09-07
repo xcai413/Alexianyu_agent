@@ -51,8 +51,8 @@ class Order(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="orders")
-    consumptions: Mapped[list[CardConsumption]] = relationship(back_populates="order")
+    account: Mapped["Account"] = relationship(back_populates="orders")
+    consumptions: Mapped[list["CardConsumption"]] = relationship(back_populates="order")
 
     __table_args__ = (
         Index("uq_orders_account_order", "account_id", "order_id", unique=True),
