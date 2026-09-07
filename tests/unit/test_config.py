@@ -1,4 +1,4 @@
-"""Unit tests for FERNET_KEY auto-generation (docs promise: "首次启动自动生成")."""
+"""Unit tests for configuration primitives."""
 
 from __future__ import annotations
 
@@ -50,3 +50,49 @@ def test_account_lock_path_is_collision_resistant(tmp_path: Path) -> None:
     assert first.parent == tmp_path / "runtime" / "accounts"
     assert "/" not in first.name
     assert "?" not in second.name
+
+
+def test_default_database_url_remains_sqlite(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path)
+    assert settings.database_backend == "sqlite"
+    assert settings.db_url == f"sqlite+aiosqlite:///{(tmp_path / 'xianyu.db').as_posix()}"
+    assert settings.sync_db_url == f"sqlite:///{(tmp_path / 'xianyu.db').as_posix()}"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_async", "expected_sync", "backend"),
+    [
+        (
+            "mysql://user:secret@db.example:3306/xianyu",
+            "mysql+asyncmy://user:secret@db.example:3306/xianyu",
+            "mysql+pymysql://user:secret@db.example:3306/xianyu",
+            "mysql",
+        ),
+        (
+            "postgresql://user:secret@db.example:5432/xianyu",
+            "postgresql+asyncpg://user:secret@db.example:5432/xianyu",
+            "postgresql+psycopg://user:secret@db.example:5432/xianyu",
+            "postgresql",
+        ),
+    ],
+)
+def test_database_url_normalizes_supported_remote_backends(
+    tmp_path: Path,
+    configured: str,
+    expected_async: str,
+    expected_sync: str,
+    backend: str,
+) -> None:
+    settings = Settings(data_dir=tmp_path, database_url=configured)
+    assert settings.db_url == expected_async
+    assert settings.sync_db_url == expected_sync
+    assert settings.database_backend == backend
+
+
+def test_explicit_database_url_overrides_db_path(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        db_path=tmp_path / "ignored.db",
+        database_url="sqlite:///./explicit.db",
+    )
+    assert settings.db_url == "sqlite+aiosqlite:///./explicit.db"
