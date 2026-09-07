@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, String, Text
+from sqlalchemy import JSON, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -17,3 +17,7 @@ class SecretRecord(Base):
     key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, str]] = mapped_column("metadata", JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_secret_vault_entries_key_version", "key_version"),
+    )

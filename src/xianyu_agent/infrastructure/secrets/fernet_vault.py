@@ -22,6 +22,7 @@ from xianyu_agent.infrastructure.database.models.secret import SecretRecord
 _MASTER_KEY_ENV = "XIANYU_SECRET_MASTER_KEY"
 _MASTER_KEY_VERSION_ENV = "XIANYU_SECRET_MASTER_KEY_VERSION"
 _PREVIOUS_KEYS_ENV = "XIANYU_SECRET_PREVIOUS_KEYS"
+_SECRET_ENVELOPE_VERSION = 1
 
 
 class MissingMasterKeyError(RuntimeError):
@@ -103,7 +104,10 @@ class FernetKeyring:
             plaintext = fernet.decrypt(ciphertext.encode("ascii"))
         except (InvalidToken, UnicodeEncodeError) as exc:
             raise SecretDecryptionError("secret decryption failed") from exc
-        return plaintext.decode("utf-8")
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SecretDecryptionError("secret decryption failed") from exc
 
 
 class SqlAlchemySecretVault:
@@ -120,6 +124,35 @@ class SqlAlchemySecretVault:
     def _sessions(self) -> async_sessionmaker[AsyncSession]:
         return self._session_factory or legacy_database.async_session_factory
 
+    def _encrypt_for_ref(self, ref: SecretRef, plaintext: str) -> tuple[str, str]:
+        envelope = json.dumps(
+            {
+                "version": _SECRET_ENVELOPE_VERSION,
+                "ref": ref.value,
+                "secret": plaintext,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return self._keyring.encrypt(envelope)
+
+    def _decrypt_for_ref(self, ref: SecretRef, key_version: str, ciphertext: str) -> str:
+        encoded = self._keyring.decrypt(key_version, ciphertext)
+        try:
+            envelope = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise SecretDecryptionError("secret envelope is invalid") from exc
+        if not isinstance(envelope, dict):
+            raise SecretDecryptionError("secret envelope is invalid")
+        if envelope.get("version") != _SECRET_ENVELOPE_VERSION:
+            raise SecretDecryptionError("secret envelope version is invalid")
+        if envelope.get("ref") != ref.value:
+            raise SecretDecryptionError("secret reference binding mismatch")
+        plaintext = envelope.get("secret")
+        if not isinstance(plaintext, str) or not plaintext:
+            raise SecretDecryptionError("secret envelope payload is invalid")
+        return plaintext
+
     async def put(
         self,
         secret: SecretValue,
@@ -127,7 +160,7 @@ class SqlAlchemySecretVault:
         metadata: SecretMetadata | None = None,
     ) -> SecretRef:
         ref = SecretRef(f"sv1_{uuid4().hex}")
-        key_version, ciphertext = self._keyring.encrypt(secret.reveal())
+        key_version, ciphertext = self._encrypt_for_ref(ref, secret.reveal())
         async with self._sessions()() as session, session.begin():
             session.add(
                 SecretRecord(
@@ -140,7 +173,7 @@ class SqlAlchemySecretVault:
         return ref
 
     async def replace(self, ref: SecretRef, secret: SecretValue) -> SecretRef:
-        key_version, ciphertext = self._keyring.encrypt(secret.reveal())
+        key_version, ciphertext = self._encrypt_for_ref(ref, secret.reveal())
         async with self._sessions()() as session, session.begin():
             record = await session.get(SecretRecord, ref.value)
             if record is None:
@@ -154,7 +187,7 @@ class SqlAlchemySecretVault:
             record = await session.get(SecretRecord, ref.value)
             if record is None:
                 raise SecretNotFoundError(ref.value)
-            plaintext = self._keyring.decrypt(record.key_version, record.ciphertext)
+            plaintext = self._decrypt_for_ref(ref, record.key_version, record.ciphertext)
         return SecretValue(plaintext)
 
     async def delete(self, ref: SecretRef) -> None:
@@ -174,8 +207,8 @@ class SqlAlchemySecretVault:
                 raise SecretNotFoundError(ref.value)
             if record.key_version == self._keyring.active_version:
                 return False
-            plaintext = self._keyring.decrypt(record.key_version, record.ciphertext)
-            key_version, ciphertext = self._keyring.encrypt(plaintext)
+            plaintext = self._decrypt_for_ref(ref, record.key_version, record.ciphertext)
+            key_version, ciphertext = self._encrypt_for_ref(ref, plaintext)
             record.key_version = key_version
             record.ciphertext = ciphertext
         return True
