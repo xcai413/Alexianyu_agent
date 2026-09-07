@@ -83,7 +83,7 @@ async def _assert_retry_case(backend: str) -> None:
     assert first == DispatchResult(selected=1, published=0, failed=1, skipped=0)
     assert failed.published_at is None
     assert failed.attempt_count == 1
-    assert failed.last_error == "RuntimeError: temporary bus failure"
+    assert failed.last_error == "RuntimeError"
 
     second = await dispatcher.dispatch_once()
     published = await _get(event_id)
@@ -93,6 +93,31 @@ async def _assert_retry_case(backend: str) -> None:
     assert published.published_at is not None
     assert published.attempt_count == 1
     assert published.last_error is None
+
+
+async def _assert_failed_event_does_not_starve_newer(backend: str) -> None:
+    failed_id = _event_id("blocked", backend)
+    newer_id = _event_id("newer", backend)
+    await _enqueue(failed_id)
+    bus = _RecordingBus(failures=1)
+    dispatcher = OutboxDispatcher(SqlAlchemyUnitOfWork, bus, batch_size=1)
+
+    first = await dispatcher.dispatch_once()
+    assert first == DispatchResult(selected=1, published=0, failed=1, skipped=0)
+    assert (await _get(failed_id)).attempt_count == 1
+
+    await _enqueue(newer_id)
+    second = await dispatcher.dispatch_once()
+
+    assert second == DispatchResult(selected=1, published=1, failed=0, skipped=0)
+    assert bus.published == [newer_id]
+    assert (await _get(newer_id)).published_at is not None
+    assert (await _get(failed_id)).published_at is None
+
+    third = await dispatcher.dispatch_once()
+    assert third == DispatchResult(selected=1, published=1, failed=0, skipped=0)
+    assert bus.published == [newer_id, failed_id]
+    assert (await _get(failed_id)).published_at is not None
 
 
 @pytest.mark.integration
@@ -105,3 +130,4 @@ async def test_outbox_dispatcher_contract_across_backend() -> None:
     assert get_settings().database_backend == expected_backend
     await _assert_success_case(expected_backend)
     await _assert_retry_case(expected_backend)
+    await _assert_failed_event_does_not_starve_newer(expected_backend)
