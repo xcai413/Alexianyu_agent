@@ -55,7 +55,7 @@ class Message(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    account: Mapped["Account"] = relationship(back_populates="messages")
+    account: Mapped[Account] = relationship(back_populates="messages")
 
     __table_args__ = (
         Index("ix_messages_account_received", "account_id", "received_at"),
