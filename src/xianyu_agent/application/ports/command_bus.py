@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from typing import Protocol, TypeVar
 
-CommandT = TypeVar("CommandT")
-ResultT = TypeVar("ResultT", covariant=True)
+CommandT_contra = TypeVar("CommandT_contra", contravariant=True)
+ResultT_co = TypeVar("ResultT_co", covariant=True)
 
 
-class CommandHandler(Protocol[CommandT, ResultT]):
+class CommandHandler(Protocol[CommandT_contra, ResultT_co]):
     """Handle one application command."""
 
-    async def __call__(self, command: CommandT, /) -> ResultT: ...
+    async def __call__(self, command: CommandT_contra, /) -> ResultT_co: ...
 
 
 class CommandBus(Protocol):
