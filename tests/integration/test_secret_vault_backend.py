@@ -36,14 +36,37 @@ async def test_secret_vault_contract_across_backend() -> None:
         SecretValue(plaintext),
         metadata=SecretMetadata({"backend": backend}),
     )
+    decoy_ref = await old_vault.put(SecretValue(f"decoy-{backend}-{uuid4().hex}"))
     assert await old_vault.configured(ref) is True
     assert (await old_vault.resolve(ref)).reveal() == plaintext
 
     async with legacy_database.async_session_factory() as session:
         record = await session.scalar(select(SecretRecord).where(SecretRecord.ref == ref.value))
+        decoy = await session.scalar(
+            select(SecretRecord).where(SecretRecord.ref == decoy_ref.value)
+        )
         assert record is not None
+        assert decoy is not None
         assert plaintext not in record.ciphertext
         assert record.metadata_json == {"backend": backend}
+        original_ciphertext = record.ciphertext
+        decoy_ciphertext = decoy.ciphertext
+
+    async with legacy_database.async_session_factory() as session, session.begin():
+        await session.execute(
+            update(SecretRecord)
+            .where(SecretRecord.ref == ref.value)
+            .values(ciphertext=decoy_ciphertext)
+        )
+    with pytest.raises(SecretDecryptionError, match="reference binding mismatch"):
+        await old_vault.resolve(ref)
+
+    async with legacy_database.async_session_factory() as session, session.begin():
+        await session.execute(
+            update(SecretRecord)
+            .where(SecretRecord.ref == ref.value)
+            .values(ciphertext=original_ciphertext)
+        )
 
     restored_vault = SqlAlchemySecretVault(
         FernetKeyring({"v1": old_key, "v2": new_key}, active_version="v2")
@@ -65,4 +88,5 @@ async def test_secret_vault_contract_across_backend() -> None:
         await active_only.resolve(ref)
 
     await active_only.delete(ref)
+    await old_vault.delete(decoy_ref)
     assert await active_only.configured(ref) is False
