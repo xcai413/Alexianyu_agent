@@ -9,6 +9,14 @@ from xianyu_agent.application.ports.outbox import OutboxRecord
 EventHandler = Callable[[OutboxRecord], Awaitable[None]]
 
 
+async def _invoke(handler: EventHandler, event: OutboxRecord) -> Exception | None:
+    try:
+        await handler(event)
+    except Exception as exc:
+        return exc
+    return None
+
+
 class InProcessEventBus:
     """Publish an event to registered handlers in registration order.
 
@@ -29,10 +37,8 @@ class InProcessEventBus:
     async def publish(self, event: OutboxRecord) -> None:
         first_error: Exception | None = None
         for handler in tuple(self._handlers.get(event.event_type, ())):
-            try:
-                await handler(event)
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
+            error = await _invoke(handler, event)
+            if first_error is None and error is not None:
+                first_error = error
         if first_error is not None:
             raise first_error
