@@ -86,13 +86,21 @@ async def test_event_bus_fans_out_in_registration_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_event_bus_propagates_handler_failure() -> None:
+async def test_event_bus_completes_fan_out_before_propagating_handler_failure() -> None:
     bus = InProcessEventBus()
+    seen: list[str] = []
 
-    async def fail(_event: OutboxRecord) -> None:
+    async def fail(event: OutboxRecord) -> None:
+        seen.append(f"fail:{event.event_id}")
         raise RuntimeError("consumer failed")
 
+    async def later(event: OutboxRecord) -> None:
+        seen.append(f"later:{event.event_id}")
+
     bus.subscribe("OrderPaid", fail)
+    bus.subscribe("OrderPaid", later)
 
     with pytest.raises(RuntimeError, match="consumer failed"):
         await bus.publish(_event())
+
+    assert seen == ["fail:evt-1", "later:evt-1"]
