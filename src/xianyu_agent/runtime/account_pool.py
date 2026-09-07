@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
 from xianyu_agent.runtime.account_lock import AccountConnectionAlreadyRunningError
-from xianyu_agent.services.account_worker import AccountWorker
+from xianyu_agent.runtime.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local
 
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
