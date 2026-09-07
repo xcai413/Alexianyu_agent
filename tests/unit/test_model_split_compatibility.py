@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "orders",
     "reply_logs",
     "reply_rules",
+    "scheduler_work",
     "task_logs",
     "transactional_outbox",
     "worker_commands",
