@@ -15,6 +15,13 @@ from xianyu_agent.infrastructure.database.models.idempotency import ConsumerInbo
 from xianyu_agent.infrastructure.idempotency import SqlAlchemyIdempotencyStore
 
 
+async def _claim_then_crash(consumer: str, key: IdempotencyKey) -> None:
+    async with legacy_database.async_session_factory() as session, session.begin():
+        store = SqlAlchemyIdempotencyStore(session)
+        assert await store.claim(consumer, key) is True
+        raise RuntimeError("crash before commit")
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None:
@@ -31,10 +38,7 @@ async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None
     # A claim is only durable with its surrounding transaction. A failed consumer
     # transaction must release the reservation for at-least-once retry.
     with pytest.raises(RuntimeError, match="crash before commit"):
-        async with legacy_database.async_session_factory() as session, session.begin():
-            store = SqlAlchemyIdempotencyStore(session)
-            assert await store.claim(consumer, key) is True
-            raise RuntimeError("crash before commit")
+        await _claim_then_crash(consumer, key)
 
     async with legacy_database.async_session_factory() as session, session.begin():
         store = SqlAlchemyIdempotencyStore(session)
