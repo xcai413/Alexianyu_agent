@@ -1,6 +1,6 @@
 """Regression checks for the Phase 0 ORM model split."""
 
-import xianyu_agent.db.models as legacy_models
+from xianyu_agent.db import models as legacy_models
 
 
 EXPECTED_TABLES = {
