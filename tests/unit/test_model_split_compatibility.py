@@ -2,7 +2,6 @@
 
 from xianyu_agent.db import models as legacy_models
 
-
 EXPECTED_TABLES = {
     "accounts",
     "audit_logs",
