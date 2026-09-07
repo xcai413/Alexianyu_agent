@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 from dotenv import set_key
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -31,7 +32,13 @@ class Settings(BaseSettings):
     tz: str = "Asia/Shanghai"
 
     # === 数据库 ===
-    db_path: Path | None = None  # 留空则用 data_dir/xianyu.db
+    # database_url 非空时优先于 db_path；用于 MySQL/PostgreSQL 以及显式 SQLite URL。
+    # 支持 SQLAlchemy async URL，例如：
+    #   sqlite+aiosqlite:///./data/xianyu.db
+    #   mysql+asyncmy://user:pass@127.0.0.1:3306/xianyu
+    #   postgresql+asyncpg://user:pass@127.0.0.1:5432/xianyu
+    database_url: str = ""
+    db_path: Path | None = None  # database_url 留空时使用 data_dir/xianyu.db
 
     # === 安全 ===
     fernet_key: str = ""  # 首次启动自动生成
@@ -71,13 +78,40 @@ class Settings(BaseSettings):
     def resolved_db_path(self) -> Path:
         return self.db_path or (self.data_dir / "xianyu.db")
 
+    @staticmethod
+    def _normalize_async_database_url(value: str) -> str:
+        """Normalize bare SQLAlchemy URLs to the async drivers supported by this project."""
+        url = make_url(value)
+        if url.drivername == "sqlite":
+            url = url.set(drivername="sqlite+aiosqlite")
+        elif url.drivername == "mysql":
+            url = url.set(drivername="mysql+asyncmy")
+        elif url.drivername == "postgresql":
+            url = url.set(drivername="postgresql+asyncpg")
+        return url.render_as_string(hide_password=False)
+
     @property
     def db_url(self) -> str:
+        if self.database_url.strip():
+            return self._normalize_async_database_url(self.database_url.strip())
         return f"sqlite+aiosqlite:///{self.resolved_db_path.as_posix()}"
 
     @property
     def sync_db_url(self) -> str:
-        return f"sqlite:///{self.resolved_db_path.as_posix()}"
+        """Return a synchronous URL for compatibility with legacy diagnostics/tools."""
+        url = make_url(self.db_url)
+        if url.drivername == "sqlite+aiosqlite":
+            url = url.set(drivername="sqlite")
+        elif url.drivername == "mysql+asyncmy":
+            url = url.set(drivername="mysql+pymysql")
+        elif url.drivername == "postgresql+asyncpg":
+            url = url.set(drivername="postgresql+psycopg")
+        return url.render_as_string(hide_password=False)
+
+    @property
+    def database_backend(self) -> str:
+        """Return SQLAlchemy backend name: sqlite, mysql, or postgresql."""
+        return make_url(self.db_url).get_backend_name()
 
     @property
     def runtime_dir(self) -> Path:
