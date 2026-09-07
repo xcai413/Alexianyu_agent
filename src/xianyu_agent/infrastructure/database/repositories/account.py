@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xianyu_agent.application.ports.repositories import AccountRecord
-from xianyu_agent.db.models import Account, WorkerDesiredState
+from xianyu_agent.infrastructure.database.models import Account, WorkerDesiredState
 
 
 class SqlAlchemyAccountRepository:
