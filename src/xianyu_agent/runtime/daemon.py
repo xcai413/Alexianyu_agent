@@ -20,8 +20,8 @@ from xianyu_agent.domain import (
     worker_commands,
     worker_risk,
 )
+from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.daemon_lock import DaemonLock
-from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.logging_setup import configure_daemon_logging
 
 logger = logging.getLogger(__name__)
