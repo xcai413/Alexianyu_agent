@@ -51,6 +51,7 @@ jobs:
           src/xianyu_agent/application/ports/event_bus.py
           src/xianyu_agent/application/ports/outbox.py
           src/xianyu_agent/application/ports/repositories.py
+          src/xianyu_agent/application/ports/secret_vault.py
           src/xianyu_agent/application/ports/unit_of_work.py
           src/xianyu_agent/composition.py
           src/xianyu_agent/runtime/scheduler
@@ -59,6 +60,7 @@ jobs:
           src/xianyu_agent/infrastructure/database/repositories/outbox.py
           src/xianyu_agent/infrastructure/database/scheduler_queue.py
           src/xianyu_agent/infrastructure/database/unit_of_work.py
+          src/xianyu_agent/infrastructure/secrets
 
       - name: Mypy / legacy debt report
         continue-on-error: true
@@ -97,6 +99,8 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: SecretVault contract
+        run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -143,6 +147,8 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: SecretVault contract
+        run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -190,5 +196,7 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: SecretVault contract
+        run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
