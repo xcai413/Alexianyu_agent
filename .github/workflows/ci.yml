@@ -45,7 +45,9 @@ jobs:
           --disable-error-code=no-untyped-def
           src/xianyu_agent/config.py
           src/xianyu_agent/db/database.py
+          src/xianyu_agent/db/models.py
           src/xianyu_agent/application/ports/repositories.py
+          src/xianyu_agent/infrastructure/database/models
           src/xianyu_agent/infrastructure/database/repositories/account.py
 
       - name: Mypy / legacy debt report
