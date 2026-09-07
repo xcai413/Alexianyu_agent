@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import re
 from typing import Any, cast
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -13,6 +14,18 @@ from xianyu_agent.foundation.identifiers import IdempotencyKey
 from xianyu_agent.infrastructure.database.models.idempotency import ConsumerInbox
 
 _MAX_CONSUMER_LENGTH = 128
+_CONSUMER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]*$")
+
+
+def _normalize_consumer(consumer: str) -> str:
+    normalized = consumer.strip().lower()
+    if not normalized:
+        raise ValueError("consumer must not be empty")
+    if len(normalized) > _MAX_CONSUMER_LENGTH:
+        raise ValueError(f"consumer must not exceed {_MAX_CONSUMER_LENGTH} characters")
+    if _CONSUMER_PATTERN.fullmatch(normalized) is None:
+        raise ValueError("consumer must be an ASCII slug using a-z, 0-9, '.', '_', ':', or '-'")
+    return normalized
 
 
 class SqlAlchemyIdempotencyStore:
@@ -22,12 +35,7 @@ class SqlAlchemyIdempotencyStore:
         self._session = session
 
     async def claim(self, consumer: str, key: IdempotencyKey, /) -> bool:
-        consumer = consumer.strip()
-        if not consumer:
-            raise ValueError("consumer must not be empty")
-        if len(consumer) > _MAX_CONSUMER_LENGTH:
-            raise ValueError(f"consumer must not exceed {_MAX_CONSUMER_LENGTH} characters")
-
+        consumer = _normalize_consumer(consumer)
         key_hash = sha256(key.value.encode("utf-8")).hexdigest()
         if self._session.get_bind().dialect.name == "sqlite":
             # Python 3.11's sqlite3 legacy transaction mode does not BEGIN for a
