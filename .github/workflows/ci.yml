@@ -45,6 +45,8 @@ jobs:
           --disable-error-code=no-untyped-def
           src/xianyu_agent/config.py
           src/xianyu_agent/db/database.py
+          src/xianyu_agent/application/ports/repositories.py
+          src/xianyu_agent/infrastructure/database/repositories/account.py
 
       - name: Mypy / legacy debt report
         continue-on-error: true
@@ -77,6 +79,9 @@ jobs:
 
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
+
+      - name: Repository contract
+        run: uv run pytest -q tests/integration/test_account_repository_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
@@ -119,6 +124,9 @@ jobs:
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
 
+      - name: Repository contract
+        run: uv run pytest -q tests/integration/test_account_repository_backend.py
+
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -160,6 +168,9 @@ jobs:
 
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
+
+      - name: Repository contract
+        run: uv run pytest -q tests/integration/test_account_repository_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
