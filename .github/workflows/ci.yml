@@ -53,9 +53,11 @@ jobs:
           src/xianyu_agent/application/ports/repositories.py
           src/xianyu_agent/application/ports/unit_of_work.py
           src/xianyu_agent/composition.py
+          src/xianyu_agent/runtime/scheduler
           src/xianyu_agent/infrastructure/database/models
           src/xianyu_agent/infrastructure/database/repositories/account.py
           src/xianyu_agent/infrastructure/database/repositories/outbox.py
+          src/xianyu_agent/infrastructure/database/scheduler_queue.py
           src/xianyu_agent/infrastructure/database/unit_of_work.py
 
       - name: Mypy / legacy debt report
@@ -75,33 +77,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv==0.12.10
-
       - name: Sync dependencies
         run: uv sync --frozen --group dev
-
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
-
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
-
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
-
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
-
       - name: Outbox dispatcher contract
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
-
+      - name: Scheduler due queue contract
+        run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -128,33 +123,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv==0.12.10
-
       - name: Sync dependencies
         run: uv sync --frozen --group dev
-
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
-
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
-
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
-
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
-
       - name: Outbox dispatcher contract
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
-
+      - name: Scheduler due queue contract
+        run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -182,32 +170,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv==0.12.10
-
       - name: Sync dependencies
         run: uv sync --frozen --group dev
-
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
-
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
-
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
-
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
-
       - name: Outbox dispatcher contract
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
-
+      - name: Scheduler due queue contract
+        run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
