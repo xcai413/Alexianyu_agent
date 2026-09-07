@@ -29,6 +29,23 @@ def _event(event_id: str, account_id: str) -> OutboxEvent:
     )
 
 
+def _assert_identifier_width_validation() -> None:
+    base = {
+        "event_id": f"width-{uuid4().hex}",
+        "event_type": "AccountConfigured",
+        "version": 1,
+        "payload": {},
+        "occurred_at": datetime.now(UTC),
+    }
+    boundary = "x" * 64
+    assert OutboxEvent(**base, correlation_id=boundary, causation_id=boundary).correlation_id == boundary
+
+    with pytest.raises(ValueError, match="CorrelationId must not exceed 64 characters"):
+        OutboxEvent(**base, correlation_id="x" * 65)
+    with pytest.raises(ValueError, match="CausationId must not exceed 64 characters"):
+        OutboxEvent(**base, correlation_id="corr", causation_id="x" * 65)
+
+
 async def _assert_atomic_commit_and_crash_window(expected_backend: str) -> None:
     account_id = f"outbox-account-{expected_backend}-{uuid4().hex[:8]}"
     rollback_event_id = f"rollback-{uuid4().hex}"
@@ -115,6 +132,7 @@ async def test_transactional_outbox_contract_across_backend() -> None:
         pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
 
     assert get_settings().database_backend == expected_backend
+    _assert_identifier_width_validation()
     await _assert_atomic_commit_and_crash_window(expected_backend)
     await _assert_attempt_and_publish_state(expected_backend)
     await _assert_event_id_unique(expected_backend)
