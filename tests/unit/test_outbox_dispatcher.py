@@ -25,7 +25,10 @@ class _OutboxRepository:
 
     async def list_pending(self, *, limit: int = 100) -> list[OutboxRecord]:
         pending = [row for row in self._records.values() if row.published_at is None]
-        return sorted(pending, key=lambda row: row.id)[:limit]
+        return sorted(
+            pending,
+            key=lambda row: (row.attempt_count, row.occurred_at, row.id),
+        )[:limit]
 
     async def get_by_event_id(self, event_id: str) -> OutboxRecord | None:
         return self._records.get(event_id)
@@ -83,10 +86,12 @@ class _RecordingBus:
         self,
         *,
         failures: int = 0,
+        failure_message: str = "temporary bus failure",
         state: _State | None = None,
         fail_commit_after_first_publish: bool = False,
     ) -> None:
         self._failures = failures
+        self._failure_message = failure_message
         self._state = state
         self._fail_commit_after_first_publish = fail_commit_after_first_publish
         self.published: list[str] = []
@@ -94,7 +99,7 @@ class _RecordingBus:
     async def publish(self, event: OutboxRecord) -> None:
         if self._failures:
             self._failures -= 1
-            raise RuntimeError("temporary bus failure")
+            raise RuntimeError(self._failure_message)
         self.published.append(event.event_id)
         if self._fail_commit_after_first_publish and self._state is not None:
             self._fail_commit_after_first_publish = False
@@ -147,10 +152,13 @@ async def test_dispatch_once_marks_published_only_after_bus_accepts_event() -> N
 
 
 @pytest.mark.asyncio
-async def test_publish_failure_stays_pending_and_next_pass_retries() -> None:
+async def test_publish_failure_stays_pending_without_persisting_exception_detail() -> None:
     row = _record()
     state = _State(records={row.event_id: row})
-    bus = _RecordingBus(failures=1)
+    bus = _RecordingBus(
+        failures=1,
+        failure_message="Authorization: Bearer super-secret-token",
+    )
     dispatcher = _dispatcher(state, bus, datetime(2026, 1, 2, tzinfo=UTC))
 
     first = await dispatcher.dispatch_once()
@@ -159,7 +167,7 @@ async def test_publish_failure_stays_pending_and_next_pass_retries() -> None:
     assert first == DispatchResult(selected=1, published=0, failed=1, skipped=0)
     assert failed.published_at is None
     assert failed.attempt_count == 1
-    assert failed.last_error == "RuntimeError: temporary bus failure"
+    assert failed.last_error == "RuntimeError"
 
     second = await dispatcher.dispatch_once()
 
