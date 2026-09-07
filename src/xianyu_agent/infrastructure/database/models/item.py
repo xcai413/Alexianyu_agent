@@ -49,7 +49,7 @@ class Item(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship()
+    account: Mapped["Account"] = relationship()
 
     __table_args__ = (
         Index("uq_items_account_item", "account_id", "item_id", unique=True),
