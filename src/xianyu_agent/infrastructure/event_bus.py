@@ -12,8 +12,10 @@ EventHandler = Callable[[OutboxRecord], Awaitable[None]]
 class InProcessEventBus:
     """Publish an event to registered handlers in registration order.
 
-    Handler failures are propagated so the transactional outbox dispatcher can
-    release/retry the durable record instead of falsely marking it published.
+    Every registered handler gets one attempt per publish call. Handler failures
+    are propagated only after fan-out completes so one failing consumer cannot
+    permanently starve later consumers while the durable outbox record remains
+    retryable.
     """
 
     def __init__(self) -> None:
@@ -25,5 +27,12 @@ class InProcessEventBus:
             handlers.append(handler)
 
     async def publish(self, event: OutboxRecord) -> None:
+        first_error: Exception | None = None
         for handler in tuple(self._handlers.get(event.event_type, ())):
-            await handler(event)
+            try:
+                await handler(event)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
