@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 
 from .recovery import SchedulerRecovery
@@ -57,7 +58,5 @@ class SchedulerLoop:
             if result.claimed > 0:
                 continue
 
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(self._wake_event.wait(), timeout=self._idle_seconds)
-            except TimeoutError:
-                pass
