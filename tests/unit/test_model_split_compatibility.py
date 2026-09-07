@@ -7,6 +7,7 @@ EXPECTED_TABLES = {
     "audit_logs",
     "card_consumptions",
     "cards",
+    "consumer_inbox",
     "cookies",
     "daemon_instances",
     "items",
