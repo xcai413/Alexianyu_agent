@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from xianyu_agent.services.runtime_daemon import run_runtime_daemon
+from xianyu_agent.runtime.daemon import run_runtime_daemon
 from xianyu_agent.services.windows_service import is_service_paused
 
 logger = logging.getLogger(__name__)
