@@ -22,7 +22,7 @@ class FakeClock:
 @dataclass(slots=True)
 class FakeQueue:
     claimed: tuple[LeasedWork, ...] = ()
-    claim_limit: int | None = None
+    claim_limits: list[int] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)
     released: list[tuple[str, datetime]] = field(default_factory=list)
     recovered: int = 0
@@ -35,8 +35,10 @@ class FakeQueue:
         lease_duration: timedelta,
         limit: int,
     ) -> tuple[LeasedWork, ...]:
-        self.claim_limit = limit
-        return self.claimed[:limit]
+        self.claim_limits.append(limit)
+        batch = self.claimed[:limit]
+        self.claimed = self.claimed[len(batch) :]
+        return batch
 
     async def complete(self, work: LeasedWork, *, completed_at: datetime) -> bool:
         self.completed.append(work.work_id)
@@ -78,13 +80,62 @@ async def test_runner_bounds_claims_and_completes_successful_work() -> None:
         concurrency=2,
     ).run_once()
 
-    assert queue.claim_limit == 2
+    assert queue.claim_limits == [2]
     assert handled == ["one", "two"]
     assert queue.completed == ["one", "two"]
     assert result.claimed == 2
     assert result.completed == 2
     assert result.released == 0
     assert result.stale == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_claims_only_immediately_executable_capacity() -> None:
+    queue = FakeQueue(claimed=tuple(_lease(str(index)) for index in range(5)))
+    clock = FakeClock(datetime(2026, 9, 8, 1, 0, tzinfo=UTC))
+    gates = [asyncio.Event() for _ in range(5)]
+    started: list[str] = []
+
+    async def handler(work: LeasedWork) -> None:
+        index = int(work.work_id)
+        started.append(work.work_id)
+        await gates[index].wait()
+
+    task = asyncio.create_task(
+        SchedulerRunner(
+            queue,
+            handler,
+            clock,
+            lease_owner="worker-1",
+            batch_size=5,
+            concurrency=2,
+        ).run_once()
+    )
+    await asyncio.sleep(0)
+
+    assert queue.claim_limits == [2]
+    assert started == ["0", "1"]
+
+    gates[0].set()
+    gates[1].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert queue.claim_limits == [2, 2]
+    assert started == ["0", "1", "2", "3"]
+
+    gates[2].set()
+    gates[3].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert queue.claim_limits == [2, 2, 1]
+    assert started == ["0", "1", "2", "3", "4"]
+
+    gates[4].set()
+    result = await task
+    assert result.claimed == 5
+    assert result.completed == 5
 
 
 @pytest.mark.asyncio
@@ -130,8 +181,10 @@ async def test_runner_enforces_concurrency_limit() -> None:
         clock,
         lease_owner="worker-1",
         concurrency=2,
+        batch_size=4,
     ).run_once()
 
+    assert queue.claim_limits == [2, 2]
     assert peak == 2
 
 
