@@ -47,7 +47,7 @@ class WorkerStatus(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="worker_status")
+    account: Mapped["Account"] = relationship(back_populates="worker_status")
 
 
 class DaemonInstance(Base):
@@ -108,7 +108,7 @@ class WorkerCommand(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="worker_commands")
+    account: Mapped["Account"] = relationship(back_populates="worker_commands")
 
     __table_args__ = (
         Index("ix_worker_commands_pending", "status", "requested_at"),
