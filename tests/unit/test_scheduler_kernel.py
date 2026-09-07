@@ -94,11 +94,13 @@ async def test_runner_claims_only_immediately_executable_capacity() -> None:
     queue = FakeQueue(claimed=tuple(_lease(str(index)) for index in range(5)))
     clock = FakeClock(datetime(2026, 9, 8, 1, 0, tzinfo=UTC))
     gates = [asyncio.Event() for _ in range(5)]
+    started_events = [asyncio.Event() for _ in range(5)]
     started: list[str] = []
 
     async def handler(work: LeasedWork) -> None:
         index = int(work.work_id)
         started.append(work.work_id)
+        started_events[index].set()
         await gates[index].wait()
 
     task = asyncio.create_task(
@@ -111,23 +113,21 @@ async def test_runner_claims_only_immediately_executable_capacity() -> None:
             concurrency=2,
         ).run_once()
     )
-    await asyncio.sleep(0)
+    await asyncio.gather(started_events[0].wait(), started_events[1].wait())
 
     assert queue.claim_limits == [2]
     assert started == ["0", "1"]
 
     gates[0].set()
     gates[1].set()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await asyncio.gather(started_events[2].wait(), started_events[3].wait())
 
     assert queue.claim_limits == [2, 2]
     assert started == ["0", "1", "2", "3"]
 
     gates[2].set()
     gates[3].set()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await started_events[4].wait()
 
     assert queue.claim_limits == [2, 2, 1]
     assert started == ["0", "1", "2", "3", "4"]
