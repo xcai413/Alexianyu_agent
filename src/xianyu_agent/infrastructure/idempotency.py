@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 import re
+from hashlib import sha256
 from typing import Any, cast
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
