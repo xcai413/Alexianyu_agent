@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -26,6 +26,7 @@ class FakeRunner:
     results: Iterable[RunResult]
     calls: int = 0
     call_events: list[asyncio.Event] = field(default_factory=list)
+    _results: Iterator[RunResult] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._results = iter(self.results)
