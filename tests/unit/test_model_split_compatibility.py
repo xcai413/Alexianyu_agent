@@ -1,7 +1,7 @@
 """Regression checks for the Phase 0 ORM model split."""
 
-from xianyu_agent.db import models as legacy_models
-from xianyu_agent.infrastructure.database import models as canonical_models
+import xianyu_agent.db.models as legacy_models
+import xianyu_agent.infrastructure.database.models as canonical_models
 
 
 EXPECTED_TABLES = {
