@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import Any, cast
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +39,7 @@ class SqlAlchemyIdempotencyStore:
                 .values(consumer=consumer, key_hash=key_hash)
                 .on_conflict_do_nothing(index_elements=["consumer", "key_hash"])
             )
-            result = await self._session.execute(statement)
+            result = cast(Any, await self._session.execute(statement))
             return result.rowcount == 1
 
         record = ConsumerInbox(consumer=consumer, key_hash=key_hash)
