@@ -57,6 +57,7 @@ jobs:
           src/xianyu_agent/composition.py
           src/xianyu_agent/foundation
           src/xianyu_agent/runtime/account_lock.py
+          src/xianyu_agent/runtime/account_pool.py
           src/xianyu_agent/runtime/daemon.py
           src/xianyu_agent/runtime/daemon_lock.py
           src/xianyu_agent/runtime/scheduler
