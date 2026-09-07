@@ -28,7 +28,18 @@ def upgrade() -> None:
                 nullable=False,
             )
         )
-    op.execute("UPDATE accounts SET desired_state = 'running' WHERE enabled = 1")
+
+    accounts = sa.table(
+        "accounts",
+        sa.column("enabled", sa.Boolean()),
+        sa.column("desired_state", sa.String(length=16)),
+    )
+    op.execute(
+        accounts.update()
+        .where(accounts.c.enabled.is_(True))
+        .values(desired_state="running")
+    )
+
     op.create_table(
         "worker_commands",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
