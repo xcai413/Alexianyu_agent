@@ -6,12 +6,19 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 
 from .clock import Clock, require_utc
 from .due_queue import DueQueue
 from .lease import LeasedWork
 
 WorkHandler = Callable[[LeasedWork], Awaitable[None]]
+
+
+class WorkOutcome(StrEnum):
+    COMPLETED = "completed"
+    RELEASED = "released"
+    STALE = "stale"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +28,7 @@ class RunResult:
     claimed: int
     completed: int
     released: int
+    stale: int
 
 
 class SchedulerRunner:
@@ -68,20 +76,22 @@ class SchedulerRunner:
         )
         semaphore = asyncio.Semaphore(self._concurrency)
 
-        async def execute(work: LeasedWork) -> bool:
+        async def execute(work: LeasedWork) -> WorkOutcome:
             async with semaphore:
                 try:
                     await self._handler(work)
                 except Exception:
                     available_at = require_utc(self._clock.now()) + self._retry_delay
-                    return not await self._queue.release(work, available_at=available_at)
+                    released = await self._queue.release(work, available_at=available_at)
+                    return WorkOutcome.RELEASED if released else WorkOutcome.STALE
                 completed_at = require_utc(self._clock.now())
-                return await self._queue.complete(work, completed_at=completed_at)
+                completed = await self._queue.complete(work, completed_at=completed_at)
+                return WorkOutcome.COMPLETED if completed else WorkOutcome.STALE
 
         outcomes = await asyncio.gather(*(execute(work) for work in claimed))
-        completed = sum(outcomes)
         return RunResult(
             claimed=len(claimed),
-            completed=completed,
-            released=len(claimed) - completed,
+            completed=outcomes.count(WorkOutcome.COMPLETED),
+            released=outcomes.count(WorkOutcome.RELEASED),
+            stale=outcomes.count(WorkOutcome.STALE),
         )
