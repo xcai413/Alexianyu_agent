@@ -8,6 +8,7 @@ Create Date: 2026-08-21 00:00:00+08:00
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 
 import sqlalchemy as sa
 from alembic import op
@@ -33,30 +34,60 @@ def upgrade() -> None:
                 nullable=False,
             )
         )
-    # 将已有的明确人工验证错误纳入新熔断模型；不尝试请求 Token，也不会改 Cookie。
-    op.execute(
-        """
-        UPDATE worker_status
-        SET risk_code = 'FAIL_SYS_USER_VALIDATE',
-            risk_detected_at = COALESCE(updated_at, CURRENT_TIMESTAMP),
-            risk_cooldown_until = datetime(COALESCE(updated_at, CURRENT_TIMESTAMP), '+1200 seconds'),
-            risk_recovery_required = 1,
-            status = 'risk_cooling',
-            last_error = 'FAIL_SYS_USER_VALIDATE'
-        WHERE risk_code IS NULL
-          AND last_error LIKE '%FAIL_SYS_USER_VALIDATE%'
-        """
+
+    # 将已有的明确人工验证错误纳入新熔断模型;不尝试请求 Token,也不会改 Cookie。
+    # 使用 SQLAlchemy 表达式和 Python timedelta,避免 SQLite datetime() / integer boolean
+    # 这类方言专属 SQL 进入历史迁移。
+    worker_status = sa.table(
+        "worker_status",
+        sa.column("id", sa.Integer()),
+        sa.column("account_id", sa.Integer()),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+        sa.column("last_error", sa.Text()),
+        sa.column("risk_code", sa.String(length=64)),
+        sa.column("risk_detected_at", sa.DateTime(timezone=True)),
+        sa.column("risk_cooldown_until", sa.DateTime(timezone=True)),
+        sa.column("risk_recovery_required", sa.Boolean()),
+        sa.column("status", sa.String(length=32)),
+    )
+    accounts = sa.table(
+        "accounts",
+        sa.column("id", sa.Integer()),
+        sa.column("desired_state", sa.String(length=16)),
+    )
+
+    bind = op.get_bind()
+    current_timestamp = bind.scalar(sa.select(sa.func.current_timestamp()))
+    assert isinstance(current_timestamp, datetime)
+
+    validation_rows = bind.execute(
+        sa.select(worker_status.c.id, worker_status.c.updated_at).where(
+            worker_status.c.risk_code.is_(None),
+            worker_status.c.last_error.like("%FAIL_SYS_USER_VALIDATE%"),
+        )
+    ).all()
+    for row in validation_rows:
+        detected_at = row.updated_at or current_timestamp
+        bind.execute(
+            worker_status.update()
+            .where(worker_status.c.id == row.id)
+            .values(
+                risk_code="FAIL_SYS_USER_VALIDATE",
+                risk_detected_at=detected_at,
+                risk_cooldown_until=detected_at + timedelta(seconds=1200),
+                risk_recovery_required=True,
+                status="risk_cooling",
+                last_error="FAIL_SYS_USER_VALIDATE",
+            )
+        )
+
+    affected_accounts = sa.select(worker_status.c.account_id).where(
+        worker_status.c.risk_recovery_required.is_(True)
     )
     op.execute(
-        """
-        UPDATE accounts
-        SET desired_state = 'stopped'
-        WHERE id IN (
-            SELECT account_id
-            FROM worker_status
-            WHERE risk_recovery_required = 1
-        )
-        """
+        accounts.update()
+        .where(accounts.c.id.in_(affected_accounts))
+        .values(desired_state="stopped")
     )
 
 
