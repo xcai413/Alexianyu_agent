@@ -123,33 +123,65 @@ class SqlAlchemyDueQueue:
     async def complete(self, work: LeasedWork, *, completed_at: datetime) -> bool:
         require_utc(completed_at)
         async with self._sessions()() as session, session.begin():
-            await session.execute(
-                delete(SchedulerWork).where(
-                    SchedulerWork.work_id == work.work_id,
-                    SchedulerWork.lease_token == work.lease_token,
-                    SchedulerWork.lease_owner == work.lease_owner,
-                )
-            )
-            row = (
-                await session.execute(
-                    select(SchedulerWork.work_id).where(
-                        SchedulerWork.work_id == work.work_id,
-                        SchedulerWork.lease_token == work.lease_token,
-                        SchedulerWork.lease_owner == work.lease_owner,
-                    )
-                )
-            ).scalar_one_or_none()
-            return row is None
-
-    async def release(self, work: LeasedWork, *, available_at: datetime) -> bool:
-        available_at = require_utc(available_at)
-        async with self._sessions()() as session, session.begin():
-            token = uuid4().hex
+            transition = uuid4().hex
             await session.execute(
                 update(SchedulerWork)
                 .where(
                     SchedulerWork.work_id == work.work_id,
                     SchedulerWork.lease_token == work.lease_token,
+                    SchedulerWork.lease_owner == work.lease_owner,
+                )
+                .values(lease_token=transition)
+            )
+            owns_transition = (
+                await session.execute(
+                    select(SchedulerWork.work_id).where(
+                        SchedulerWork.work_id == work.work_id,
+                        SchedulerWork.lease_token == transition,
+                        SchedulerWork.lease_owner == work.lease_owner,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owns_transition is None:
+                return False
+            await session.execute(
+                delete(SchedulerWork).where(
+                    SchedulerWork.work_id == work.work_id,
+                    SchedulerWork.lease_token == transition,
+                    SchedulerWork.lease_owner == work.lease_owner,
+                )
+            )
+            return True
+
+    async def release(self, work: LeasedWork, *, available_at: datetime) -> bool:
+        available_at = require_utc(available_at)
+        async with self._sessions()() as session, session.begin():
+            transition = uuid4().hex
+            await session.execute(
+                update(SchedulerWork)
+                .where(
+                    SchedulerWork.work_id == work.work_id,
+                    SchedulerWork.lease_token == work.lease_token,
+                    SchedulerWork.lease_owner == work.lease_owner,
+                )
+                .values(lease_token=transition)
+            )
+            owns_transition = (
+                await session.execute(
+                    select(SchedulerWork.work_id).where(
+                        SchedulerWork.work_id == work.work_id,
+                        SchedulerWork.lease_token == transition,
+                        SchedulerWork.lease_owner == work.lease_owner,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owns_transition is None:
+                return False
+            await session.execute(
+                update(SchedulerWork)
+                .where(
+                    SchedulerWork.work_id == work.work_id,
+                    SchedulerWork.lease_token == transition,
                     SchedulerWork.lease_owner == work.lease_owner,
                 )
                 .values(
@@ -159,39 +191,48 @@ class SqlAlchemyDueQueue:
                     leased_until=None,
                 )
             )
-            # A matching old lease must no longer exist; distinguish stale rows
-            # by probing the work id and treating deletion as stale here.
-            row = (
-                await session.execute(
-                    select(SchedulerWork).where(SchedulerWork.work_id == work.work_id)
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return False
-            if row.lease_token is None and row.lease_owner is None:
-                return True
-            return row.lease_token == token
+            return True
 
     async def recover_expired(self, *, now: datetime) -> int:
         now = require_utc(now)
         recovered = 0
         async with self._sessions()() as session, session.begin():
-            expired_ids = (
+            expired = (
                 await session.execute(
-                    select(SchedulerWork.work_id).where(
+                    select(SchedulerWork.work_id, SchedulerWork.lease_token).where(
                         SchedulerWork.lease_token.is_not(None),
                         SchedulerWork.leased_until <= now,
                     )
                 )
-            ).scalars().all()
-            for work_id in expired_ids:
-                marker = uuid4().hex
+            ).all()
+            for work_id, old_token in expired:
+                if old_token is None:
+                    continue
+                transition = uuid4().hex
                 await session.execute(
                     update(SchedulerWork)
                     .where(
                         SchedulerWork.work_id == work_id,
-                        SchedulerWork.lease_token.is_not(None),
+                        SchedulerWork.lease_token == old_token,
                         SchedulerWork.leased_until <= now,
+                    )
+                    .values(lease_token=transition)
+                )
+                owns_transition = (
+                    await session.execute(
+                        select(SchedulerWork.work_id).where(
+                            SchedulerWork.work_id == work_id,
+                            SchedulerWork.lease_token == transition,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if owns_transition is None:
+                    continue
+                await session.execute(
+                    update(SchedulerWork)
+                    .where(
+                        SchedulerWork.work_id == work_id,
+                        SchedulerWork.lease_token == transition,
                     )
                     .values(
                         lease_token=None,
@@ -199,14 +240,7 @@ class SqlAlchemyDueQueue:
                         leased_until=None,
                     )
                 )
-                row = (
-                    await session.execute(
-                        select(SchedulerWork).where(SchedulerWork.work_id == work_id)
-                    )
-                ).scalar_one_or_none()
-                if row is not None and row.lease_token is None:
-                    recovered += 1
-                del marker
+                recovered += 1
         return recovered
 
     @staticmethod
