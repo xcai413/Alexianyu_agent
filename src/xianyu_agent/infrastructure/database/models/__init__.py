@@ -30,6 +30,7 @@ from .outbox import TransactionalOutbox
 from .rules import ReplyLog, ReplyRule
 from .runtime import DaemonInstance, WorkerCommand, WorkerStatus
 from .scheduler import SchedulerWork
+from .secret import SecretRecord
 
 __all__ = [
     "Account",
@@ -53,6 +54,7 @@ __all__ = [
     "ReplyRule",
     "RuleType",
     "SchedulerWork",
+    "SecretRecord",
     "TaskLog",
     "TaskStatus",
     "TransactionalOutbox",
