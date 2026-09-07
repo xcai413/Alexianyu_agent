@@ -15,7 +15,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from xianyu_agent.config import get_settings
-from xianyu_agent.db.models import Base
+from xianyu_agent.infrastructure.database.models import Base
 
 config = context.config
 
