@@ -47,6 +47,8 @@ jobs:
           src/xianyu_agent/db/database.py
           src/xianyu_agent/db/models.py
           src/xianyu_agent/application/accounts.py
+          src/xianyu_agent/application/outbox_dispatcher.py
+          src/xianyu_agent/application/ports/event_bus.py
           src/xianyu_agent/application/ports/outbox.py
           src/xianyu_agent/application/ports/repositories.py
           src/xianyu_agent/application/ports/unit_of_work.py
@@ -96,6 +98,9 @@ jobs:
 
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
+
+      - name: Outbox dispatcher contract
+        run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
@@ -147,6 +152,9 @@ jobs:
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
 
+      - name: Outbox dispatcher contract
+        run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
+
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -197,6 +205,9 @@ jobs:
 
       - name: Transactional outbox contract
         run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
+
+      - name: Outbox dispatcher contract
+        run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
