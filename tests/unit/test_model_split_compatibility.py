@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "orders",
     "reply_logs",
     "reply_rules",
+    "scheduler_work",
     "task_logs",
     "transactional_outbox",
     "worker_commands",
@@ -34,6 +35,9 @@ def test_legacy_model_module_reexports_canonical_classes() -> None:
     assert legacy_models.AuditLog.__module__ == "xianyu_agent.infrastructure.database.models.audit"
     assert legacy_models.TransactionalOutbox.__module__ == (
         "xianyu_agent.infrastructure.database.models.outbox"
+    )
+    assert legacy_models.SchedulerWork.__module__ == (
+        "xianyu_agent.infrastructure.database.models.scheduler"
     )
 
 
