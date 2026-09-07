@@ -79,6 +79,14 @@ class SqlAlchemyAccountRepository:
         await self._session.flush()
         return True
 
+    async def set_remark(self, account_id: str, remark: str | None) -> bool:
+        row = await self._get_model(account_id)
+        if row is None:
+            return False
+        row.remark = remark
+        await self._session.flush()
+        return True
+
     async def delete(self, account_id: str) -> bool:
         row = await self._get_model(account_id)
         if row is None:
