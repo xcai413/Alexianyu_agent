@@ -31,10 +31,15 @@ def _event(event_id: str) -> OutboxEvent:
         event_id=event_id,
         event_type="DispatcherContractEvent",
         version=1,
-        correlation_id=f"corr-{event_id}",
+        correlation_id=f"corr-{uuid4().hex}",
         payload={"event_id": event_id},
         occurred_at=datetime.now(UTC),
     )
+
+
+def _event_id(kind: str, backend: str) -> str:
+    """Build an identifier within the persisted 64-character event_id contract."""
+    return f"disp-{kind}-{backend}-{uuid4().hex[:12]}"
 
 
 async def _enqueue(event_id: str) -> None:
@@ -51,7 +56,7 @@ async def _get(event_id: str) -> OutboxRecord:
 
 
 async def _assert_success_case(backend: str) -> None:
-    event_id = f"dispatcher-success-{backend}-{uuid4().hex}"
+    event_id = _event_id("success", backend)
     await _enqueue(event_id)
     bus = _RecordingBus()
 
@@ -67,7 +72,7 @@ async def _assert_success_case(backend: str) -> None:
 
 
 async def _assert_retry_case(backend: str) -> None:
-    event_id = f"dispatcher-retry-{backend}-{uuid4().hex}"
+    event_id = _event_id("retry", backend)
     await _enqueue(event_id)
     bus = _RecordingBus(failures=1)
     dispatcher = OutboxDispatcher(SqlAlchemyUnitOfWork, bus, batch_size=1000)
