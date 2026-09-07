@@ -161,6 +161,23 @@ async def test_runner_releases_failed_work_with_retry_delay() -> None:
     assert result.stale == 0
 
 
+def test_runner_rejects_zero_retry_delay() -> None:
+    queue = FakeQueue()
+    clock = FakeClock(datetime(2026, 9, 8, 1, 0, tzinfo=UTC))
+
+    async def handler(work: LeasedWork) -> None:
+        return None
+
+    with pytest.raises(ValueError, match="retry_delay must be positive"):
+        SchedulerRunner(
+            queue,
+            handler,
+            clock,
+            lease_owner="worker-1",
+            retry_delay=timedelta(0),
+        )
+
+
 @pytest.mark.asyncio
 async def test_runner_enforces_concurrency_limit() -> None:
     queue = FakeQueue(claimed=tuple(_lease(str(index)) for index in range(4)))
