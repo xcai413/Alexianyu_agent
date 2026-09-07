@@ -73,7 +73,8 @@ class DaemonLock:
                 handle.write("\0")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            # Typeshed exposes the POSIX-visible msvcrt stub on non-Windows mypy runs.
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             return
         import fcntl  # noqa: PLC0415
 
@@ -85,7 +86,8 @@ class DaemonLock:
             import msvcrt  # noqa: PLC0415
 
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            # See _lock(): these attributes are present on Windows at runtime.
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             return
         import fcntl  # noqa: PLC0415
 
