@@ -47,11 +47,13 @@ jobs:
           src/xianyu_agent/db/database.py
           src/xianyu_agent/db/models.py
           src/xianyu_agent/application/accounts.py
+          src/xianyu_agent/application/ports/outbox.py
           src/xianyu_agent/application/ports/repositories.py
           src/xianyu_agent/application/ports/unit_of_work.py
           src/xianyu_agent/composition.py
           src/xianyu_agent/infrastructure/database/models
           src/xianyu_agent/infrastructure/database/repositories/account.py
+          src/xianyu_agent/infrastructure/database/repositories/outbox.py
           src/xianyu_agent/infrastructure/database/unit_of_work.py
 
       - name: Mypy / legacy debt report
@@ -91,6 +93,9 @@ jobs:
 
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
+
+      - name: Transactional outbox contract
+        run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
@@ -139,6 +144,9 @@ jobs:
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
 
+      - name: Transactional outbox contract
+        run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
+
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -186,6 +194,9 @@ jobs:
 
       - name: Application / UoW contract
         run: uv run pytest -q tests/integration/test_account_application_backend.py
+
+      - name: Transactional outbox contract
+        run: uv run pytest -q tests/integration/test_transactional_outbox_backend.py
 
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
