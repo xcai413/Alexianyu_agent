@@ -43,8 +43,8 @@ class Card(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="cards")
-    consumptions: Mapped[list[CardConsumption]] = relationship(
+    account: Mapped["Account"] = relationship(back_populates="cards")
+    consumptions: Mapped[list["CardConsumption"]] = relationship(
         back_populates="card", cascade="all, delete-orphan"
     )
 
@@ -72,7 +72,7 @@ class CardConsumption(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    card: Mapped[Card] = relationship(back_populates="consumptions")
-    order: Mapped[Order | None] = relationship(back_populates="consumptions")
+    card: Mapped["Card"] = relationship(back_populates="consumptions")
+    order: Mapped["Order | None"] = relationship(back_populates="consumptions")
 
     __table_args__ = (Index("ix_consumptions_consumed_at", "consumed_at"),)
