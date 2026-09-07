@@ -110,7 +110,7 @@ class OutboxDispatcher:
             current = await uow.outbox.get_by_event_id(event_id)
             if current is None or current.published_at is not None:
                 return
-            changed = await uow.outbox.record_failure(event_id, error=_format_error(exc))
+            changed = await uow.outbox.record_failure(event_id, error=_safe_error(exc))
             if changed:
                 await uow.commit()
 
@@ -128,8 +128,6 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _format_error(exc: Exception) -> str:
-    detail = str(exc).strip()
-    if not detail:
-        return type(exc).__name__
-    return f"{type(exc).__name__}: {detail}"
+def _safe_error(exc: Exception) -> str:
+    """Persist only an exception class so transport credentials cannot leak."""
+    return type(exc).__name__
