@@ -20,6 +20,20 @@ depends_on: str | Sequence[str] | None = None
 _NAMING_CONVENTION = {"uq": "uq_%(table_name)s_%(column_0_name)s"}
 
 
+def _message_id_unique_constraint_name() -> str:
+    """Resolve the physical unique-constraint name across supported dialects."""
+    inspector = sa.inspect(op.get_bind())
+    for constraint in inspector.get_unique_constraints("messages"):
+        columns = list(constraint.get("column_names") or [])
+        name = constraint.get("name")
+        if columns == ["message_id"] and isinstance(name, str) and name:
+            return name
+
+    # SQLite can reflect an unnamed UNIQUE constraint. batch_alter_table applies
+    # the naming convention below, making this synthetic name addressable.
+    return "uq_messages_message_id"
+
+
 def upgrade() -> None:
     op.create_table(
         "ws_credentials",
@@ -38,10 +52,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("account_id"),
     )
+    message_id_unique = _message_id_unique_constraint_name()
     with op.batch_alter_table(
         "messages", schema=None, naming_convention=_NAMING_CONVENTION
     ) as batch_op:
-        batch_op.drop_constraint("uq_messages_message_id", type_="unique")
+        batch_op.drop_constraint(message_id_unique, type_="unique")
         batch_op.add_column(sa.Column("item_id", sa.String(length=128), nullable=True))
         batch_op.add_column(sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True))
         batch_op.create_index("ix_messages_item_id", ["item_id"], unique=False)
