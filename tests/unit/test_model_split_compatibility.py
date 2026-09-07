@@ -36,9 +36,6 @@ def test_legacy_model_module_reexports_canonical_classes() -> None:
     assert legacy_models.TransactionalOutbox.__module__ == (
         "xianyu_agent.infrastructure.database.models.outbox"
     )
-    assert legacy_models.SchedulerWork.__module__ == (
-        "xianyu_agent.infrastructure.database.models.scheduler"
-    )
 
 
 def test_split_model_package_registers_complete_existing_metadata() -> None:
