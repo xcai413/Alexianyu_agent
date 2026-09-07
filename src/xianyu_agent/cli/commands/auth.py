@@ -11,10 +11,8 @@ import qrcode.constants
 import typer
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
-from xianyu_agent.db import Account, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts, worker_risk
 from xianyu_agent.protocol.qr_login import QRLoginClient, QRLoginSession, QrStatus
 from xianyu_agent.protocol.signer import CookieSigner
@@ -40,22 +38,16 @@ def login(
     """保存账号 + 加密 Cookie(若账号不存在则新建)。"""
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).where(Account.account_id == account_id).limit(1)
-            account = (await session.execute(stmt)).scalar_one_or_none()
-            if account is None:
-                account = Account(
-                    account_id=account_id,
-                    nickname=None,
-                    remark=remark or None,
-                    enabled=True,
-                )
-                session.add(account)
-                await session.commit()
-                await session.refresh(account)
-            elif remark:
-                account.remark = remark
-                await session.commit()
+        account = await domain_accounts.get_account(account_id)
+        if account is None:
+            account = await domain_accounts.create_account(
+                account_id,
+                nickname=None,
+                remark=remark or None,
+                enabled=True,
+            )
+        elif remark:
+            await domain_accounts.set_remark(account_id, remark)
         if account.desired_state == "running":
             console.print(
                 "[red]账号 Worker 期望状态为 running。[/red] 请先执行 "
@@ -172,9 +164,7 @@ def list_accounts() -> None:
     """列出所有账号。"""
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).order_by(Account.created_at.desc())
-            rows = list((await session.execute(stmt)).scalars().all())
+        rows = await domain_accounts.list_accounts()
         if not rows:
             console.print("[dim]暂无账号,先 [cyan]auth login --account <id>[/cyan]。[/dim]")
             return
@@ -206,9 +196,7 @@ def show(
     """查看账号详情(包含字段)。"""
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).where(Account.account_id == account_id).limit(1)
-            r = (await session.execute(stmt)).scalar_one_or_none()
+        r = await domain_accounts.get_account(account_id)
         if r is None:
             console.print(f"[red]账号 {account_id} 不存在。[/red]")
             raise typer.Exit(code=1)
@@ -242,14 +230,9 @@ def enable(
     """启用账号。"""
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).where(Account.account_id == account_id).limit(1)
-            r = (await session.execute(stmt)).scalar_one_or_none()
-            if r is None:
-                console.print("[red]账号不存在。[/red]")
-                raise typer.Exit(code=1)
-            r.enabled = True
-            await session.commit()
+        if not await domain_accounts.set_enabled(account_id, True):
+            console.print("[red]账号不存在。[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[green]OK[/green] {account_id} 已启用。")
 
     asyncio.run(_run())
@@ -262,14 +245,9 @@ def disable(
     """禁用账号(Worker 不会启动)。"""
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).where(Account.account_id == account_id).limit(1)
-            r = (await session.execute(stmt)).scalar_one_or_none()
-            if r is None:
-                console.print("[red]账号不存在。[/red]")
-                raise typer.Exit(code=1)
-            r.enabled = False
-            await session.commit()
+        if not await domain_accounts.set_enabled(account_id, False):
+            console.print("[red]账号不存在。[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[yellow]OK[/yellow] {account_id} 已禁用。")
 
     asyncio.run(_run())
@@ -287,14 +265,9 @@ def delete(
             raise typer.Abort()
 
     async def _run() -> None:
-        async with get_async_session() as session:
-            stmt = select(Account).where(Account.account_id == account_id).limit(1)
-            r = (await session.execute(stmt)).scalar_one_or_none()
-            if r is None:
-                console.print("[red]账号不存在。[/red]")
-                raise typer.Exit(code=1)
-            await session.delete(r)
-            await session.commit()
+        if not await domain_accounts.delete_account(account_id):
+            console.print("[red]账号不存在。[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[red]OK[/red] {account_id} 已删除。")
 
     asyncio.run(_run())
