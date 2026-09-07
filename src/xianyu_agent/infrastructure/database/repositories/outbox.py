@@ -46,7 +46,11 @@ class SqlAlchemyOutboxRepository:
         stmt = (
             select(TransactionalOutbox)
             .where(TransactionalOutbox.published_at.is_(None))
-            .order_by(TransactionalOutbox.occurred_at.asc(), TransactionalOutbox.id.asc())
+            .order_by(
+                TransactionalOutbox.attempt_count.asc(),
+                TransactionalOutbox.occurred_at.asc(),
+                TransactionalOutbox.id.asc(),
+            )
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
