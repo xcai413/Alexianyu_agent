@@ -29,6 +29,7 @@ from .order import Order
 from .outbox import TransactionalOutbox
 from .rules import ReplyLog, ReplyRule
 from .runtime import DaemonInstance, WorkerCommand, WorkerStatus
+from .scheduler import SchedulerWork
 
 __all__ = [
     "Account",
@@ -51,6 +52,7 @@ __all__ = [
     "ReplyLog",
     "ReplyRule",
     "RuleType",
+    "SchedulerWork",
     "TaskLog",
     "TaskStatus",
     "TransactionalOutbox",
