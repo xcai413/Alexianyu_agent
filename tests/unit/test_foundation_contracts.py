@@ -37,6 +37,17 @@ def test_identifier_types_are_non_empty_and_semantically_distinct() -> None:
         IdempotencyKey("   ")
 
 
+def test_persisted_correlation_identifiers_enforce_outbox_width() -> None:
+    boundary = "x" * 64
+    assert CorrelationId(boundary).value == boundary
+    assert CausationId(boundary).value == boundary
+
+    with pytest.raises(ValueError, match="CorrelationId must not exceed 64 characters"):
+        CorrelationId("x" * 65)
+    with pytest.raises(ValueError, match="CausationId must not exceed 64 characters"):
+        CausationId("x" * 65)
+
+
 def test_command_context_generates_ids_and_validates_timezone() -> None:
     actor = ActorContext(ActorSource.MCP, actor_id=" operator ", roles=frozenset({" admin "}))
     context = CommandContext.create(
