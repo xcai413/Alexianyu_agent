@@ -49,20 +49,20 @@ class Account(Base):
         nullable=False,
     )
 
-    cookies: Mapped[list[Cookie]] = relationship(
+    cookies: Mapped[list["Cookie"]] = relationship(
         back_populates="account", cascade="all, delete-orphan"
     )
-    ws_credential: Mapped[WsCredential | None] = relationship(
+    ws_credential: Mapped["WsCredential | None"] = relationship(
         back_populates="account", cascade="all, delete-orphan", uselist=False
     )
-    messages: Mapped[list[Message]] = relationship(back_populates="account")
-    orders: Mapped[list[Order]] = relationship(back_populates="account")
-    cards: Mapped[list[Card]] = relationship(back_populates="account")
-    rules: Mapped[list[ReplyRule]] = relationship(back_populates="account")
-    worker_status: Mapped[WorkerStatus | None] = relationship(
+    messages: Mapped[list["Message"]] = relationship(back_populates="account")
+    orders: Mapped[list["Order"]] = relationship(back_populates="account")
+    cards: Mapped[list["Card"]] = relationship(back_populates="account")
+    rules: Mapped[list["ReplyRule"]] = relationship(back_populates="account")
+    worker_status: Mapped["WorkerStatus | None"] = relationship(
         back_populates="account", cascade="all, delete-orphan", uselist=False
     )
-    worker_commands: Mapped[list[WorkerCommand]] = relationship(
+    worker_commands: Mapped[list["WorkerCommand"]] = relationship(
         back_populates="account", cascade="all, delete-orphan"
     )
 
@@ -94,7 +94,7 @@ class Cookie(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="cookies")
+    account: Mapped["Account"] = relationship(back_populates="cookies")
 
     def __repr__(self) -> str:
         return f"<Cookie account_id={self.account_id}>"
@@ -122,4 +122,4 @@ class WsCredential(Base):
         nullable=False,
     )
 
-    account: Mapped[Account] = relationship(back_populates="ws_credential")
+    account: Mapped["Account"] = relationship(back_populates="ws_credential")
