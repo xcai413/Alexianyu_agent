@@ -5,7 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -44,7 +55,7 @@ class Message(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    account: Mapped[Account] = relationship(back_populates="messages")
+    account: Mapped["Account"] = relationship(back_populates="messages")
 
     __table_args__ = (
         Index("ix_messages_account_received", "account_id", "received_at"),
