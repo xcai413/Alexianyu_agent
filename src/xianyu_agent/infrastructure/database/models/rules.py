@@ -44,8 +44,8 @@ class ReplyRule(Base):
         nullable=False,
     )
 
-    account: Mapped["Account | None"] = relationship(back_populates="rules")
-    reply_logs: Mapped[list["ReplyLog"]] = relationship(back_populates="rule")
+    account: Mapped[Account | None] = relationship(back_populates="rules")
+    reply_logs: Mapped[list[ReplyLog]] = relationship(back_populates="rule")
 
     __table_args__ = (
         Index("ix_rules_account_enabled_priority", "account_id", "enabled", "priority"),
@@ -76,6 +76,6 @@ class ReplyLog(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    account: Mapped["Account"] = relationship()
-    message: Mapped["Message | None"] = relationship(foreign_keys=[message_id])
-    rule: Mapped["ReplyRule | None"] = relationship(back_populates="reply_logs")
+    account: Mapped[Account] = relationship()
+    message: Mapped[Message | None] = relationship(foreign_keys=[message_id])
+    rule: Mapped[ReplyRule | None] = relationship(back_populates="reply_logs")
