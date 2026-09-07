@@ -35,8 +35,6 @@ async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None
     other_consumer = f"other-consumer-{suffix}"
     key = IdempotencyKey(f"event-{suffix}-" + "x" * 256)
 
-    # A claim is only durable with its surrounding transaction. A failed consumer
-    # transaction must release the reservation for at-least-once retry.
     with pytest.raises(RuntimeError, match="crash before commit"):
         await _claim_then_crash(consumer, key)
 
@@ -45,8 +43,6 @@ async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None
         assert await store.claim(consumer, key) is True
         assert await store.claim(consumer, key) is False
 
-    # Re-opening the session simulates process/repository restart: committed keys
-    # remain duplicates, while the same semantic key is independent per consumer.
     async with legacy_database.async_session_factory() as session, session.begin():
         store = SqlAlchemyIdempotencyStore(session)
         assert await store.claim(consumer, key) is False
@@ -67,6 +63,20 @@ async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_consumer_namespace_is_canonical_across_database_collations() -> None:
+    if not os.environ.get("TEST_DATABASE_BACKEND"):
+        pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
+
+    suffix = uuid4().hex
+    key = IdempotencyKey(f"event-{suffix}")
+    async with legacy_database.async_session_factory() as session, session.begin():
+        store = SqlAlchemyIdempotencyStore(session)
+        assert await store.claim(f" Email.Worker-{suffix} ", key) is True
+        assert await store.claim(f"email.worker-{suffix}", key) is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_idempotency_rejects_invalid_consumer_namespace() -> None:
     if not os.environ.get("TEST_DATABASE_BACKEND"):
         pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
@@ -77,3 +87,5 @@ async def test_idempotency_rejects_invalid_consumer_namespace() -> None:
             await store.claim("   ", IdempotencyKey("key"))
         with pytest.raises(ValueError, match="must not exceed 128"):
             await store.claim("c" * 129, IdempotencyKey("key"))
+        with pytest.raises(ValueError, match="ASCII slug"):
+            await store.claim("émail", IdempotencyKey("key"))
