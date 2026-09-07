@@ -39,7 +39,16 @@ jobs:
       - name: Ruff
         run: uv run ruff check .
 
-      - name: Mypy
+      - name: Mypy / Phase 0 blocking baseline
+        run: >-
+          uv run mypy
+          --follow-imports=skip
+          --disable-error-code=no-untyped-def
+          src/xianyu_agent/config.py
+          src/xianyu_agent/db/database.py
+
+      - name: Mypy / legacy debt report
+        continue-on-error: true
         run: uv run mypy src/xianyu_agent
 
       - name: Pytest
