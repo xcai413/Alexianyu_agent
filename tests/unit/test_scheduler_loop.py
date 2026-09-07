@@ -25,16 +25,15 @@ class FakeRecovery:
 class FakeRunner:
     results: Iterable[RunResult]
     calls: int = 0
-    call_events: list[asyncio.Event] = field(default_factory=list)
+    call_events: list[asyncio.Event] = field(init=False)
     _results: Iterator[RunResult] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._results = iter(self.results)
+        self.call_events = [asyncio.Event() for _ in range(8)]
 
     async def run_once(self) -> RunResult:
         self.calls += 1
-        while len(self.call_events) < self.calls:
-            self.call_events.append(asyncio.Event())
         self.call_events[self.calls - 1].set()
         return next(
             self._results,
@@ -43,8 +42,6 @@ class FakeRunner:
 
 
 async def _wait_for_call(runner: FakeRunner, number: int) -> None:
-    while len(runner.call_events) < number:
-        await asyncio.sleep(0)
     await runner.call_events[number - 1].wait()
 
 
