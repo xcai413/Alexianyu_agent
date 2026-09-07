@@ -1,4 +1,4 @@
-"""异步 SQLite 引擎与 session 工厂。"""
+"""异步数据库引擎与 session 工厂。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import event as sa_event
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,20 +21,29 @@ from xianyu_agent.db.models import Base
 
 def _make_engine() -> AsyncEngine:
     settings = get_settings()
+    url = make_url(settings.db_url)
+    backend = url.get_backend_name()
+    connect_args: dict[str, Any] = {}
+
+    if backend == "sqlite":
+        connect_args["check_same_thread"] = False
+
     engine = create_async_engine(
         settings.db_url,
         echo=False,
         future=True,
         pool_pre_ping=True,
-        connect_args={"check_same_thread": False},
+        connect_args=connect_args,
     )
 
-    @sa_event.listens_for(engine.sync_engine, "connect")
-    def _enable_sqlite_fk(dbapi_connection, _connection_record) -> None:
-        """SQLite needs PRAGMA foreign_keys=ON per connection for cascades."""
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+    if backend == "sqlite":
+
+        @sa_event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_fk(dbapi_connection, _connection_record) -> None:
+            """SQLite needs PRAGMA foreign_keys=ON per connection for cascades."""
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
     return engine
 
@@ -88,11 +98,21 @@ def reset_engine() -> None:
 
 
 def engine_info() -> dict[str, Any]:
-    """诊断用:返回引擎与 DB 状态。"""
+    """诊断用:返回引擎与 DB 状态;远程数据库不会暴露密码。"""
     settings = get_settings()
+    url = make_url(settings.db_url)
+    backend = url.get_backend_name()
     info: dict[str, Any] = {
-        "url": settings.db_url,
-        "db_path": str(settings.resolved_db_path),
-        "exists": settings.resolved_db_path.exists(),
+        "url": url.render_as_string(hide_password=True),
+        "backend": backend,
     }
+    if backend == "sqlite":
+        info.update(
+            {
+                "db_path": str(settings.resolved_db_path),
+                "exists": settings.resolved_db_path.exists(),
+            }
+        )
+    else:
+        info.update({"db_path": None, "exists": None})
     return info
