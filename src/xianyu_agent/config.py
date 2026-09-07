@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     tz: str = "Asia/Shanghai"
 
     # === 数据库 ===
-    # database_url 非空时优先于 db_path；用于 MySQL/PostgreSQL 以及显式 SQLite URL。
-    # 支持 SQLAlchemy async URL，例如：
+    # database_url 非空时优先于 db_path;用于 MySQL/PostgreSQL 以及显式 SQLite URL。
+    # 支持 SQLAlchemy async URL,例如:
     #   sqlite+aiosqlite:///./data/xianyu.db
     #   mysql+asyncmy://user:pass@127.0.0.1:3306/xianyu
     #   postgresql+asyncpg://user:pass@127.0.0.1:5432/xianyu
