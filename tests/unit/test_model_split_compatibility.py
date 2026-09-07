@@ -15,6 +15,7 @@ EXPECTED_TABLES = {
     "reply_logs",
     "reply_rules",
     "task_logs",
+    "transactional_outbox",
     "worker_commands",
     "worker_status",
     "ws_credentials",
@@ -31,10 +32,13 @@ def test_legacy_model_module_reexports_canonical_classes() -> None:
     assert legacy_models.Card.__module__ == "xianyu_agent.infrastructure.database.models.inventory"
     assert legacy_models.ReplyRule.__module__ == "xianyu_agent.infrastructure.database.models.rules"
     assert legacy_models.AuditLog.__module__ == "xianyu_agent.infrastructure.database.models.audit"
+    assert legacy_models.TransactionalOutbox.__module__ == (
+        "xianyu_agent.infrastructure.database.models.outbox"
+    )
 
 
 def test_split_model_package_registers_complete_existing_metadata() -> None:
-    """The structural split must neither lose nor duplicate existing tables."""
+    """The structural split must register every current table exactly once."""
     assert set(legacy_models.Base.metadata.tables) == EXPECTED_TABLES
 
 

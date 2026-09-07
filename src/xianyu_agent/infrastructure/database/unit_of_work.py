@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from xianyu_agent.db import database as legacy_database
 from xianyu_agent.infrastructure.database.repositories.account import SqlAlchemyAccountRepository
+from xianyu_agent.infrastructure.database.repositories.outbox import SqlAlchemyOutboxRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -15,6 +16,7 @@ class SqlAlchemyUnitOfWork:
 
     session: AsyncSession
     accounts: SqlAlchemyAccountRepository
+    outbox: SqlAlchemyOutboxRepository
 
     def __init__(
         self,
@@ -26,6 +28,7 @@ class SqlAlchemyUnitOfWork:
         session_factory = self._session_factory or legacy_database.async_session_factory
         self.session = session_factory()
         self.accounts = SqlAlchemyAccountRepository(self.session)
+        self.outbox = SqlAlchemyOutboxRepository(self.session)
         return self
 
     async def __aexit__(
