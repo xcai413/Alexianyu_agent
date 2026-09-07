@@ -50,8 +50,8 @@ class SchedulerRunner:
             raise ValueError("lease_owner must not be empty")
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
-        if retry_delay < timedelta(0):
-            raise ValueError("retry_delay must not be negative")
+        if retry_delay <= timedelta(0):
+            raise ValueError("retry_delay must be positive")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if concurrency <= 0:
