@@ -66,32 +66,43 @@ class SchedulerRunner:
         self._concurrency = concurrency
 
     async def run_once(self) -> RunResult:
-        """Claim at most ``batch_size`` due items and execute them once."""
-        now = require_utc(self._clock.now())
-        claimed = await self._queue.claim_due(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_duration=self._lease_duration,
-            limit=self._batch_size,
-        )
-        semaphore = asyncio.Semaphore(self._concurrency)
+        """Claim at most ``batch_size`` due items without parking active leases."""
+        outcomes: list[WorkOutcome] = []
+        claimed_count = 0
 
-        async def execute(work: LeasedWork) -> WorkOutcome:
-            async with semaphore:
-                try:
-                    await self._handler(work)
-                except Exception:
-                    available_at = require_utc(self._clock.now()) + self._retry_delay
-                    released = await self._queue.release(work, available_at=available_at)
-                    return WorkOutcome.RELEASED if released else WorkOutcome.STALE
-                completed_at = require_utc(self._clock.now())
-                completed = await self._queue.complete(work, completed_at=completed_at)
-                return WorkOutcome.COMPLETED if completed else WorkOutcome.STALE
+        while claimed_count < self._batch_size:
+            remaining = self._batch_size - claimed_count
+            claim_limit = min(self._concurrency, remaining)
+            now = require_utc(self._clock.now())
+            claimed = await self._queue.claim_due(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_duration=self._lease_duration,
+                limit=claim_limit,
+            )
+            if not claimed:
+                break
 
-        outcomes = await asyncio.gather(*(execute(work) for work in claimed))
+            claimed_count += len(claimed)
+            outcomes.extend(await asyncio.gather(*(self._execute(work) for work in claimed)))
+
+            if len(claimed) < claim_limit:
+                break
+
         return RunResult(
-            claimed=len(claimed),
+            claimed=claimed_count,
             completed=outcomes.count(WorkOutcome.COMPLETED),
             released=outcomes.count(WorkOutcome.RELEASED),
             stale=outcomes.count(WorkOutcome.STALE),
         )
+
+    async def _execute(self, work: LeasedWork) -> WorkOutcome:
+        try:
+            await self._handler(work)
+        except Exception:
+            available_at = require_utc(self._clock.now()) + self._retry_delay
+            released = await self._queue.release(work, available_at=available_at)
+            return WorkOutcome.RELEASED if released else WorkOutcome.STALE
+        completed_at = require_utc(self._clock.now())
+        completed = await self._queue.complete(work, completed_at=completed_at)
+        return WorkOutcome.COMPLETED if completed else WorkOutcome.STALE
