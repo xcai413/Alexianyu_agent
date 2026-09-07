@@ -3,6 +3,7 @@
 from .clock import Clock, SystemClock
 from .due_queue import DueQueue
 from .lease import LeasedWork
+from .loop import SchedulerLoop
 from .recovery import SchedulerRecovery
 from .runner import RunResult, SchedulerRunner, WorkHandler, WorkOutcome
 
@@ -11,6 +12,7 @@ __all__ = [
     "DueQueue",
     "LeasedWork",
     "RunResult",
+    "SchedulerLoop",
     "SchedulerRecovery",
     "SchedulerRunner",
     "SystemClock",
