@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,10 +27,21 @@ class SqlAlchemyIdempotencyStore:
         if len(consumer) > _MAX_CONSUMER_LENGTH:
             raise ValueError(f"consumer must not exceed {_MAX_CONSUMER_LENGTH} characters")
 
-        record = ConsumerInbox(
-            consumer=consumer,
-            key_hash=sha256(key.value.encode("utf-8")).hexdigest(),
-        )
+        key_hash = sha256(key.value.encode("utf-8")).hexdigest()
+        if self._session.get_bind().dialect.name == "sqlite":
+            # Python 3.11's sqlite3 legacy transaction mode does not BEGIN for a
+            # SAVEPOINT. A nested transaction could therefore become the outermost
+            # transaction and survive the caller's rollback. INSERT ... DO NOTHING
+            # starts the real transaction first and reports duplicate claims safely.
+            statement = (
+                sqlite_insert(ConsumerInbox)
+                .values(consumer=consumer, key_hash=key_hash)
+                .on_conflict_do_nothing(index_elements=["consumer", "key_hash"])
+            )
+            result = await self._session.execute(statement)
+            return result.rowcount == 1
+
+        record = ConsumerInbox(consumer=consumer, key_hash=key_hash)
         try:
             async with self._session.begin_nested():
                 self._session.add(record)
