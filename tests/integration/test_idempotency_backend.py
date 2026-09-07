@@ -22,14 +22,7 @@ async def _claim_then_crash(consumer: str, key: IdempotencyKey) -> None:
         raise RuntimeError("crash before commit")
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None:
-    backend = os.environ.get("TEST_DATABASE_BACKEND")
-    if not backend:
-        pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
-    assert get_settings().database_backend == backend
-
+async def _assert_atomic_durable_and_consumer_scoped() -> None:
     suffix = uuid4().hex
     consumer = f"test-consumer-{suffix}"
     other_consumer = f"other-consumer-{suffix}"
@@ -61,12 +54,7 @@ async def test_idempotency_claim_is_atomic_durable_and_consumer_scoped() -> None
         assert all(key.value not in row.key_hash for row in rows)
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_consumer_namespace_is_canonical_across_database_collations() -> None:
-    if not os.environ.get("TEST_DATABASE_BACKEND"):
-        pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
-
+async def _assert_consumer_namespace_is_canonical() -> None:
     suffix = uuid4().hex
     key = IdempotencyKey(f"event-{suffix}")
     async with legacy_database.async_session_factory() as session, session.begin():
@@ -75,12 +63,7 @@ async def test_consumer_namespace_is_canonical_across_database_collations() -> N
         assert await store.claim(f"email.worker-{suffix}", key) is False
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_idempotency_rejects_invalid_consumer_namespace() -> None:
-    if not os.environ.get("TEST_DATABASE_BACKEND"):
-        pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
-
+async def _assert_invalid_consumer_namespace_is_rejected() -> None:
     async with legacy_database.async_session_factory() as session, session.begin():
         store = SqlAlchemyIdempotencyStore(session)
         with pytest.raises(ValueError, match="must not be empty"):
@@ -89,3 +72,17 @@ async def test_idempotency_rejects_invalid_consumer_namespace() -> None:
             await store.claim("c" * 129, IdempotencyKey("key"))
         with pytest.raises(ValueError, match="ASCII slug"):
             await store.claim("émail", IdempotencyKey("key"))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_idempotency_contract_across_backend() -> None:
+    """Exercise every backend assertion on one asyncio event loop."""
+    backend = os.environ.get("TEST_DATABASE_BACKEND")
+    if not backend:
+        pytest.skip("TEST_DATABASE_BACKEND 仅由数据库兼容性 CI job 提供")
+    assert get_settings().database_backend == backend
+
+    await _assert_atomic_durable_and_consumer_scoped()
+    await _assert_consumer_namespace_is_canonical()
+    await _assert_invalid_consumer_namespace_is_rejected()
