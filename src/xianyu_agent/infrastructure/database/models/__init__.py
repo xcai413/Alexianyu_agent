@@ -22,6 +22,7 @@ from .enums import (
     WorkerDesiredState,
     WorkerStatusValue,
 )
+from .idempotency import ConsumerInbox
 from .inventory import Card, CardConsumption
 from .item import Item
 from .message import Message
@@ -42,6 +43,7 @@ __all__ = [
     "CardConsumption",
     "CardType",
     "ConsumptionStatus",
+    "ConsumerInbox",
     "Cookie",
     "DaemonInstance",
     "Item",
