@@ -11,8 +11,10 @@ from xianyu_agent.runtime.account_lock import (
     AccountConnectionLock,
 )
 from xianyu_agent.runtime.daemon_lock import DaemonAlreadyRunningError, DaemonLock
-from xianyu_agent.services import account_lock as legacy_account_lock
-from xianyu_agent.services import daemon_lock as legacy_daemon_lock
+from xianyu_agent.services import (
+    account_lock as legacy_account_lock,
+    daemon_lock as legacy_daemon_lock,
+)
 
 
 def test_legacy_lock_modules_reexport_canonical_runtime_types() -> None:
