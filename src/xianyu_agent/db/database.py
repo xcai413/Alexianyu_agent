@@ -98,7 +98,7 @@ def reset_engine() -> None:
 
 
 def engine_info() -> dict[str, Any]:
-    """诊断用:返回引擎与 DB 状态；远程数据库不会暴露密码。"""
+    """诊断用:返回引擎与 DB 状态;远程数据库不会暴露密码。"""
     settings = get_settings()
     url = make_url(settings.db_url)
     backend = url.get_backend_name()
