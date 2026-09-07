@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from xianyu_agent.foundation import CausationId, CorrelationId
+
 
 @dataclass(frozen=True, slots=True)
 class OutboxEvent:
@@ -22,6 +24,16 @@ class OutboxEvent:
     aggregate_type: str | None = None
     aggregate_id: str | None = None
     causation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        correlation_id = CorrelationId(self.correlation_id)
+        causation_id = None if self.causation_id is None else CausationId(self.causation_id)
+        object.__setattr__(self, "correlation_id", correlation_id.value)
+        object.__setattr__(
+            self,
+            "causation_id",
+            None if causation_id is None else causation_id.value,
+        )
 
 
 @dataclass(frozen=True, slots=True)
