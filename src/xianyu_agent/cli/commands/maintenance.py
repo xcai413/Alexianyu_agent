@@ -7,7 +7,7 @@ import asyncio
 import typer
 from rich.console import Console
 
-from xianyu_agent.services.heartbeat import purge_old_messages
+from xianyu_agent.runtime.heartbeat import purge_old_messages
 
 app = typer.Typer(help="维护任务(消息清理等)。")
 console = Console()
