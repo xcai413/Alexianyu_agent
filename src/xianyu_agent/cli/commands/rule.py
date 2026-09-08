@@ -8,8 +8,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.domain import rules as domain_rules
-from xianyu_agent.domain.rules import DEFAULT_PRIORITY
+from xianyu_agent.domain.message import rules as domain_rules
+from xianyu_agent.domain.message.rules import DEFAULT_PRIORITY
 
 app = typer.Typer(help="回复规则(关键词 / 正则 / 默认)。")
 console = Console()
