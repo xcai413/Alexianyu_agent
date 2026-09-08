@@ -117,20 +117,22 @@ def _translate_auth_error(error: WsAuthError) -> CredentialBackendError:
     text = str(error)
     upper = text.upper()
     compact = upper.replace(" ", "")
+    retryable = False
 
     if worker_risk.is_user_validate_error(error):
-        return CredentialBackendError(CredentialFailureCode.NEEDS_VALIDATION)
-    if "网络请求失败" in text or "NETWORK" in upper:
-        return CredentialBackendError(
-            CredentialFailureCode.NETWORK_ERROR,
-            retryable_hint=True,
-        )
-    if "无可用COOKIE" in compact:
-        return CredentialBackendError(CredentialFailureCode.CREDENTIAL_MISSING)
-    if "COOKIE缺少UNB" in compact:
-        return CredentialBackendError(CredentialFailureCode.IDENTITY_MISSING)
-    if "SESSION_EXPIRED" in upper or "SESSION过期" in compact:
-        return CredentialBackendError(CredentialFailureCode.SESSION_EXPIRED)
-    if "账号" in text and "不存在" in text:
-        return CredentialBackendError(CredentialFailureCode.ACCOUNT_NOT_FOUND)
-    return CredentialBackendError(CredentialFailureCode.AUTH_FAILED)
+        code = CredentialFailureCode.NEEDS_VALIDATION
+    elif "网络请求失败" in text or "NETWORK" in upper:
+        code = CredentialFailureCode.NETWORK_ERROR
+        retryable = True
+    elif "无可用COOKIE" in compact:
+        code = CredentialFailureCode.CREDENTIAL_MISSING
+    elif "COOKIE缺少UNB" in compact:
+        code = CredentialFailureCode.IDENTITY_MISSING
+    elif "SESSION_EXPIRED" in upper or "SESSION过期" in compact:
+        code = CredentialFailureCode.SESSION_EXPIRED
+    elif "账号" in text and "不存在" in text:
+        code = CredentialFailureCode.ACCOUNT_NOT_FOUND
+    else:
+        code = CredentialFailureCode.AUTH_FAILED
+
+    return CredentialBackendError(code, retryable_hint=retryable)
