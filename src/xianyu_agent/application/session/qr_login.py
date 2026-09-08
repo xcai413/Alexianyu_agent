@@ -174,18 +174,52 @@ class QrLoginApplication:
             timeout_s=timeout_s,
             on_status=on_status,
         )
-        session = challenge._session
-        terminal = self._platform_terminal_result(challenge, final, session)
+        terminal = self._platform_terminal_result(
+            challenge,
+            final,
+            challenge._session,
+        )
         if terminal is not None:
             return terminal
+        return await self._complete_confirmed(challenge, remark=remark)
 
+    async def complete_confirmed(
+        self,
+        account_id: str,
+        session: Any,
+        *,
+        remark: str = "",
+    ) -> QrLoginResult:
+        """Complete persistence/credential validation for an already-confirmed session.
+
+        This compatibility entry keeps pre-layering callers working without moving
+        orchestration back into the interface layer.
+        """
+        session_id = getattr(session, "session_id", None)
+        if not isinstance(session_id, str) or not session_id:
+            raise QrLoginInvalidChallengeError("QR platform returned no session id")
+        challenge = QrLoginChallenge(
+            account_id=account_id,
+            session_id=session_id,
+            qr_content="",
+            _session=session,
+        )
+        return await self._complete_confirmed(challenge, remark=remark)
+
+    async def _complete_confirmed(
+        self,
+        challenge: QrLoginChallenge,
+        *,
+        remark: str,
+    ) -> QrLoginResult:
+        session = challenge._session
         unb = getattr(session, "unb", None)
         cookie_string = getattr(session, "cookie_string", None)
         if not isinstance(unb, str) or not unb or not callable(cookie_string):
             return self._result(
                 challenge,
                 QrLoginResultState.INVALID_SESSION,
-                final,
+                "success",
                 message="QR login succeeded without a usable identity",
             )
 
@@ -200,7 +234,7 @@ class QrLoginApplication:
             return self._result(
                 challenge,
                 QrLoginResultState.PERSISTENCE_FAILURE,
-                final,
+                "success",
                 message="QR login Cookie could not be persisted",
             )
 
@@ -208,7 +242,7 @@ class QrLoginApplication:
             challenge.account_id,
             validation_recovery=True,
         )
-        return self._credential_result(challenge, final, credential)
+        return self._credential_result(challenge, "success", credential)
 
     def _platform_terminal_result(
         self,
