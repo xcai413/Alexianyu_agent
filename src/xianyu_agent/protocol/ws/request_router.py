@@ -84,7 +84,7 @@ class RequestRouter:
             return False
         return self.match(request_id, response)
 
-    def fail(self, request_id: str, exc: BaseException) -> bool:
+    def fail(self, request_id: str, exc: Exception) -> bool:
         """Fail a pending request when its surrounding receive operation fails."""
         pending = self._pending.pop(request_id, None)
         if pending is None or pending.future.done():
@@ -101,10 +101,10 @@ class RequestRouter:
             pending.future.cancel()
         return True
 
-    async def wait(self, pending: PendingRequest, *, timeout: float | None) -> Any:
+    async def wait(self, pending: PendingRequest, *, timeout_s: float | None) -> Any:
         """Wait for a registered response, cleaning state on timeout/cancellation."""
         try:
-            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=timeout)
+            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=timeout_s)
         except TimeoutError:
             self._cancel_pending(pending)
             raise
