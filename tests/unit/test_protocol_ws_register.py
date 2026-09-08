@@ -40,11 +40,14 @@ def test_build_registration_frame_preserves_wire_contract(monkeypatch) -> None:
     }
 
 
-def test_ws_auth_registration_wrapper_uses_canonical_builder(monkeypatch) -> None:
-    monkeypatch.setattr(register, "generate_mid", lambda: "mid-2")
+def test_ws_auth_registration_wrapper_preserves_legacy_mid_hook(monkeypatch) -> None:
+    monkeypatch.setattr(ws_auth, "_generate_mid", lambda: "mid-2")
 
     frame = ws_auth.build_registration_frame(_credentials())
 
     assert frame["headers"]["mid"] == "mid-2"
     assert ws_auth.ws_register is register
-    assert ws_auth._generate_mid is not None
+
+
+def test_ws_auth_registration_mid_alias_starts_canonical() -> None:
+    assert ws_auth._generate_mid is register.generate_mid
