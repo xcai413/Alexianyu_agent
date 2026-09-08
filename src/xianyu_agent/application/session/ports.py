@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Generic, Protocol, TypeVar
+from typing import Protocol, TypeVar
 
-CredentialT = TypeVar("CredentialT")
+CredentialT = TypeVar("CredentialT", covariant=True)
 
 
 class CredentialFailureCode(StrEnum):
