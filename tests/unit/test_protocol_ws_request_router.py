@@ -78,7 +78,7 @@ async def test_register_match_and_wait_contract() -> None:
     assert router.pending_count == 1
     assert router.match("m-1", {"ok": True}) is True
     assert router.pending_count == 0
-    assert await router.wait(pending, timeout=0.1) == {"ok": True}
+    assert await router.wait(pending, timeout_s=0.1) == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -87,8 +87,8 @@ async def test_concurrent_requests_are_isolated_when_responses_arrive_out_of_ord
     first = router.register("m-1")
     second = router.register("m-2")
 
-    first_waiter = asyncio.create_task(router.wait(first, timeout=0.2))
-    second_waiter = asyncio.create_task(router.wait(second, timeout=0.2))
+    first_waiter = asyncio.create_task(router.wait(first, timeout_s=0.2))
+    second_waiter = asyncio.create_task(router.wait(second, timeout_s=0.2))
     await asyncio.sleep(0)
 
     assert router.match("m-2", "second") is True
@@ -104,7 +104,7 @@ async def test_timeout_cleans_pending_state_and_cancels_future() -> None:
     pending = router.register("m-timeout")
 
     with pytest.raises(TimeoutError):
-        await router.wait(pending, timeout=0.01)
+        await router.wait(pending, timeout_s=0.01)
 
     assert router.pending_count == 0
     assert pending.future.cancelled()
@@ -114,7 +114,7 @@ async def test_timeout_cleans_pending_state_and_cancels_future() -> None:
 async def test_waiter_cancellation_cleans_pending_state() -> None:
     router = request_router.RequestRouter()
     pending = router.register("m-cancel")
-    waiter = asyncio.create_task(router.wait(pending, timeout=None))
+    waiter = asyncio.create_task(router.wait(pending, timeout_s=None))
     await asyncio.sleep(0)
 
     waiter.cancel()
@@ -132,7 +132,7 @@ async def test_failed_request_propagates_error_and_cleans_pending_state() -> Non
 
     assert router.fail("m-error", RuntimeError("recv failed")) is True
     with pytest.raises(RuntimeError, match="recv failed"):
-        await router.wait(pending, timeout=0.1)
+        await router.wait(pending, timeout_s=0.1)
 
     assert router.pending_count == 0
 
