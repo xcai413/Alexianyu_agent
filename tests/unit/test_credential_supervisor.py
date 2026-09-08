@@ -220,7 +220,8 @@ async def test_concurrent_repeated_ensure_refreshes_once() -> None:
         supervisor.ensure(ACCOUNT_ID),
     )
 
-    assert first.ok and second.ok
+    assert first.ok
+    assert second.ok
     assert backend.acquire_calls.count(True) == 1
     assert backend.acquire_calls.count(False) == 1
 
