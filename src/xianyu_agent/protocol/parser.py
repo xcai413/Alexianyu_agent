@@ -28,7 +28,7 @@ from xianyu_agent.protocol.events import (
     OrderPaid,
     SystemNotice,
 )
-from xianyu_agent.protocol.ws import normalizer as ws_normalizer
+from xianyu_agent.protocol.ws import ack as ws_ack, normalizer as ws_normalizer
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,10 @@ KEY_TS_ID = "6"
 KEY_CHAT_ID = "10"
 KEY_ITEM = "100"
 
-# Compatibility aliases while payload normalization moves under protocol/ws.
+# Compatibility aliases while protocol helpers move under protocol/ws.
 _decode_body = ws_normalizer.decode_body
 _decode_sync_data = ws_normalizer.decode_sync_data
+_fallback_mid = ws_ack.fallback_mid
 
 
 def _make_envelope(account_id, raw):  # noqa: ARG001
@@ -51,19 +52,8 @@ def _make_envelope(account_id, raw):  # noqa: ARG001
 
 
 def build_ack_frame(frame) -> dict | None:
-    """为服务端推送构造 ACK;客户端主动帧和普通响应无需 ACK。"""
-    headers = frame.headers if isinstance(frame.headers, dict) else {}
-    if not headers:
-        return None
-    mid = headers.get("mid")
-    sid = headers.get("sid")
-    if not mid and not sid:
-        return None
-    ack_headers = {"mid": str(mid or _fallback_mid()), "sid": str(sid or "")}
-    for key in ("app-key", "ua", "dt"):
-        if key in headers:
-            ack_headers[key] = headers[key]
-    return {"code": 200, "headers": ack_headers}
+    """Legacy ACK builder entry delegated to the canonical WS ACK module."""
+    return ws_ack.build_ack_frame(frame, mid_factory=_fallback_mid)
 
 
 def unpack_sync_payloads(frame) -> list[dict]:
@@ -363,10 +353,6 @@ def _content_type(content: str) -> MessageContentType:
 def _is_system_tip(meta: dict) -> bool:
     ext = _extract_json_object(meta.get("extJson"))
     return str(ext.get("msgArg1") or "") == "MsgTips"
-
-
-def _fallback_mid() -> str:
-    return f"{uuid.uuid4().int % 1000}{int(datetime.now(UTC).timestamp() * 1000)} 0"
 
 
 def parse_error(account_id, code, message):
