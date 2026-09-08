@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from xianyu_agent.services import watchdog_runner
+from xianyu_agent.runtime import watchdog as watchdog_runner
 from xianyu_agent.services.daemon_health import DaemonHealth
 
 

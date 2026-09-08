@@ -64,6 +64,7 @@ jobs:
           src/xianyu_agent/runtime/heartbeat.py
           src/xianyu_agent/runtime/scheduler
           src/xianyu_agent/runtime/service_runner.py
+          src/xianyu_agent/runtime/watchdog.py
           src/xianyu_agent/infrastructure/database/models
           src/xianyu_agent/infrastructure/database/repositories/account.py
           src/xianyu_agent/infrastructure/database/repositories/outbox.py
