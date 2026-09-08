@@ -14,8 +14,7 @@ from typing import Any
 
 from xianyu_agent import __version__
 from xianyu_agent.config import get_settings
-from xianyu_agent.domain import accounts as domain_accounts
-from xianyu_agent.domain.account import risk as worker_risk
+from xianyu_agent.domain.account import risk as worker_risk, state as domain_accounts
 from xianyu_agent.domain.runtime import command as worker_commands, daemon as daemon_domain
 from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.daemon_lock import DaemonLock

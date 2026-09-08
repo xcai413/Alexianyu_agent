@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
 from xianyu_agent.runtime.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.runtime.account_worker import AccountWorker
@@ -204,23 +204,23 @@ class AccountPool:
         result: list[dict] = []
         for acc in accounts:
             worker = self._workers.get(acc.account_id)
-            row = by_account.get(acc.account_id) or {}
+            status_data = by_account.get(acc.account_id) or {}
             result.append(
                 {
                     "account_id": acc.account_id,
                     "enabled": acc.enabled,
                     "desired_state": acc.desired_state,
                     "worker_state": worker.state.value if worker else "no_worker",
-                    "db_status": row.get("status", "offline"),
-                    "reconnect_attempts": row.get("reconnect_attempts", 0),
-                    "last_heartbeat_at": row.get("last_heartbeat_at"),
-                    "last_error": row.get("last_error"),
+                    "db_status": status_data.get("status", "offline"),
+                    "reconnect_attempts": status_data.get("reconnect_attempts", 0),
+                    "last_heartbeat_at": status_data.get("last_heartbeat_at"),
+                    "last_error": status_data.get("last_error"),
                     "started_at": format_local(worker.started_at)
                     if worker and worker.started_at
-                    else row.get("started_at"),
-                    "risk_code": row.get("risk_code"),
-                    "risk_cooldown_until": row.get("risk_cooldown_until"),
-                    "risk_recovery_required": row.get("risk_recovery_required", False),
+                    else status_data.get("started_at"),
+                    "risk_code": status_data.get("risk_code"),
+                    "risk_cooldown_until": status_data.get("risk_cooldown_until"),
+                    "risk_recovery_required": status_data.get("risk_recovery_required", False),
                 }
             )
         return result
