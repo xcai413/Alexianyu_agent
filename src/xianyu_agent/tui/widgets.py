@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from textual.widgets import DataTable, Static
 
+from xianyu_agent.application.health.observability import RuntimeSnapshot, build_runtime_snapshot
 from xianyu_agent.domain import (
     cards as domain_cards,
     items as domain_items,
     messages as domain_messages,
     orders as domain_orders,
 )
-from xianyu_agent.services.observability import RuntimeSnapshot, build_runtime_snapshot
 from xianyu_agent.utils.time_utils import to_local
 
 
