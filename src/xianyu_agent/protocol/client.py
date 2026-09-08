@@ -43,8 +43,7 @@ from xianyu_agent.protocol.events import (
 )
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
-from xianyu_agent.protocol.ws import ack as ws_ack
-from xianyu_agent.protocol.ws import decoder as ws_decoder
+from xianyu_agent.protocol.ws import ack as ws_ack, decoder as ws_decoder
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
     WsTokenProvider,
