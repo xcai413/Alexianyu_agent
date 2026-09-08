@@ -47,6 +47,7 @@ jobs:
           src/xianyu_agent/db/database.py
           src/xianyu_agent/db/models.py
           src/xianyu_agent/application/accounts.py
+          src/xianyu_agent/application/health
           src/xianyu_agent/application/outbox_dispatcher.py
           src/xianyu_agent/application/ports/event_bus.py
           src/xianyu_agent/application/ports/idempotency.py
