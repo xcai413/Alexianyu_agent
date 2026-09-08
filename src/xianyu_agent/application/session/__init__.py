@@ -1,4 +1,4 @@
-"""Credential lifecycle application boundary."""
+"""Credential and login lifecycle application boundary."""
 
 from .health import (
     CredentialHandle,
@@ -16,6 +16,14 @@ from .ports import (
     ValidationGate,
     ValidationStatus,
 )
+from .qr_login import (
+    QrLoginAccountBusyError,
+    QrLoginApplication,
+    QrLoginChallenge,
+    QrLoginInvalidChallengeError,
+    QrLoginResult,
+    QrLoginResultState,
+)
 from .supervisor import CredentialSupervisor
 
 __all__ = [
@@ -30,6 +38,12 @@ __all__ = [
     "CredentialResult",
     "CredentialResultState",
     "CredentialSupervisor",
+    "QrLoginAccountBusyError",
+    "QrLoginApplication",
+    "QrLoginChallenge",
+    "QrLoginInvalidChallengeError",
+    "QrLoginResult",
+    "QrLoginResultState",
     "ValidationGate",
     "ValidationStatus",
 ]
