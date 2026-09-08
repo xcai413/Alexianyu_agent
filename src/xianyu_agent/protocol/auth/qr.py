@@ -7,7 +7,7 @@
   4. POST passport.goofish.com/newlogin/qrcode/query.do    -> 轮询 qrCodeStatus
   5. CONFIRMED 时响应 Set-Cookie 含 unb 等 -> 拼 Cookie 串
 
-本模块只负责平台 HTTP 交互与 QR 会话状态机，不负责展示、账号持久化或凭据恢复。
+This module owns only platform HTTP interaction and the QR session state machine.
 """
 
 from __future__ import annotations
