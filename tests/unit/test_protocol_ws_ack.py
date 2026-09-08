@@ -17,6 +17,33 @@ class _Socket:
         self.sent.append(payload)
 
 
+def test_build_ack_frame_preserves_correlation_contract() -> None:
+    frame = WsFrame(
+        headers={"mid": "m-1", "sid": "s-1", "app-key": "app", "ua": "ua", "dt": "j"}
+    )
+
+    assert ack.build_ack_frame(frame) == {
+        "code": 200,
+        "headers": {
+            "mid": "m-1",
+            "sid": "s-1",
+            "app-key": "app",
+            "ua": "ua",
+            "dt": "j",
+        },
+    }
+    assert ack.build_ack_frame(WsFrame(headers={})) is None
+
+
+def test_build_ack_frame_preserves_fallback_mid_hook() -> None:
+    frame = WsFrame(headers={"sid": "s-2"})
+
+    assert ack.build_ack_frame(frame, mid_factory=lambda: "fallback-mid") == {
+        "code": 200,
+        "headers": {"mid": "fallback-mid", "sid": "s-2"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_send_ack_preserves_existing_wire_frame() -> None:
     socket = _Socket()
