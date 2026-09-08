@@ -1,4 +1,4 @@
-"""WebSocket wire-frame decoding helpers."""
+"""WebSocket wire-frame and sync-payload decoding helpers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from xianyu_agent.protocol.events import WsFrame
+from xianyu_agent.protocol.ws import normalizer as ws_normalizer
 
 
 @dataclass(frozen=True)
@@ -34,3 +35,26 @@ def decode_frame(raw: str | bytes) -> DecodedFrame | None:
         return None
     frame = WsFrame.model_validate(payload) if isinstance(payload, dict) else WsFrame(body=raw_text)
     return DecodedFrame(frame=frame, payload=payload, raw_text=raw_text)
+
+
+def unpack_sync_payloads(
+    frame: WsFrame,
+    *,
+    body_decoder=ws_normalizer.decode_body,
+    sync_decoder=ws_normalizer.decode_sync_data,
+) -> list[dict]:
+    """Unpack `syncPushPackage.data[*].data` using the existing decode policy."""
+    body = body_decoder(frame.body)
+    if not isinstance(body, dict):
+        return []
+    package = body.get("syncPushPackage")
+    if not isinstance(package, dict) or not isinstance(package.get("data"), list):
+        return []
+    payloads = []
+    for entry in package["data"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("data"), str):
+            continue
+        decoded = sync_decoder(entry["data"])
+        if isinstance(decoded, dict):
+            payloads.append(decoded)
+    return payloads
