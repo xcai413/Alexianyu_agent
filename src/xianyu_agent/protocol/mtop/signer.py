@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -19,7 +18,6 @@ from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, Cookie, WsCredential, get_async_session
-from xianyu_agent.protocol.events import ErrorOccurred
 
 logger = logging.getLogger(__name__)
 APP_KEY = "34839810"
@@ -215,12 +213,3 @@ def _mask_identifier(value: str | None) -> str | None:
 
 def _secret_digest(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else None
-
-
-def make_error(account_id: str, code: str, message: str) -> ErrorOccurred:
-    return ErrorOccurred(
-        event_id=uuid.uuid4().hex,
-        account_id=account_id,
-        code=code,
-        message=message,
-    )
