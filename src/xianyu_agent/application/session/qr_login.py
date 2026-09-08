@@ -175,21 +175,9 @@ class QrLoginApplication:
             on_status=on_status,
         )
         session = challenge._session
-
-        if final == "verification_required":
-            verification_url = getattr(session, "verification_url", None)
-            return self._result(
-                challenge,
-                QrLoginResultState.VERIFICATION_REQUIRED,
-                final,
-                verification_url=(
-                    verification_url if isinstance(verification_url, str) else None
-                ),
-            )
-        if final == "expired":
-            return self._result(challenge, QrLoginResultState.EXPIRED, final)
-        if final != "success":
-            return self._result(challenge, QrLoginResultState.CANCELLED, final)
+        terminal = self._platform_terminal_result(challenge, final, session)
+        if terminal is not None:
+            return terminal
 
         unb = getattr(session, "unb", None)
         cookie_string = getattr(session, "cookie_string", None)
@@ -220,34 +208,59 @@ class QrLoginApplication:
             challenge.account_id,
             validation_recovery=True,
         )
-        if credential.state is CredentialResultState.SUCCESS:
-            return self._result(
-                challenge,
-                QrLoginResultState.SUCCESS,
-                final,
-                cookie_saved=True,
-                credential_expires_at=credential.health.expires_at,
-            )
-        if credential.state is CredentialResultState.NEEDS_VALIDATION:
-            return self._result(
-                challenge,
-                QrLoginResultState.NEEDS_VALIDATION,
-                final,
-                cookie_saved=True,
-                credential_code=credential.code,
-                validation_cooling=credential.health.validation_cooling,
-                message=credential.message,
-            )
-        if credential.state is CredentialResultState.RETRYABLE_FAILURE:
-            result_state = QrLoginResultState.CREDENTIAL_RETRYABLE_FAILURE
-        else:
-            result_state = QrLoginResultState.CREDENTIAL_TERMINAL_FAILURE
+        return self._credential_result(challenge, final, credential)
+
+    def _platform_terminal_result(
+        self,
+        challenge: QrLoginChallenge,
+        final: str,
+        session: Any,
+    ) -> QrLoginResult | None:
+        state: QrLoginResultState | None = None
+        verification_url: str | None = None
+        if final == "verification_required":
+            state = QrLoginResultState.VERIFICATION_REQUIRED
+            raw_url = getattr(session, "verification_url", None)
+            verification_url = raw_url if isinstance(raw_url, str) else None
+        elif final == "expired":
+            state = QrLoginResultState.EXPIRED
+        elif final != "success":
+            state = QrLoginResultState.CANCELLED
+        if state is None:
+            return None
         return self._result(
             challenge,
-            result_state,
+            state,
+            final,
+            verification_url=verification_url,
+        )
+
+    def _credential_result(
+        self,
+        challenge: QrLoginChallenge,
+        final: str,
+        credential: CredentialResult[Any],
+    ) -> QrLoginResult:
+        expires_at: datetime | None = None
+        validation_cooling = False
+        if credential.state is CredentialResultState.SUCCESS:
+            state = QrLoginResultState.SUCCESS
+            expires_at = credential.health.expires_at
+        elif credential.state is CredentialResultState.NEEDS_VALIDATION:
+            state = QrLoginResultState.NEEDS_VALIDATION
+            validation_cooling = credential.health.validation_cooling
+        elif credential.state is CredentialResultState.RETRYABLE_FAILURE:
+            state = QrLoginResultState.CREDENTIAL_RETRYABLE_FAILURE
+        else:
+            state = QrLoginResultState.CREDENTIAL_TERMINAL_FAILURE
+        return self._result(
+            challenge,
+            state,
             final,
             cookie_saved=True,
             credential_code=credential.code,
+            credential_expires_at=expires_at,
+            validation_cooling=validation_cooling,
             message=credential.message,
         )
 
