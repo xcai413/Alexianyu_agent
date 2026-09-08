@@ -359,7 +359,7 @@ class WsClient:
             try:
                 decoded = await router.wait(
                     pending,
-                    timeout=self.config.registration_timeout_s,
+                    timeout_s=self.config.registration_timeout_s,
                 )
             except TimeoutError:
                 msg = "IM registration response timeout"
