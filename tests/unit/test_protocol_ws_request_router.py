@@ -14,10 +14,10 @@ from xianyu_agent.protocol.ws import request_router
 
 class _NoopLock:
     def acquire(self, *, owner_id: str) -> None:
-        return None
+        pass
 
     def release(self) -> None:
-        return None
+        pass
 
 
 class _RegistrationSocket:
@@ -45,8 +45,9 @@ class _BlockingSocket:
         self.sent.append(payload)
 
     async def recv(self) -> str:
+        event = asyncio.Event()
         try:
-            await asyncio.Event().wait()
+            await event.wait()
         except asyncio.CancelledError:
             self.recv_cancelled = True
             raise
@@ -124,7 +125,20 @@ async def test_waiter_cancellation_cleans_pending_state() -> None:
     assert pending.future.cancelled()
 
 
-def test_unknown_missing_and_late_responses_are_safe() -> None:
+@pytest.mark.asyncio
+async def test_failed_request_propagates_error_and_cleans_pending_state() -> None:
+    router = request_router.RequestRouter()
+    pending = router.register("m-error")
+
+    assert router.fail("m-error", RuntimeError("recv failed")) is True
+    with pytest.raises(RuntimeError, match="recv failed"):
+        await router.wait(pending, timeout=0.1)
+
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_missing_and_late_responses_are_safe() -> None:
     router = request_router.RequestRouter()
     pending = router.register("m-known")
 
@@ -136,15 +150,18 @@ def test_unknown_missing_and_late_responses_are_safe() -> None:
     assert router.pending_count == 0
 
 
-def test_duplicate_registration_is_rejected() -> None:
+@pytest.mark.asyncio
+async def test_duplicate_registration_is_rejected() -> None:
     router = request_router.RequestRouter()
     router.register("m-duplicate")
 
     with pytest.raises(ValueError, match="already pending"):
         router.register("m-duplicate")
+    router.close()
 
 
-def test_close_cancels_all_pending_and_prevents_new_registration() -> None:
+@pytest.mark.asyncio
+async def test_close_cancels_all_pending_and_prevents_new_registration() -> None:
     router = request_router.RequestRouter()
     first = router.register("m-1")
     second = router.register("m-2")
