@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, get_async_session
-from xianyu_agent.domain import orders as domain_orders
+from xianyu_agent.domain.order import orders as domain_orders
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import ConnectionState
 from xianyu_agent.protocol.orders_client import OrderSyncError, XianyuOrdersClient
