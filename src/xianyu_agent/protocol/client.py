@@ -43,6 +43,7 @@ from xianyu_agent.protocol.events import (
 )
 from xianyu_agent.protocol.parser import build_ack_frame, parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws import decoder as ws_decoder
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
     WsTokenProvider,
@@ -372,13 +373,11 @@ class WsClient:
                 msg = "IM registration response timeout"
                 raise TimeoutError(msg)
             raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="replace")
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
+            decoded = ws_decoder.decode_frame(raw)
+            if decoded is None:
                 continue
-            frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
+            data = decoded.payload
+            frame = decoded.frame
             headers = frame.headers if isinstance(frame.headers, dict) else {}
             if str(headers.get("mid") or "") == reg_mid:
                 ack = build_ack_frame(frame)
@@ -403,8 +402,6 @@ class WsClient:
         inject_task = asyncio.create_task(self._pump_injected(), name="ws-inject")
         try:
             async for raw in ws:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")  # noqa: PLW2901
                 await self._handle_raw(raw)
         finally:
             heartbeat_task.cancel()
@@ -458,14 +455,13 @@ class WsClient:
             except Exception as exc:
                 logger.warning("inject handler failed: %s", exc)
 
-    async def _handle_raw(self, raw: str) -> None:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.debug("non-JSON frame skipped: length=%d", len(raw))
+    async def _handle_raw(self, raw: str | bytes) -> None:
+        decoded = ws_decoder.decode_frame(raw)
+        if decoded is None:
+            raw_text = ws_decoder.normalize_frame_text(raw)
+            logger.debug("non-JSON frame skipped: length=%d", len(raw_text))
             return
-        frame = WsFrame.model_validate(data) if isinstance(data, dict) else WsFrame(body=raw)
-        await self._ack_and_handle(self._socket, frame)
+        await self._ack_and_handle(self._socket, decoded.frame)
 
     async def _ack_and_handle(self, ws: Any | None, frame: WsFrame) -> None:
         ack = build_ack_frame(frame)
