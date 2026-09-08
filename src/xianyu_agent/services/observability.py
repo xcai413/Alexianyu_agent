@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from xianyu_agent.application.health.runtime_health import DaemonHealth, observe_daemon
 from xianyu_agent.db import DaemonInstance
 from xianyu_agent.domain import accounts as domain_accounts, daemon as daemon_domain
-from xianyu_agent.services.daemon_health import DaemonHealth, observe_daemon
 from xianyu_agent.utils.time_utils import format_duration
 
 WORKER_STALE_AFTER_S = 90.0
