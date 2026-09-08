@@ -43,7 +43,7 @@ from xianyu_agent.protocol.events import (
 )
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
-from xianyu_agent.protocol.ws import ack as ws_ack, decoder as ws_decoder
+from xianyu_agent.protocol.ws import ack as ws_ack, decoder as ws_decoder, sender as ws_sender
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
     WsTokenProvider,
@@ -261,12 +261,7 @@ class WsClient:
 
     async def send_text(self, text: str) -> bool:
         """Send an outbound text frame. Returns False if not connected."""
-        if self._socket is None:
-            return False
-        with suppress(Exception):
-            await self._socket.send(text)
-            return True
-        return False
+        return await ws_sender.send_text(self._socket, text)
 
     async def _run_forever(self) -> None:
         """Main loop: connect -> heartbeat+recv -> on disconnect, backoff + retry."""
