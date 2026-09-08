@@ -45,6 +45,7 @@ from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws import (
     ack as ws_ack,
+    connector as ws_connector,
     decoder as ws_decoder,
     heartbeat as ws_heartbeat,
     sender as ws_sender,
@@ -329,23 +330,12 @@ class WsClient:
     async def _connect_and_serve(self) -> None:
         """Open one connection, serve until it drops."""
         await self._emit_state(ConnectionState.CONNECTING)
-        try:
-            import websockets  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover
-            msg = "websockets package is required for live connections"
-            raise RuntimeError(msg) from exc
         credentials = await self.token_provider.get_credentials(self.account_id)
         cookie_value = await self.signer.load_cookie_value(self.account_id)
         if not cookie_value:
             msg = f"no cookie for account={self.account_id}"
             raise RuntimeError(msg)
-        additional_headers = [("Cookie", cookie_value)]
-        async with websockets.connect(
-            self.config.ws_url,
-            additional_headers=additional_headers,
-            ping_interval=None,
-            ping_timeout=None,
-        ) as ws:
+        async with ws_connector.open_connection(self.config.ws_url, cookie_value) as ws:
             await self._register_and_sync(ws, credentials)
             self._socket = ws
             self._account_user_id = credentials.user_id
