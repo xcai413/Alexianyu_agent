@@ -23,7 +23,7 @@ from xianyu_agent.protocol.signer import (
     extract_cookie_field,
     extract_mtop_token,
 )
-from xianyu_agent.protocol.ws import sync as ws_sync
+from xianyu_agent.protocol.ws import register as ws_register, sync as ws_sync
 
 IM_APP_KEY = "444e9908a51d1cb236a27862abc769c9"
 TOKEN_API = "mtop.taobao.idlemessage.pc.login.token"
@@ -75,23 +75,16 @@ def generate_device_id(user_id: str) -> str:
 
 def build_registration_frame(credentials: WsCredentials) -> dict:
     """构造 WS `/reg` 注册帧。"""
-    return {
-        "lwp": "/reg",
-        "headers": {
-            "cache-header": "app-key token ua wv",
-            "app-key": IM_APP_KEY,
-            "token": credentials.access_token,
-            "ua": _BROWSER_HEADERS["User-Agent"],
-            "dt": "j",
-            "wv": "im:3,au:3,sy:6",
-            "sync": "0,0;0;0;",
-            "did": credentials.device_id,
-            "mid": _generate_mid(),
-        },
-    }
+    return ws_register.build_registration_frame(
+        credentials,
+        app_key=IM_APP_KEY,
+        user_agent=_BROWSER_HEADERS["User-Agent"],
+        mid_factory=_generate_mid,
+    )
 
 
-# Compatibility alias while initial sync frame construction moves under protocol/ws.
+# Compatibility aliases while frame construction moves under protocol/ws.
+_generate_mid = ws_register.generate_mid
 build_sync_frame = ws_sync.build_sync_frame
 
 
@@ -354,10 +347,6 @@ def _merge_set_cookies(existing_cookie: str, response: httpx.Response) -> str:
         if separator and cookie_name.strip():
             values[cookie_name.strip()] = cookie_value.strip()
     return "; ".join(f"{name}={value}" for name, value in values.items())
-
-
-def _generate_mid() -> str:
-    return f"{uuid.uuid4().int % 1000}{int(time.time() * 1000)} 0"
 
 
 def _as_utc(value: datetime) -> datetime:
