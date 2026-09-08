@@ -34,7 +34,7 @@ async def signer_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reset_settings_cache()
 
 
-def test_legacy_signer_reexports_canonical_contract() -> None:
+def test_legacy_signer_reexports_canonical_signer_contract() -> None:
     names = (
         "APP_KEY",
         "SIGN_VERSION",
@@ -44,11 +44,20 @@ def test_legacy_signer_reexports_canonical_contract() -> None:
         "derive_token_seed",
         "extract_cookie_field",
         "extract_mtop_token",
-        "make_error",
         "make_headers",
     )
     for name in names:
         assert getattr(legacy_signer, name) is getattr(canonical_signer, name)
+
+
+def test_legacy_generic_error_helper_remains_compatible() -> None:
+    error = legacy_signer.make_error("acc-mtop", "AUTH", "safe message")
+
+    assert error.account_id == "acc-mtop"
+    assert error.code == "AUTH"
+    assert error.message == "safe message"
+    assert error.event_id
+    assert not hasattr(canonical_signer, "make_error")
 
 
 def test_compute_sign_preserves_known_wire_vector() -> None:
