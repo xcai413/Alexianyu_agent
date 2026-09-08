@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.domain import cards as domain_cards
+from xianyu_agent.domain.inventory import cards as domain_cards
 
 app = typer.Typer(help="卡密库存(文本/数据/图片/API)。")
 console = Console()
