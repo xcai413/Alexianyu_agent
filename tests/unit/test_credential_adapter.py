@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 
-from xianyu_agent.application.session import CredentialBackendError, CredentialFailureCode
+from xianyu_agent.application.session import (
+    CredentialBackendError,
+    CredentialFailureCode,
+    CredentialPolicy,
+    CredentialResultState,
+)
 from xianyu_agent.domain.account.risk import WorkerRiskCircuit
 from xianyu_agent.infrastructure.session.ws_credentials import (
     LegacyValidationGate,
@@ -14,6 +20,7 @@ from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
     WsCredentials,
     WsCredentialStatus,
+    _safe_token_error,
 )
 
 ACCOUNT_ID = "account-1"
@@ -131,6 +138,60 @@ async def test_legacy_backend_normalizes_auth_failures(
     assert caught.value.code is expected_code
     assert caught.value.retryable_hint is retryable
     assert str(caught.value) == expected_code.value
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503])
+async def test_legacy_backend_classifies_transient_http_failures_as_retryable(
+    status_code: int,
+) -> None:
+    provider = FakeProvider()
+    provider.error = WsAuthError(
+        f"账号 {ACCOUNT_ID} WS Token 请求失败(HTTP {status_code})"
+    )
+    backend = LegacyWsCredentialBackend(
+        signer=FakeSigner({"has_unb": True}),
+        provider=provider,
+    )
+
+    with pytest.raises(CredentialBackendError) as caught:
+        await backend.acquire(ACCOUNT_ID, force_refresh=True)
+
+    assert caught.value.code is CredentialFailureCode.NETWORK_ERROR
+    assert caught.value.retryable_hint is True
+    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+
+
+async def test_non_json_transient_http_failure_remains_retryable() -> None:
+    response = httpx.Response(503, text="<html>temporary upstream failure</html>")
+    provider = FakeProvider()
+    provider.error = WsAuthError(_safe_token_error(ACCOUNT_ID, response))
+    backend = LegacyWsCredentialBackend(
+        signer=FakeSigner({"has_unb": True}),
+        provider=provider,
+    )
+
+    with pytest.raises(CredentialBackendError) as caught:
+        await backend.acquire(ACCOUNT_ID, force_refresh=True)
+
+    assert caught.value.code is CredentialFailureCode.NETWORK_ERROR
+    assert caught.value.retryable_hint is True
+    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+
+
+async def test_non_transient_http_auth_failure_stays_terminal() -> None:
+    provider = FakeProvider()
+    provider.error = WsAuthError(f"账号 {ACCOUNT_ID} WS Token 请求失败(HTTP 401)")
+    backend = LegacyWsCredentialBackend(
+        signer=FakeSigner({"has_unb": True}),
+        provider=provider,
+    )
+
+    with pytest.raises(CredentialBackendError) as caught:
+        await backend.acquire(ACCOUNT_ID, force_refresh=True)
+
+    assert caught.value.code is CredentialFailureCode.AUTH_FAILED
+    assert caught.value.retryable_hint is False
+    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.TERMINAL_FAILURE
 
 
 async def test_legacy_backend_does_not_propagate_raw_secret_error_text() -> None:
