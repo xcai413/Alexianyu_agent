@@ -62,6 +62,7 @@ jobs:
           src/xianyu_agent/runtime/daemon.py
           src/xianyu_agent/runtime/daemon_lock.py
           src/xianyu_agent/runtime/heartbeat.py
+          src/xianyu_agent/runtime/platform
           src/xianyu_agent/runtime/scheduler
           src/xianyu_agent/runtime/service_runner.py
           src/xianyu_agent/runtime/watchdog.py
