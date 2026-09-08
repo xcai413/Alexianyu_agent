@@ -59,6 +59,7 @@ jobs:
           src/xianyu_agent/domain/account
           src/xianyu_agent/domain/inventory
           src/xianyu_agent/domain/item
+          src/xianyu_agent/domain/message
           src/xianyu_agent/domain/runtime
           src/xianyu_agent/foundation
           src/xianyu_agent/runtime/account_lock.py
