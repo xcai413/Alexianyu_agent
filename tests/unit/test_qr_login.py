@@ -6,15 +6,17 @@ import httpx
 import pytest
 import respx
 
-import xianyu_agent.protocol.qr_login as qr_mod
+import xianyu_agent.protocol.auth.qr as qr_mod
+import xianyu_agent.protocol.qr_login as legacy_qr
 from xianyu_agent.cli.commands.auth import _print_qr_ascii
-from xianyu_agent.protocol.qr_login import (
+from xianyu_agent.protocol.auth.qr import (
     API_GENERATE_QR,
     API_MINI_LOGIN,
     API_SCAN_STATUS,
     H5API_INDEX,
     QRLoginClient,
     QrLoginError,
+    QRLoginSession,
     QrStatus,
 )
 
@@ -23,6 +25,17 @@ MINI_LOGIN_HTML = (
     '{"loginFormData": {"key1": "v1", "key2": "v2"}};'
     "</script></html>"
 )
+
+
+def test_legacy_qr_module_reexports_canonical_contract() -> None:
+    assert legacy_qr.QRLoginClient is QRLoginClient
+    assert legacy_qr.QRLoginSession is QRLoginSession
+    assert legacy_qr.QrLoginError is QrLoginError
+    assert legacy_qr.QrStatus is QrStatus
+    assert legacy_qr.API_GENERATE_QR == API_GENERATE_QR
+    assert legacy_qr.API_MINI_LOGIN == API_MINI_LOGIN
+    assert legacy_qr.API_SCAN_STATUS == API_SCAN_STATUS
+    assert legacy_qr.H5API_INDEX == H5API_INDEX
 
 
 def test_terminal_qr_preview_is_ascii_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,7 +246,6 @@ async def test_wait_for_login_timeout_expires(mock_passport) -> None:
     )
     client = QRLoginClient()
     session = await client.generate()
-    # 调小轮询间隔成本:直接测超时路径(轮询间隔 0.8s,1.5s 超时 -> 2 次轮询后过期)
     orig = qr_mod.POLL_INTERVAL_S
     qr_mod.POLL_INTERVAL_S = 0.05
     try:
