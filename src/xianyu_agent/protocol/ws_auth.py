@@ -79,6 +79,7 @@ def build_registration_frame(credentials: WsCredentials) -> dict:
         credentials,
         app_key=IM_APP_KEY,
         user_agent=_BROWSER_HEADERS["User-Agent"],
+        mid_factory=_generate_mid,
     )
 
 
