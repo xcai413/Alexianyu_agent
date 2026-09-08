@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -111,7 +112,10 @@ async def _request_response(
     pending = router.register(request_id)
     try:
         sent = await send_request(frame)
-    except BaseException:
+    except asyncio.CancelledError:
+        router.cancel(request_id)
+        raise
+    except Exception:
         router.cancel(request_id)
         raise
     if sent is False:
