@@ -115,9 +115,13 @@ async def test_cookie_save_is_encrypted_and_invalidates_token_without_rotating_d
         credential = (await session.execute(select(WsCredential))).scalar_one()
         cookie_rows = (await session.execute(select(Cookie))).scalars().all()
 
+    expires_at = credential.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+
     assert credential.device_id == "stable-device-id"
     assert signer.fernet.decrypt(credential.encrypted_token.encode("utf-8")) == b""
-    assert credential.expires_at <= datetime.now(UTC)
+    assert expires_at <= datetime.now(UTC)
     assert len(cookie_rows) == 2
     for row in cookie_rows:
         assert "user-secret" not in row.encrypted_value
