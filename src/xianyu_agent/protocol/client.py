@@ -43,7 +43,12 @@ from xianyu_agent.protocol.events import (
 )
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
-from xianyu_agent.protocol.ws import ack as ws_ack, decoder as ws_decoder, sender as ws_sender
+from xianyu_agent.protocol.ws import (
+    ack as ws_ack,
+    decoder as ws_decoder,
+    heartbeat as ws_heartbeat,
+    sender as ws_sender,
+)
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
     WsTokenProvider,
@@ -62,17 +67,9 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 MIN_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
 
-
-def _generate_mid() -> str:
-    """闲鱼消息 ID 格式:<随机3位><毫秒时间戳> 0"""
-    random_part = int(1000 * random.random())
-    timestamp = int(time.time() * 1000)
-    return f"{random_part}{timestamp} 0"
-
-
-def _default_heartbeat() -> str:
-    """闲鱼 WS 心跳帧:lwp/! + mid(与真实服务对齐)。"""
-    return json.dumps({"lwp": "/!", "headers": {"mid": _generate_mid()}})
+# Compatibility aliases while heartbeat frame construction moves under protocol/ws.
+_generate_mid = ws_heartbeat.generate_mid
+_default_heartbeat = ws_heartbeat.default_heartbeat
 
 
 @dataclass
