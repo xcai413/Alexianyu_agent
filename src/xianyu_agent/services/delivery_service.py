@@ -10,8 +10,8 @@ from sqlalchemy import select, update
 
 from xianyu_agent.db import Account, Card, CardConsumption, Order, get_async_session
 from xianyu_agent.db.models import OrderStatus
-from xianyu_agent.domain import orders as domain_orders
 from xianyu_agent.domain.inventory import cards as domain_cards
+from xianyu_agent.domain.order import orders as domain_orders
 from xianyu_agent.protocol.events import OrderPaid
 from xianyu_agent.services.guardrails import Guardrails, write_guardrail_event
 
