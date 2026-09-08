@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from xianyu_agent.protocol import client
+from xianyu_agent.protocol import client, parser
 from xianyu_agent.protocol.events import WsFrame
 from xianyu_agent.protocol.ws import ack
 
@@ -42,6 +42,20 @@ def test_build_ack_frame_preserves_fallback_mid_hook() -> None:
         "code": 200,
         "headers": {"mid": "fallback-mid", "sid": "s-2"},
     }
+
+
+def test_parser_ack_builder_delegates_and_preserves_legacy_mid_hook(monkeypatch) -> None:
+    monkeypatch.setattr(parser, "_fallback_mid", lambda: "legacy-mid")
+
+    assert parser.build_ack_frame(WsFrame(headers={"sid": "legacy-sid"})) == {
+        "code": 200,
+        "headers": {"mid": "legacy-mid", "sid": "legacy-sid"},
+    }
+    assert parser.ws_ack is ack
+
+
+def test_parser_fallback_mid_alias_starts_canonical() -> None:
+    assert parser._fallback_mid is ack.fallback_mid
 
 
 @pytest.mark.asyncio
