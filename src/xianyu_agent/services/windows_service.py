@@ -1,51 +1,7 @@
-"""Compatibility imports for canonical Windows runtime platform service."""
+"""Compatibility alias for the canonical Windows runtime platform module."""
 
-from xianyu_agent.runtime.platform.windows_service import (
-    SYSTEM_SID,
-    TASK_NAME,
-    TASK_NAMESPACE,
-    TASK_RESULT_LABELS,
-    WATCHDOG_TASK_NAME,
-    ScheduledTaskStatus,
-    TaskPaths,
-    WindowsServiceError,
-    build_task_xml,
-    build_watchdog_task_xml,
-    current_user_sid,
-    end_task,
-    end_watchdog_task,
-    format_task_result,
-    install_task,
-    is_service_paused,
-    query_task_status,
-    resolve_task_paths,
-    set_service_paused,
-    start_task,
-    start_watchdog_task,
-    uninstall_task,
-)
+import sys
 
-__all__ = [
-    "SYSTEM_SID",
-    "TASK_NAME",
-    "TASK_NAMESPACE",
-    "TASK_RESULT_LABELS",
-    "WATCHDOG_TASK_NAME",
-    "ScheduledTaskStatus",
-    "TaskPaths",
-    "WindowsServiceError",
-    "build_task_xml",
-    "build_watchdog_task_xml",
-    "current_user_sid",
-    "end_task",
-    "end_watchdog_task",
-    "format_task_result",
-    "install_task",
-    "is_service_paused",
-    "query_task_status",
-    "resolve_task_paths",
-    "set_service_paused",
-    "start_task",
-    "start_watchdog_task",
-    "uninstall_task",
-]
+from xianyu_agent.runtime.platform import windows_service as _canonical
+
+sys.modules[__name__] = _canonical
