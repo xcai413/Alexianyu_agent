@@ -56,8 +56,14 @@ class FakeBackend:
 
 
 class FakeValidationGate:
-    def __init__(self, status: ValidationStatus | None = None) -> None:
+    def __init__(
+        self,
+        status: ValidationStatus | None = None,
+        *,
+        clear_succeeds: bool = True,
+    ) -> None:
         self.status = status or ValidationStatus(account_id=ACCOUNT_ID, required=False)
+        self.clear_succeeds = clear_succeeds
         self.mark_calls = 0
         self.clear_calls = 0
 
@@ -78,6 +84,8 @@ class FakeValidationGate:
     async def clear_after_refresh(self, account_id: str) -> bool:
         assert account_id == ACCOUNT_ID
         self.clear_calls += 1
+        if not self.clear_succeeds:
+            return False
         was_required = self.status.required
         self.status = ValidationStatus(account_id=ACCOUNT_ID, required=False)
         return was_required
@@ -261,6 +269,27 @@ async def test_validation_recovery_requires_cooldown_to_finish_and_clears_gate()
 
     assert recovered.state is CredentialResultState.SUCCESS
     assert recovered.health.state is CredentialHealthState.HEALTHY
+    assert validation.clear_calls == 1
+    assert backend.acquire_calls == [True]
+
+
+async def test_validation_recovery_stays_blocked_when_gate_does_not_clear() -> None:
+    backend = FakeBackend(_status(token_cached=False))
+    validation = FakeValidationGate(
+        ValidationStatus(
+            account_id=ACCOUNT_ID,
+            required=True,
+            cooling=False,
+            code=CredentialFailureCode.NEEDS_VALIDATION.value,
+        ),
+        clear_succeeds=False,
+    )
+    supervisor = _supervisor(backend, validation)
+
+    result = await supervisor.refresh(ACCOUNT_ID, validation_recovery=True)
+
+    assert result.state is CredentialResultState.NEEDS_VALIDATION
+    assert result.health.state is CredentialHealthState.NEEDS_VALIDATION
     assert validation.clear_calls == 1
     assert backend.acquire_calls == [True]
 
