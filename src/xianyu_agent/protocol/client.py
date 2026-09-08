@@ -41,8 +41,9 @@ from xianyu_agent.protocol.events import (
     EventEnvelope,
     WsFrame,
 )
-from xianyu_agent.protocol.parser import build_ack_frame, parse_frame
+from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws import ack as ws_ack
 from xianyu_agent.protocol.ws import decoder as ws_decoder
 from xianyu_agent.protocol.ws_auth import (
     WsAuthError,
@@ -380,9 +381,7 @@ class WsClient:
             frame = decoded.frame
             headers = frame.headers if isinstance(frame.headers, dict) else {}
             if str(headers.get("mid") or "") == reg_mid:
-                ack = build_ack_frame(frame)
-                if ack is not None:
-                    await ws.send(json.dumps(ack))
+                await ws_ack.send_ack(ws, frame)
                 await self._handle_frame(frame)
                 code = int(data.get("code", 200)) if isinstance(data, dict) else 200
                 if code != 200:
@@ -464,9 +463,7 @@ class WsClient:
         await self._ack_and_handle(self._socket, decoded.frame)
 
     async def _ack_and_handle(self, ws: Any | None, frame: WsFrame) -> None:
-        ack = build_ack_frame(frame)
-        if ack is not None and ws is not None:
-            await ws.send(json.dumps(ack))
+        await ws_ack.send_ack(ws, frame)
         await self._handle_frame(frame)
 
     async def _handle_frame(self, frame: WsFrame) -> None:
