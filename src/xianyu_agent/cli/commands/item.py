@@ -8,7 +8,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.domain import items as domain_items, orders as domain_orders
+from xianyu_agent.domain import orders as domain_orders
+from xianyu_agent.domain.item import items as domain_items
 from xianyu_agent.protocol.items_client import ItemSyncError, XianyuItemsClient
 from xianyu_agent.utils.time_utils import format_local
 
