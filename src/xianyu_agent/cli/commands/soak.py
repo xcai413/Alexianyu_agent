@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.services.soak_monitor import (
+from xianyu_agent.application.health.soak import (
     SoakRun,
     evidence_path,
     latest_soak,
