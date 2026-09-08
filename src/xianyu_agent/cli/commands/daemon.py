@@ -8,11 +8,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from xianyu_agent.application.health.observability import build_runtime_snapshot
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import daemon as daemon_domain
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError
 from xianyu_agent.services.logging_setup import redact_text
-from xianyu_agent.services.observability import build_runtime_snapshot
 from xianyu_agent.services.runtime_daemon import run_runtime_daemon
 from xianyu_agent.utils.time_utils import format_duration, format_local
 
