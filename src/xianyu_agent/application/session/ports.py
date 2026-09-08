@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol, TypeVar
 
-CredentialT = TypeVar("CredentialT", covariant=True)
+CredentialT_co = TypeVar("CredentialT_co", covariant=True)
 
 
 class CredentialFailureCode(StrEnum):
@@ -58,7 +58,7 @@ class ValidationStatus:
     code: str | None = None
 
 
-class CredentialBackend(Protocol[CredentialT]):
+class CredentialBackend(Protocol[CredentialT_co]):
     """Credential implementation port.
 
     ``acquire`` may return secret-bearing material. Callers must keep that value inside
@@ -72,7 +72,7 @@ class CredentialBackend(Protocol[CredentialT]):
         account_id: str,
         *,
         force_refresh: bool = False,
-    ) -> CredentialT: ...
+    ) -> CredentialT_co: ...
 
 
 class ValidationGate(Protocol):
