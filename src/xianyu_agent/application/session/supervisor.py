@@ -93,7 +93,10 @@ class CredentialSupervisor(Generic[CredentialT]):
                 CredentialHealthState.MISSING,
                 CredentialHealthState.UNUSABLE,
             }:
-                return self._blocked_result(health) or self._terminal_internal(health)
+                blocked = self._blocked_result(health)
+                if blocked is not None:
+                    return blocked
+                return self._terminal_internal(health)
             return await self._acquire(
                 account_id,
                 health,
@@ -140,6 +143,8 @@ class CredentialSupervisor(Generic[CredentialT]):
         health = await self._safe_inspect(account_id)
         if health.state is CredentialHealthState.ERROR:
             return self._terminal_internal(health)
+        if health.state is CredentialHealthState.NEEDS_VALIDATION:
+            return self._needs_validation(health)
         return CredentialResult(
             state=CredentialResultState.SUCCESS,
             health=health,
