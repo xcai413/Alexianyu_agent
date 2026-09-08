@@ -23,6 +23,7 @@ from xianyu_agent.protocol.signer import (
     extract_cookie_field,
     extract_mtop_token,
 )
+from xianyu_agent.protocol.ws import sync as ws_sync
 
 IM_APP_KEY = "444e9908a51d1cb236a27862abc769c9"
 TOKEN_API = "mtop.taobao.idlemessage.pc.login.token"
@@ -90,25 +91,8 @@ def build_registration_frame(credentials: WsCredentials) -> dict:
     }
 
 
-def build_sync_frame(*, now_ms: int | None = None) -> dict:
-    """构造 `/r/SyncStatus/ackDiff` 初始同步帧。"""
-    timestamp_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    return {
-        "lwp": "/r/SyncStatus/ackDiff",
-        "headers": {"mid": _generate_mid()},
-        "body": [
-            {
-                "pipeline": "sync",
-                "tooLong2Tag": "PNM,1",
-                "channel": "sync",
-                "topic": "sync",
-                "highPts": 0,
-                "pts": timestamp_ms * 1000,
-                "seq": 0,
-                "timestamp": timestamp_ms,
-            }
-        ],
-    }
+# Compatibility alias while initial sync frame construction moves under protocol/ws.
+build_sync_frame = ws_sync.build_sync_frame
 
 
 class WsTokenProvider:
