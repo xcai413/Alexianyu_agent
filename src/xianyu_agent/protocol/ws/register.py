@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable
 from typing import Protocol
 
 
@@ -19,6 +20,7 @@ def build_registration_frame(
     *,
     app_key: str,
     user_agent: str,
+    mid_factory: Callable[[], str] | None = None,
 ) -> dict:
     """Build the existing WebSocket `/reg` registration frame."""
     return {
@@ -32,7 +34,7 @@ def build_registration_frame(
             "wv": "im:3,au:3,sy:6",
             "sync": "0,0;0;0;",
             "did": credentials.device_id,
-            "mid": generate_mid(),
+            "mid": (mid_factory or generate_mid)(),
         },
     }
 
