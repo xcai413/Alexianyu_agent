@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 
 from xianyu_agent.db import Account, WorkerCommand, WorkerStatus, get_async_session
 from xianyu_agent.db.models import WorkerCommandStatus, WorkerDesiredState
-from xianyu_agent.domain import worker_risk
+from xianyu_agent.domain.account import risk as worker_risk
 
 ACTIONS = {"start", "stop", "restart"}
 TERMINAL_STATUSES = {WorkerCommandStatus.SUCCEEDED, WorkerCommandStatus.FAILED}
@@ -189,6 +189,7 @@ async def fail_stale_running(*, reason: str) -> int:
         )
         await session.commit()
         return int(result.rowcount or 0)
+
 
 async def account_key(command: WorkerCommand) -> str | None:
     async with get_async_session() as session:
