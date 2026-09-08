@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol, cast
 
@@ -20,6 +21,8 @@ from xianyu_agent.protocol.ws_auth import (
     WsCredentialStatus,
     WsTokenProvider,
 )
+
+_TRANSIENT_HTTP_ERROR = re.compile(r"\bHTTP\s+(?:500|502|503)\b")
 
 
 class _SignerLike(Protocol):
@@ -121,7 +124,11 @@ def _translate_auth_error(error: WsAuthError) -> CredentialBackendError:
 
     if worker_risk.is_user_validate_error(error):
         code = CredentialFailureCode.NEEDS_VALIDATION
-    elif "网络请求失败" in text or "NETWORK" in upper:
+    elif (
+        "网络请求失败" in text
+        or "NETWORK" in upper
+        or _TRANSIENT_HTTP_ERROR.search(upper) is not None
+    ):
         code = CredentialFailureCode.NETWORK_ERROR
         retryable = True
     elif "无可用COOKIE" in compact:
