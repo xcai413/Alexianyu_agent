@@ -1,7 +1,6 @@
 """Regression tests for the order domain responsibility migration."""
 
-from xianyu_agent.cli.commands import item as item_cli
-from xianyu_agent.cli.commands import order as order_cli
+from xianyu_agent.cli.commands import item as item_cli, order as order_cli
 from xianyu_agent.domain import orders as legacy_orders
 from xianyu_agent.domain.order import orders
 from xianyu_agent.runtime import account_worker
