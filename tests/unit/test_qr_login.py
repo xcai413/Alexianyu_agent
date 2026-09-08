@@ -15,8 +15,8 @@ from xianyu_agent.protocol.auth.qr import (
     API_SCAN_STATUS,
     H5API_INDEX,
     QRLoginClient,
-    QRLoginSession,
     QrLoginError,
+    QRLoginSession,
     QrStatus,
 )
 
