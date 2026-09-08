@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from xianyu_agent.domain import messages as domain_messages
+from xianyu_agent.domain.message import messages as domain_messages
 from xianyu_agent.protocol.events import MessageContentType, MessageSent
 from xianyu_agent.services.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local, to_local
