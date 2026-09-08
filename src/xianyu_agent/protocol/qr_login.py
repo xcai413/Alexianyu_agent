@@ -14,11 +14,11 @@ from xianyu_agent.protocol.auth.qr import (
     HTTP_RETRY_DELAYS_S,
     PASSPORT_HOST,
     POLL_INTERVAL_S,
-    QRLoginClient,
-    QRLoginSession,
-    QrLoginError,
-    QrStatus,
     SESSION_TTL_S,
+    QRLoginClient,
+    QrLoginError,
+    QRLoginSession,
+    QrStatus,
 )
 
 __all__ = [
@@ -31,9 +31,9 @@ __all__ = [
     "HTTP_RETRY_DELAYS_S",
     "PASSPORT_HOST",
     "POLL_INTERVAL_S",
+    "SESSION_TTL_S",
     "QRLoginClient",
     "QRLoginSession",
     "QrLoginError",
     "QrStatus",
-    "SESSION_TTL_S",
 ]
