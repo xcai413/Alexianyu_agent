@@ -39,52 +39,45 @@ class CredentialPolicy:
         now: datetime | None = None,
     ) -> CredentialHealth:
         current = _as_utc(now or datetime.now(UTC))
-        if validation.required:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.NEEDS_VALIDATION,
-                code=validation.code or CredentialFailureCode.NEEDS_VALIDATION.value,
-                validation_cooling=validation.cooling,
-            )
-        if not status.cookie_available:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.MISSING,
-                code=CredentialFailureCode.CREDENTIAL_MISSING.value,
-            )
-        if not status.identity_available:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.UNUSABLE,
-                code=CredentialFailureCode.IDENTITY_MISSING.value,
-            )
-        if not status.token_cached or status.expires_at is None:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.REFRESH_REQUIRED,
-                expires_at=status.expires_at,
-                refresh_recommended=True,
-            )
+        expires_at = status.expires_at
+        code: str | None = None
+        refresh_recommended = False
+        validation_cooling = False
 
-        expires_at = _as_utc(status.expires_at)
-        if expires_at <= current:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.EXPIRED,
-                expires_at=expires_at,
-                refresh_recommended=True,
-            )
-        if expires_at <= current + self.early_refresh:
-            return CredentialHealth(
-                account_id=status.account_id,
-                state=CredentialHealthState.EXPIRING,
-                expires_at=expires_at,
-                refresh_recommended=True,
-            )
+        if validation.required:
+            state = CredentialHealthState.NEEDS_VALIDATION
+            code = validation.code or CredentialFailureCode.NEEDS_VALIDATION.value
+            expires_at = None
+            validation_cooling = validation.cooling
+        elif not status.cookie_available:
+            state = CredentialHealthState.MISSING
+            code = CredentialFailureCode.CREDENTIAL_MISSING.value
+            expires_at = None
+        elif not status.identity_available:
+            state = CredentialHealthState.UNUSABLE
+            code = CredentialFailureCode.IDENTITY_MISSING.value
+            expires_at = None
+        elif not status.token_cached or expires_at is None:
+            state = CredentialHealthState.REFRESH_REQUIRED
+            refresh_recommended = True
+        else:
+            expires_at = _as_utc(expires_at)
+            if expires_at <= current:
+                state = CredentialHealthState.EXPIRED
+                refresh_recommended = True
+            elif expires_at <= current + self.early_refresh:
+                state = CredentialHealthState.EXPIRING
+                refresh_recommended = True
+            else:
+                state = CredentialHealthState.HEALTHY
+
         return CredentialHealth(
             account_id=status.account_id,
-            state=CredentialHealthState.HEALTHY,
+            state=state,
             expires_at=expires_at,
+            code=code,
+            refresh_recommended=refresh_recommended,
+            validation_cooling=validation_cooling,
         )
 
     def result_state_for(self, error: CredentialBackendError) -> CredentialResultState:
