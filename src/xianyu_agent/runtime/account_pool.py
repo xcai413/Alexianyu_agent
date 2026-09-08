@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
 from xianyu_agent.runtime.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.runtime.account_worker import AccountWorker
