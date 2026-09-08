@@ -1,5 +1,5 @@
 """Authentication protocol adapters."""
 
-from .qr import QRLoginClient, QRLoginSession, QrLoginError, QrStatus
+from .qr import QRLoginClient, QrLoginError, QRLoginSession, QrStatus
 
-__all__ = ["QRLoginClient", "QRLoginSession", "QrLoginError", "QrStatus"]
+__all__ = ["QRLoginClient", "QrLoginError", "QRLoginSession", "QrStatus"]
