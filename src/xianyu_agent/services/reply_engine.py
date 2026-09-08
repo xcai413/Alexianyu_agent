@@ -11,8 +11,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from xianyu_agent.domain.message import messages as domain_messages
-from xianyu_agent.domain.message import rules as domain_rules
+from xianyu_agent.domain.message import messages as domain_messages, rules as domain_rules
 from xianyu_agent.protocol.events import MessageReceived
 from xianyu_agent.services.ai_provider import AIProvider, UnconfiguredError
 
