@@ -9,7 +9,6 @@ from .signer import (
     derive_token_seed,
     extract_cookie_field,
     extract_mtop_token,
-    make_error,
     make_headers,
 )
 
@@ -22,6 +21,5 @@ __all__ = [
     "derive_token_seed",
     "extract_cookie_field",
     "extract_mtop_token",
-    "make_error",
     "make_headers",
 ]
