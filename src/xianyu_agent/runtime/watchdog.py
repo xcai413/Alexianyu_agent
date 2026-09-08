@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from xianyu_agent.application.health.runtime_health import observe_daemon
+from xianyu_agent.application.health.soak import sample_active_soaks
 from xianyu_agent.domain import daemon as daemon_domain
 from xianyu_agent.runtime.platform.windows_service import (
     WindowsServiceError,
@@ -12,7 +13,6 @@ from xianyu_agent.runtime.platform.windows_service import (
     is_service_paused,
     start_task,
 )
-from xianyu_agent.services.soak_monitor import sample_active_soaks
 
 
 async def check_and_recover() -> bool:
