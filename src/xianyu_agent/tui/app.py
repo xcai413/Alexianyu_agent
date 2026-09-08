@@ -16,10 +16,10 @@ from textual.binding import Binding
 from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
+from xianyu_agent.application.health.observability import build_runtime_snapshot
 from xianyu_agent.db import AuditLog, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.services.guardrails import recent_guardrail_events
-from xianyu_agent.services.observability import build_runtime_snapshot
 from xianyu_agent.tui.widgets import (
     AccountsPanel,
     CardsPanel,
