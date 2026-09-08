@@ -12,9 +12,17 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from xianyu_agent.application.session import (
+    CredentialSupervisor,
+    QrLoginAccountBusyError,
+    QrLoginApplication,
+    QrLoginResult,
+    QrLoginResultState,
+)
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import accounts as domain_accounts, worker_risk
-from xianyu_agent.protocol.qr_login import QRLoginClient, QRLoginSession, QrStatus
+from xianyu_agent.infrastructure.session import LegacyValidationGate, LegacyWsCredentialBackend
+from xianyu_agent.protocol.auth.qr import QRLoginClient, QRLoginSession
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws_auth import WsAuthError, WsTokenProvider
 from xianyu_agent.services.account_lock import (
@@ -274,7 +282,7 @@ def delete(
 
 
 @app.command("qr-login")
-def qr_login(  # noqa: PLR0915
+def qr_login(
     account_id: str = typer.Option(..., "--account", "-a", help="登录后保存到的账号标识。"),
     timeout: float = typer.Option(300.0, "--timeout", help="等待扫码总时长(秒)。"),
     qr_out: str = typer.Option(
@@ -285,27 +293,25 @@ def qr_login(  # noqa: PLR0915
     """扫码登录闲鱼账号:生成二维码 -> 手机扫码确认 -> 自动保存 Cookie。"""
 
     async def _run() -> None:
-        existing = await domain_accounts.get_account(account_id)
-        if existing is not None and existing.desired_state == "running":
+        use_case = _build_qr_login_application()
+        console.print("[dim]正在生成二维码...[/dim]")
+        try:
+            challenge = await use_case.start(account_id)
+        except QrLoginAccountBusyError as exc:
             console.print(
                 "[red]账号 Worker 期望状态为 running。[/red] 请先执行 "
                 f"[cyan]pool stop --account {account_id}[/cyan]。"
             )
-            raise typer.Exit(code=2)
-        client = QRLoginClient()
-        console.print("[dim]正在生成二维码...[/dim]")
-        try:
-            session = await client.generate()
+            raise typer.Exit(code=2) from exc
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
             console.print(f"[red]生成二维码失败:{detail}[/red]")
             raise typer.Exit(code=1) from exc
 
-        # 渲染二维码:必须先保存 PNG;终端预览失败不得阻断文件输出。
         out_path = (
             Path(qr_out)
             if qr_out
-            else (get_settings().data_dir / "qr_logins" / f"{session.session_id}.png")
+            else (get_settings().data_dir / "qr_logins" / f"{challenge.session_id}.png")
         )
         try:
             qr = qrcode_lib.QRCode(
@@ -314,7 +320,7 @@ def qr_login(  # noqa: PLR0915
                 box_size=8,
                 border=2,
             )
-            qr.add_data(session.qr_content or "")
+            qr.add_data(challenge.qr_content)
             qr.make()
             out_path.parent.mkdir(parents=True, exist_ok=True)
             qr.make_image().save(out_path)
@@ -330,16 +336,15 @@ def qr_login(  # noqa: PLR0915
             )
 
         console.print(
-            f"请用闲鱼 App 扫码(会话 {session.session_id[:8]}...),等待 {timeout:.0f} 秒..."
+            f"请用闲鱼 App 扫码(会话 {challenge.session_id[:8]}...),等待 {timeout:.0f} 秒..."
         )
-
-        last_status = session.status
+        last_status = "waiting"
         status_map = {
-            QrStatus.SCANNED: "已扫码,请在手机上确认",
-            QrStatus.SUCCESS: "登录成功",
-            QrStatus.EXPIRED: "二维码已过期",
-            QrStatus.CANCELLED: "已取消",
-            QrStatus.VERIFICATION_REQUIRED: "需要手机验证",
+            "scanned": "已扫码,请在手机上确认",
+            "success": "登录成功",
+            "expired": "二维码已过期",
+            "cancelled": "已取消",
+            "verification_required": "需要手机验证",
         }
 
         def on_status(status: str) -> None:
@@ -348,24 +353,37 @@ def qr_login(  # noqa: PLR0915
                 console.print(f"[cyan]{status_map[status]}[/cyan]")
                 last_status = status
 
-        final = await client.wait_for_login(session, timeout_s=timeout, on_status=on_status)
-
-        if final == QrStatus.SUCCESS and session.unb:
-            await _persist_qr_login_session(account_id, remark, session)
-        elif final == QrStatus.VERIFICATION_REQUIRED:
-            console.print(
-                f"[red]账号被风控,需要手机验证:[/red] {session.verification_url or '未知'}"
-            )
-            raise typer.Exit(code=2)
-        else:
-            console.print(f"[red]扫码未完成: {final}[/red]")
-            raise typer.Exit(code=1)
+        result = await use_case.finish(
+            challenge,
+            remark=remark,
+            timeout_s=timeout,
+            on_status=on_status,
+        )
+        _render_qr_login_result(result)
 
     lock = _acquire_auth_lock(account_id, "qr-login")
     try:
         asyncio.run(_run())
     finally:
         lock.release()
+
+
+def _build_qr_login_application(
+    *,
+    token_provider: WsTokenProvider | None = None,
+) -> QrLoginApplication:
+    """Wire the QR use case at the CLI composition boundary."""
+    signer = CookieSigner()
+    credentials = CredentialSupervisor(
+        LegacyWsCredentialBackend(signer=signer, provider=token_provider),
+        LegacyValidationGate(),
+    )
+    return QrLoginApplication(
+        platform=QRLoginClient(),
+        accounts=domain_accounts,
+        cookies=signer,
+        credentials=credentials,
+    )
 
 
 async def _persist_qr_login_session(
@@ -375,41 +393,62 @@ async def _persist_qr_login_session(
     *,
     token_provider: WsTokenProvider | None = None,
 ) -> None:
-    """保存扫码会话并立即校验 Cookie 可换取 IM Token。"""
-    await domain_accounts.create_account(account_id, remark=remark or None)
-    signer = CookieSigner()
-    if not await signer.save_cookie(account_id, session.cookie_string()):
+    """Compatibility adapter for callers with an already-confirmed QR session."""
+    result = await _build_qr_login_application(
+        token_provider=token_provider
+    ).complete_confirmed(
+        account_id,
+        session,
+        remark=remark,
+    )
+    _render_qr_login_result(result)
+
+
+def _render_qr_login_result(result: QrLoginResult) -> None:
+    """Render one secret-free application result and preserve CLI exit semantics."""
+    if result.cookie_saved:
+        console.print(
+            f"[green]OK[/green] 扫码登录成功,账号 [cyan]{result.account_id}[/cyan] "
+            "(闲鱼身份已确认),Cookie 已加密保存。"
+        )
+
+    if result.state is QrLoginResultState.SUCCESS:
+        console.print(
+            "[green]OK[/green] IM Token 已加密缓存,设备 ID 保持不变;"
+            f"有效期至 {format_local(result.credential_expires_at)}。"
+        )
+        return
+    if result.state is QrLoginResultState.VERIFICATION_REQUIRED:
+        console.print(
+            f"[red]账号被风控,需要手机验证:[/red] {result.verification_url or '未知'}"
+        )
+        raise typer.Exit(code=2)
+    if result.state is QrLoginResultState.NEEDS_VALIDATION:
+        if result.validation_cooling:
+            console.print(
+                "[yellow]账号仍处于 FAIL_SYS_USER_VALIDATE 验证冷却,未自动请求 IM Token。[/yellow] "
+                "完成 App 人工验证并等待冷却结束后,再执行一次 auth refresh。"
+            )
+        else:
+            console.print(
+                "[yellow]Cookie 已保存,但账号仍需要 App 人工验证。[/yellow] "
+                "完成验证后再执行一次 auth refresh。"
+            )
+        raise typer.Exit(code=3)
+    if result.state in {
+        QrLoginResultState.CREDENTIAL_RETRYABLE_FAILURE,
+        QrLoginResultState.CREDENTIAL_TERMINAL_FAILURE,
+    }:
+        detail = result.credential_code or result.message or "credential refresh failed"
+        console.print(f"[yellow]Cookie 已保存,但 IM Token 换取失败:{detail}[/yellow]")
+        console.print(f"稍后执行 [cyan]auth refresh --account {result.account_id}[/cyan]。")
+        raise typer.Exit(code=3)
+    if result.state is QrLoginResultState.PERSISTENCE_FAILURE:
         console.print("[red]Cookie 保存失败。[/red]")
         raise typer.Exit(code=1)
-    console.print(
-        f"[green]OK[/green] 扫码登录成功,账号 [cyan]{account_id}[/cyan] "
-        "(闲鱼身份已确认),Cookie 已加密保存。"
-    )
-    risk = await worker_risk.get(account_id)
-    if risk is not None and risk.is_cooling():
-        console.print(
-            "[yellow]账号仍处于 FAIL_SYS_USER_VALIDATE 验证冷却,未自动请求 IM Token。[/yellow] "
-            f"请在 {format_local(risk.cooldown_until)} 后完成 App 人工验证,"
-            "再执行一次 auth refresh。"
-        )
-        raise typer.Exit(code=3)
-    try:
-        credentials = await (token_provider or WsTokenProvider(signer)).get_credentials(
-            account_id, force_refresh=True
-        )
-    except WsAuthError as exc:
-        console.print(f"[yellow]Cookie 已保存,但 IM Token 换取失败:{exc}[/yellow]")
-        opened = await _record_user_validate_circuit(account_id, exc)
-        if not opened:
-            console.print(f"稍后执行 [cyan]auth refresh --account {account_id}[/cyan]。")
-        raise typer.Exit(code=3) from exc
-    cleared = await worker_risk.clear_after_refresh(account_id)
-    if cleared:
-        console.print("[green]验证熔断已解除;可在确认后启动该账号 Worker。[/green]")
-    console.print(
-        "[green]OK[/green] IM Token 已加密缓存,设备 ID 保持不变;"
-        f"有效期至 {format_local(credentials.expires_at)}。"
-    )
+
+    console.print(f"[red]扫码未完成: {result.status}[/red]")
+    raise typer.Exit(code=1)
 
 
 async def _record_user_validate_circuit(account_id: str, exc: WsAuthError) -> bool:
