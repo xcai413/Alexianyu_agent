@@ -63,6 +63,7 @@ jobs:
           src/xianyu_agent/domain/order
           src/xianyu_agent/domain/runtime
           src/xianyu_agent/foundation
+          src/xianyu_agent/protocol/ws
           src/xianyu_agent/runtime/account_lock.py
           src/xianyu_agent/runtime/account_pool.py
           src/xianyu_agent/runtime/account_worker.py
