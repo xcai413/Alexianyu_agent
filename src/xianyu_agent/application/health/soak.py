@@ -12,6 +12,7 @@ from typing import Any
 from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
 
+from xianyu_agent.application.health.observability import RuntimeSnapshot, build_runtime_snapshot
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import (
     Account,
@@ -25,7 +26,6 @@ from xianyu_agent.db import (
 from xianyu_agent.db.models import TaskStatus
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.services.logging_setup import redact_text
-from xianyu_agent.services.observability import RuntimeSnapshot, build_runtime_snapshot
 
 TASK_NAME = "p0-e-soak"
 DEFAULT_INTERVAL_S = 60.0
