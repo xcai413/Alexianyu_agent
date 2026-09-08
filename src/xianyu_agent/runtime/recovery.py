@@ -147,24 +147,24 @@ def recovery_cause_for_credential_code(code: str | CredentialFailureCode | None)
     """Normalize a stable credential failure code into a recovery cause."""
 
     if code is None:
-        return RecoveryCause.INTERNAL_FAILURE
-    raw = code.value if isinstance(code, CredentialFailureCode) else str(code).strip().upper()
-    try:
-        failure = CredentialFailureCode(raw)
-    except ValueError:
-        return RecoveryCause.INTERNAL_FAILURE
+        failure = None
+    else:
+        raw = code.value if isinstance(code, CredentialFailureCode) else str(code).strip().upper()
+        try:
+            failure = CredentialFailureCode(raw)
+        except ValueError:
+            failure = None
 
-    if failure is CredentialFailureCode.SESSION_EXPIRED:
-        return RecoveryCause.SESSION_EXPIRED
-    if failure is CredentialFailureCode.AUTH_FAILED:
-        return RecoveryCause.AUTH_FAILURE
-    if failure is CredentialFailureCode.NETWORK_ERROR:
-        return RecoveryCause.CREDENTIAL_TRANSIENT_FAILURE
-    if failure is CredentialFailureCode.NEEDS_VALIDATION:
-        return RecoveryCause.NEEDS_VALIDATION
-    if failure is CredentialFailureCode.INTERNAL_ERROR:
+    special_causes = {
+        CredentialFailureCode.SESSION_EXPIRED: RecoveryCause.SESSION_EXPIRED,
+        CredentialFailureCode.AUTH_FAILED: RecoveryCause.AUTH_FAILURE,
+        CredentialFailureCode.NETWORK_ERROR: RecoveryCause.CREDENTIAL_TRANSIENT_FAILURE,
+        CredentialFailureCode.NEEDS_VALIDATION: RecoveryCause.NEEDS_VALIDATION,
+        CredentialFailureCode.INTERNAL_ERROR: RecoveryCause.INTERNAL_FAILURE,
+    }
+    if failure is None:
         return RecoveryCause.INTERNAL_FAILURE
-    return RecoveryCause.TERMINAL_FAILURE
+    return special_causes.get(failure, RecoveryCause.TERMINAL_FAILURE)
 
 
 class RecoverySupervisor(Generic[CredentialT]):
