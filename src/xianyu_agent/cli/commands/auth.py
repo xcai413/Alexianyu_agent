@@ -22,7 +22,7 @@ from xianyu_agent.application.session import (
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import accounts as domain_accounts, worker_risk
 from xianyu_agent.infrastructure.session import LegacyValidationGate, LegacyWsCredentialBackend
-from xianyu_agent.protocol.auth.qr import QRLoginClient
+from xianyu_agent.protocol.auth.qr import QRLoginClient, QRLoginSession
 from xianyu_agent.protocol.signer import CookieSigner
 from xianyu_agent.protocol.ws_auth import WsAuthError, WsTokenProvider
 from xianyu_agent.services.account_lock import (
@@ -368,11 +368,14 @@ def qr_login(
         lock.release()
 
 
-def _build_qr_login_application() -> QrLoginApplication:
+def _build_qr_login_application(
+    *,
+    token_provider: WsTokenProvider | None = None,
+) -> QrLoginApplication:
     """Wire the QR use case at the CLI composition boundary."""
     signer = CookieSigner()
     credentials = CredentialSupervisor(
-        LegacyWsCredentialBackend(signer=signer),
+        LegacyWsCredentialBackend(signer=signer, provider=token_provider),
         LegacyValidationGate(),
     )
     return QrLoginApplication(
@@ -381,6 +384,24 @@ def _build_qr_login_application() -> QrLoginApplication:
         cookies=signer,
         credentials=credentials,
     )
+
+
+async def _persist_qr_login_session(
+    account_id: str,
+    remark: str,
+    session: QRLoginSession,
+    *,
+    token_provider: WsTokenProvider | None = None,
+) -> None:
+    """Compatibility adapter for callers with an already-confirmed QR session."""
+    result = await _build_qr_login_application(
+        token_provider=token_provider
+    ).complete_confirmed(
+        account_id,
+        session,
+        remark=remark,
+    )
+    _render_qr_login_result(result)
 
 
 def _render_qr_login_result(result: QrLoginResult) -> None:
