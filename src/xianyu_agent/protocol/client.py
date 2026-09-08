@@ -21,7 +21,6 @@ import contextlib
 import json
 import logging
 import random
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -48,6 +47,7 @@ from xianyu_agent.protocol.ws import (
     connector as ws_connector,
     decoder as ws_decoder,
     heartbeat as ws_heartbeat,
+    request_router as ws_request_router,
     sender as ws_sender,
 )
 from xianyu_agent.protocol.ws_auth import (
@@ -347,33 +347,64 @@ class WsClient:
         """Require the matching `/reg` response before declaring the session connected."""
         registration = build_registration_frame(credentials)
         reg_mid = str(registration["headers"]["mid"])
-        await ws.send(json.dumps(registration))
-        deadline = time.monotonic() + self.config.registration_timeout_s
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+        router = ws_request_router.RequestRouter()
+        pending = router.register(reg_mid)
+        receive_task: asyncio.Task[None] | None = None
+        try:
+            await ws.send(json.dumps(registration))
+            receive_task = asyncio.create_task(
+                self._route_registration_responses(ws, router, reg_mid),
+                name=f"ws-register-router-{self.account_id}",
+            )
+            try:
+                decoded = await router.wait(
+                    pending,
+                    timeout=self.config.registration_timeout_s,
+                )
+            except TimeoutError:
                 msg = "IM registration response timeout"
-                raise TimeoutError(msg)
-            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            decoded = ws_decoder.decode_frame(raw)
-            if decoded is None:
-                continue
-            data = decoded.payload
-            frame = decoded.frame
-            headers = frame.headers if isinstance(frame.headers, dict) else {}
-            if str(headers.get("mid") or "") == reg_mid:
-                await ws_ack.send_ack(ws, frame)
-                await self._handle_frame(frame)
-                code = int(data.get("code", 200)) if isinstance(data, dict) else 200
-                if code != 200:
-                    msg = f"IM registration rejected code={code}"
-                    raise RuntimeError(msg)
-                break
-            await self._ack_and_handle(ws, frame)
+                raise TimeoutError(msg) from None
+        finally:
+            if receive_task is not None:
+                receive_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await receive_task
+            router.close()
+
+        data = decoded.payload
+        frame = decoded.frame
+        await ws_ack.send_ack(ws, frame)
+        await self._handle_frame(frame)
+        code = int(data.get("code", 200)) if isinstance(data, dict) else 200
+        if code != 200:
+            msg = f"IM registration rejected code={code}"
+            raise RuntimeError(msg)
+
         await self._sleep_or_stop(self.config.registration_delay_s)
         if self._stop.is_set():
             return
         await ws.send(json.dumps(build_sync_frame()))
+
+    async def _route_registration_responses(
+        self,
+        ws: Any,
+        router: ws_request_router.RequestRouter,
+        request_id: str,
+    ) -> None:
+        """Feed registration-time frames into the canonical request router."""
+        try:
+            while True:
+                raw = await ws.recv()
+                decoded = ws_decoder.decode_frame(raw)
+                if decoded is None:
+                    continue
+                if router.match_frame(decoded.frame, decoded):
+                    return
+                await self._ack_and_handle(ws, decoded.frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            router.fail(request_id, exc)
 
     async def _serve(self, ws: Any) -> None:
         if self._injected_queue is None:
