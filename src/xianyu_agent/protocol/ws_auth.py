@@ -23,8 +23,7 @@ from xianyu_agent.protocol.signer import (
     extract_cookie_field,
     extract_mtop_token,
 )
-from xianyu_agent.protocol.ws import register as ws_register
-from xianyu_agent.protocol.ws import sync as ws_sync
+from xianyu_agent.protocol.ws import register as ws_register, sync as ws_sync
 
 IM_APP_KEY = "444e9908a51d1cb236a27862abc769c9"
 TOKEN_API = "mtop.taobao.idlemessage.pc.login.token"
