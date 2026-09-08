@@ -64,7 +64,7 @@ def format_task_result(value: int | None) -> str:
 
 
 def resolve_task_paths(*, project_root: Path | None = None) -> TaskPaths:
-    root = (project_root or Path(__file__).resolve().parents[3]).resolve()
+    root = (project_root or Path(__file__).resolve().parents[4]).resolve()
     python_executable = Path(sys.executable).resolve()
     pythonw_executable = python_executable.with_name("pythonw.exe")
     if os.name == "nt" and not pythonw_executable.exists():
