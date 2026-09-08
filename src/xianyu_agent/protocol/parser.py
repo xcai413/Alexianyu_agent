@@ -10,14 +10,11 @@ Public surface:
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import uuid
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
-
-import msgpack
 
 from xianyu_agent.protocol.events import (
     ConnectionState,
@@ -31,6 +28,7 @@ from xianyu_agent.protocol.events import (
     OrderPaid,
     SystemNotice,
 )
+from xianyu_agent.protocol.ws import normalizer as ws_normalizer
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +41,9 @@ KEY_TS_ID = "6"
 KEY_CHAT_ID = "10"
 KEY_ITEM = "100"
 
-
-def _decode_body(body):
-    if body is None:
-        return None
-    if isinstance(body, dict):
-        return body
-    if not isinstance(body, str):
-        return None
-    try:
-        result = json.loads(body)
-        if isinstance(result, dict):
-            return result
-    except (json.JSONDecodeError, ValueError):
-        pass
-    try:
-        decoded = base64.b64decode(body, validate=True)
-        result = json.loads(decoded)
-        if isinstance(result, dict):
-            return result
-    except (ValueError, json.JSONDecodeError):
-        pass
-    return None
+# Compatibility aliases while payload normalization moves under protocol/ws.
+_decode_body = ws_normalizer.decode_body
+_decode_sync_data = ws_normalizer.decode_sync_data
 
 
 def _make_envelope(account_id, raw):  # noqa: ARG001
@@ -103,23 +82,6 @@ def unpack_sync_payloads(frame) -> list[dict]:
         if isinstance(decoded, dict):
             payloads.append(decoded)
     return payloads
-
-
-def _decode_sync_data(value: str) -> dict | None:
-    try:
-        raw = base64.b64decode(value, validate=True)
-    except ValueError:
-        return None
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-        return decoded if isinstance(decoded, dict) else None
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        pass
-    try:
-        decoded = msgpack.unpackb(raw, raw=False, strict_map_key=False)
-    except (ValueError, TypeError, msgpack.ExtraData, msgpack.FormatError, msgpack.StackError):
-        return None
-    return decoded if isinstance(decoded, dict) else None
 
 
 def _truncate_raw(raw, *, limit=4096):
