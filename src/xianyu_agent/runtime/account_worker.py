@@ -13,9 +13,9 @@ from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, get_async_session
-from xianyu_agent.domain import orders as domain_orders
 from xianyu_agent.domain.account import risk as worker_risk
 from xianyu_agent.domain.message import messages as domain_messages
+from xianyu_agent.domain.order import orders as domain_orders
 from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
