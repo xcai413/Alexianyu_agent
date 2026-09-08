@@ -28,7 +28,11 @@ from xianyu_agent.protocol.events import (
     OrderPaid,
     SystemNotice,
 )
-from xianyu_agent.protocol.ws import ack as ws_ack, normalizer as ws_normalizer
+from xianyu_agent.protocol.ws import (
+    ack as ws_ack,
+    decoder as ws_decoder,
+    normalizer as ws_normalizer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +61,12 @@ def build_ack_frame(frame) -> dict | None:
 
 
 def unpack_sync_payloads(frame) -> list[dict]:
-    """解包 `body.syncPushPackage.data[*].data`,支持 Base64 JSON/MessagePack。"""
-    body = _decode_body(frame.body)
-    if not isinstance(body, dict):
-        return []
-    package = body.get("syncPushPackage")
-    if not isinstance(package, dict) or not isinstance(package.get("data"), list):
-        return []
-    payloads = []
-    for entry in package["data"]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("data"), str):
-            continue
-        decoded = _decode_sync_data(entry["data"])
-        if isinstance(decoded, dict):
-            payloads.append(decoded)
-    return payloads
+    """Legacy sync-payload unpack entry delegated to the canonical decoder."""
+    return ws_decoder.unpack_sync_payloads(
+        frame,
+        body_decoder=_decode_body,
+        sync_decoder=_decode_sync_data,
+    )
 
 
 def _truncate_raw(raw, *, limit=4096):
