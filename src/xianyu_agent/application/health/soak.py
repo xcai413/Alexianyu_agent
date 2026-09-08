@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
@@ -40,7 +41,7 @@ class SoakRun:
     run_id: str
     started_at: datetime
     finished_at: datetime | None
-    params: dict[str, object]
+    params: dict[str, Any]
 
 
 async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
@@ -241,7 +242,7 @@ def evidence_path(run_id: str) -> Path:
     return get_settings().log_dir / f"p0-e-soak-{run_id}.jsonl"
 
 
-def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str, object]:
+def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str, Any]:
     healthy = (
         snapshot.daemon_health.healthy
         and account.actual_state == "connected"
@@ -269,15 +270,15 @@ def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str
 
 
 def _aggregate(
-    params: dict[str, object],
-    sample: dict[str, object],
+    params: dict[str, Any],
+    sample: dict[str, Any],
     *,
     metrics: dict[str, int],
     unexpected_daemon_starts: int,
     sensitive_hits: int,
     sensitive_files: list[str],
     log_offsets: dict[str, int],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     updated = dict(params)
     count = int(updated.get("sample_count") or 0) + 1
     updated["sample_count"] = count
@@ -336,7 +337,7 @@ def _aggregate(
     return updated
 
 
-def _final_issues(params: dict[str, object], *, started_at: datetime, now: datetime) -> list[str]:
+def _final_issues(params: dict[str, Any], *, started_at: datetime, now: datetime) -> list[str]:
     issues: list[str] = []
     target = float(params["target_duration_s"])
     interval = float(params["interval_s"])
