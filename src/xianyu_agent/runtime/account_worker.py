@@ -8,26 +8,21 @@ layer (messages/orders persistence). Heartbeats are written by the client.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, get_async_session
+from xianyu_agent.domain import events as domain_events
 from xianyu_agent.domain.account import risk as worker_risk
 from xianyu_agent.domain.message import messages as domain_messages
 from xianyu_agent.domain.order import orders as domain_orders
+from xianyu_agent.protocol import event_mapper
 from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
-from xianyu_agent.protocol.events import (
-    ConnectionState,
-    EventEnvelope,
-    MessageReceived,
-    MessageSent,
-    OrderCreated,
-    OrderDelivered,
-    OrderPaid,
-    SystemNotice,
-)
+from xianyu_agent.protocol.event_mapper import ProtocolDomainEvent
+from xianyu_agent.protocol.events import ConnectionState, EventEnvelope
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.services.delivery_service import DeliveryService
 from xianyu_agent.services.guardrails import Guardrails, write_guardrail_event
@@ -79,30 +74,44 @@ class AccountWorker:
         return True
 
     async def _on_event(self, event: EventEnvelope) -> None:
-        """Default persistence handler: write messages and orders to SQLite."""
-        persisted = event.model_copy(update={"raw": redact_structure(event.raw) if event.raw else None})
-        if isinstance(event, MessageReceived):
-            message_id = await domain_messages.upsert_inbound(persisted)
+        """Map one protocol DTO, then route only canonical events downstream."""
+        domain_event = event_mapper.to_domain_event(cast(ProtocolDomainEvent, event))
+        raw_payload = redact_structure(event.raw) if event.raw else None
+
+        if isinstance(domain_event, domain_events.MessageReceived):
+            message_id = await domain_messages.upsert_inbound(
+                domain_event,
+                raw_payload=raw_payload,
+            )
             if self._reply_engine is not None and self._guardrails is not None:
-                decision = await self._guardrails.check_message(event.account_id, event.content)
+                decision = await self._guardrails.check_message(
+                    domain_event.account_id,
+                    domain_event.content,
+                )
                 if decision.allowed:
-                    await self._reply_engine.handle(event, message_id=message_id)
+                    await self._reply_engine.handle(domain_event, message_id=message_id)
                 else:
                     await write_guardrail_event(
-                        event.account_id,
+                        domain_event.account_id,
                         rule="message_gate",
                         detail=decision.reason or "",
                     )
-        elif isinstance(event, MessageSent):
-            await domain_messages.record_outbound(persisted)
-        elif isinstance(event, (OrderCreated, OrderPaid, OrderDelivered)):
-            await domain_orders.upsert_from_event(persisted)
-            if isinstance(event, OrderPaid) and self._delivery_service is not None:
-                await self._delivery_service.deliver(event)
-        elif isinstance(event, SystemNotice):
-            await self._record_system_notice(event)
+        elif isinstance(domain_event, domain_events.MessageSent):
+            await domain_messages.record_outbound(domain_event)
+        elif isinstance(
+            domain_event,
+            (domain_events.OrderCreated, domain_events.OrderPaid, domain_events.OrderDelivered),
+        ):
+            await domain_orders.upsert_from_event(
+                domain_event,
+                raw_payload=raw_payload,
+            )
+            if isinstance(domain_event, domain_events.OrderPaid) and self._delivery_service is not None:
+                await self._delivery_service.deliver(domain_event)
+        elif isinstance(domain_event, domain_events.SystemNotice):
+            await self._record_system_notice(domain_event)
 
-    async def _record_system_notice(self, event: SystemNotice) -> None:
+    async def _record_system_notice(self, event: domain_events.SystemNotice) -> None:
         """系统提示单独入审计日志,永不进入买家消息自动化。"""
         async with get_async_session() as session:
             account = (

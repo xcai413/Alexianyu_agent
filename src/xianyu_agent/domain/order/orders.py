@@ -5,16 +5,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, select
 
 from xianyu_agent.db import Account, Order, get_async_session
 from xianyu_agent.db.models import OrderStatus
-from xianyu_agent.protocol.events import (
-    OrderCreated,
-    OrderDelivered,
-    OrderPaid,
-)
+from xianyu_agent.domain.events import OrderCreated, OrderDelivered, OrderPaid
 from xianyu_agent.protocol.orders_client import RemoteSoldOrder
 
 logger = logging.getLogger(__name__)
@@ -43,9 +40,14 @@ class ItemSalesSummary:
 
 async def upsert_from_event(
     event: OrderCreated | OrderPaid | OrderDelivered,
+    *,
+    raw_payload: dict[str, Any] | None = None,
 ) -> int | None:
-    """Insert or update an order row from an event.
-    Idempotent on (account_id, order_id).
+    """Insert or update an order row from a canonical Domain Event.
+
+    Idempotent on ``(account_id, order_id)``. ``raw_payload`` is separately-redacted
+    persistence metadata and is deliberately not part of the Domain Event contract.
+    Legacy protocol DTOs remain structurally accepted during consumer migration.
     """
     async with get_async_session() as session:
         account = (
@@ -71,26 +73,36 @@ async def upsert_from_event(
                 buyer_name=getattr(event, "buyer_name", None),
                 amount=float(getattr(event, "amount", 0.0) or 0.0),
                 quantity=1,
-                raw_payload=event.raw,
+                raw_payload=raw_payload,
             )
             session.add(row)
         else:
-            if getattr(event, "item_title", None):
-                row.item_title = event.item_title
-            if getattr(event, "amount", None) is not None:
-                row.amount = float(getattr(event, "amount", 0.0) or 0.0)
-            if getattr(event, "buyer_name", None):
-                row.buyer_name = event.buyer_name
-        if isinstance(event, OrderCreated):
+            item_title = getattr(event, "item_title", None)
+            amount = getattr(event, "amount", None)
+            buyer_name = getattr(event, "buyer_name", None)
+            if item_title:
+                row.item_title = item_title
+            if amount is not None:
+                row.amount = float(amount or 0.0)
+            if buyer_name:
+                row.buyer_name = buyer_name
+
+        # Legacy protocol DTOs intentionally share these stable class names. Keep
+        # structural runtime compatibility without importing protocol event types back
+        # into Domain while AccountWorker and other consumers migrate to canonical events.
+        event_type = type(event).__name__
+        if isinstance(event, OrderCreated) or event_type == "OrderCreated":
             row.status = OrderStatus.PENDING_PAYMENT.value
-        elif isinstance(event, OrderPaid):
+        elif isinstance(event, OrderPaid) or event_type == "OrderPaid":
             row.status = OrderStatus.PAID.value
-            row.paid_at = event.paid_at
-        elif isinstance(event, OrderDelivered) and row.delivery_content is not None:
+            row.paid_at = getattr(event, "paid_at", None)
+        elif (
+            isinstance(event, OrderDelivered) or event_type == "OrderDelivered"
+        ) and row.delivery_content is not None:
             # Only accept an upstream delivered-confirmation when we actually
             # delivered content; otherwise it could mask a send failure.
             row.status = OrderStatus.DELIVERED.value
-            row.delivered_at = event.delivered_at or row.delivered_at
+            row.delivered_at = getattr(event, "delivered_at", None) or row.delivered_at
         await session.commit()
         await session.refresh(row)
         return row.id
@@ -173,7 +185,9 @@ async def list_for_account(
 ) -> Sequence[Order]:
     async with get_async_session() as session:
         account = (
-            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
+            await session.execute(
+                select(Account).where(Account.account_id == account_id).limit(1)
+            )
         ).scalar_one_or_none()
         if account is None:
             return []
@@ -198,7 +212,9 @@ async def sales_by_item(account_id: str) -> dict[str, ItemSalesSummary]:
     """
     async with get_async_session() as session:
         account = (
-            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
+            await session.execute(
+                select(Account).where(Account.account_id == account_id).limit(1)
+            )
         ).scalar_one_or_none()
         if account is None:
             return {}
