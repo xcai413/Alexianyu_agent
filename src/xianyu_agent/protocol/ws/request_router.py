@@ -69,6 +69,16 @@ class RequestRouter:
         future.add_done_callback(cleanup)
         return pending
 
+    def has_pending(self, request_id: str) -> bool:
+        """Return whether ``request_id`` still has a live rendezvous owner."""
+        pending = self._pending.get(request_id)
+        return pending is not None and not pending.future.done()
+
+    def has_pending_frame(self, frame: WsFrame) -> bool:
+        """Return whether a frame is correlated to a currently pending request."""
+        request_id = request_id_from_frame(frame)
+        return request_id is not None and self.has_pending(request_id)
+
     def match(self, request_id: str, response: Any) -> bool:
         """Resolve a pending request; return False for unknown or late responses."""
         pending = self._pending.pop(request_id, None)
