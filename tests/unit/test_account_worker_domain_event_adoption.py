@@ -14,8 +14,7 @@ from sqlalchemy import select
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import AuditLog, Message, Order, database as db_mod
 from xianyu_agent.db.models import OrderStatus
-from xianyu_agent.domain import accounts as domain_accounts
-from xianyu_agent.domain import events as domain_events
+from xianyu_agent.domain import accounts as domain_accounts, events as domain_events
 from xianyu_agent.domain.message import messages as domain_messages
 from xianyu_agent.domain.order import orders as domain_orders
 from xianyu_agent.protocol import events as protocol_events
