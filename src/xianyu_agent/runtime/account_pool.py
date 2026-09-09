@@ -173,10 +173,10 @@ class AccountPool:
                 if self._workers.get(account_id) is worker:
                     self._workers.pop(account_id, None)
                 logger.warning("account connection lock busy account=%s", account_id)
-            except Exception as exc:
+            except Exception:
                 if self._workers.get(account_id) is worker:
                     self._workers.pop(account_id, None)
-                logger.error("account worker startup failed account=%s error=%s", account_id, exc)
+                logger.exception("account worker startup failed account=%s", account_id)
             else:
                 started.append(account_id)
         return {"started": started, "stopped": stopped}
