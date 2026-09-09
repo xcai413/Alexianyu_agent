@@ -502,31 +502,29 @@ async def test_synthetic_injection_is_serial_and_preserves_injection_order(
 
 
 @pytest.mark.asyncio
-async def test_synthetic_injection_remains_available_after_terminal_credential_gate(
+async def test_synthetic_injection_is_available_without_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    credentials = FakeCredentials("acc-1", ensure_results=[terminal("acc-1")])
-    worker, client, _ = make_worker(credentials=credentials)
+    worker, client, credentials = make_worker()
     observed: list[str | None] = []
 
     async def capture_dispatch(frame: WsFrame) -> None:
         observed.append(frame.packet_id)
 
     monkeypatch.setattr(worker, "_dispatch_injected_frame", capture_dispatch)
-    worker.start()
-    await wait_until(lambda: worker.state is WorkerState.ERROR)
-    assert client.start_calls == 0
-
     worker.inject_frame(
         WsFrame(code=0, packetId="offline", headers={}, body={}, received_at=NOW)
     )
     await worker._drain_injected_frames()
 
+    assert worker.state is WorkerState.DISABLED
+    assert client.start_calls == 0
+    assert credentials.ensure_calls == 0
     assert observed == ["offline"]
 
 
 @pytest.mark.asyncio
-async def test_account_pool_removes_worker_when_connection_lock_is_already_held(clean_db) -> None:
+async def test_account_pool_removes_worker_when_connection_lock_is_already_held() -> None:
     account_id = "locked-account"
     external_lock = AccountConnectionLock(get_settings().account_lock_path(account_id))
     external_lock.acquire(owner_id="external-test-owner")
