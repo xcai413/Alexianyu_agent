@@ -77,12 +77,15 @@ async def upsert_from_event(
             )
             session.add(row)
         else:
-            if getattr(event, "item_title", None):
-                row.item_title = event.item_title
-            if getattr(event, "amount", None) is not None:
-                row.amount = float(getattr(event, "amount", 0.0) or 0.0)
-            if getattr(event, "buyer_name", None):
-                row.buyer_name = event.buyer_name
+            item_title = getattr(event, "item_title", None)
+            amount = getattr(event, "amount", None)
+            buyer_name = getattr(event, "buyer_name", None)
+            if item_title:
+                row.item_title = item_title
+            if amount is not None:
+                row.amount = float(amount or 0.0)
+            if buyer_name:
+                row.buyer_name = buyer_name
 
         # Legacy protocol DTOs intentionally share these stable class names. Keep
         # structural runtime compatibility without importing protocol event types back
