@@ -50,14 +50,21 @@ class StartableFakeClient:
 
 @pytest.fixture
 async def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    previous_engine = db_mod.async_engine
+    previous_factory = db_mod.async_session_factory
     monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("XIANYU_DB_PATH", str(tmp_path / "pool-lifecycle-failures.db"))
     reset_settings_cache()
     db_mod.reset_engine()
-    await db_mod.init_db()
-    yield
-    await db_mod.async_engine.dispose()
-    reset_settings_cache()
+    test_engine = db_mod.async_engine
+    try:
+        await db_mod.init_db()
+        yield
+    finally:
+        await test_engine.dispose()
+        db_mod.async_engine = previous_engine
+        db_mod.async_session_factory = previous_factory
+        reset_settings_cache()
 
 
 async def wait_until(predicate: Predicate) -> None:
@@ -72,6 +79,13 @@ async def persisted_status(account_id: str) -> str:
     row = await domain_accounts.worker_status_for(account_id)
     assert row is not None
     return str(row.status)
+
+
+async def drain_pool_lifecycle_cleanup(pool: AccountPool) -> None:
+    """Await every pool-owned failure cleanup task scheduled before teardown."""
+    while pool._lifecycle_cleanup_tasks:
+        tasks = tuple(pool._lifecycle_cleanup_tasks)
+        await asyncio.gather(*tasks)
 
 
 async def start_worker_with_owned_transport(
@@ -157,30 +171,31 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
         monkeypatch,
     )
     history_before = worker.state_history
-    original_commit = AsyncSession.commit
 
     async def fail_commit(_session: AsyncSession) -> None:
         raise RuntimeError("forced post-start callback commit failure")
 
-    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
-    release_transport.set()
-    await wait_until(lambda: worker.lifecycle_error is not None and not pool.has(account_id))
+    with monkeypatch.context() as commit_patch:
+        commit_patch.setattr(AsyncSession, "commit", fail_commit)
+        release_transport.set()
+        await wait_until(lambda: worker.lifecycle_error is not None and not pool.has(account_id))
+        await drain_pool_lifecycle_cleanup(pool)
 
-    transport_task = worker._client._task
-    assert transport_task is not None
-    with pytest.raises(RuntimeError, match="forced post-start callback commit failure"):
-        await transport_task
+        transport_task = worker._client._task
+        assert transport_task is not None
+        with pytest.raises(RuntimeError, match="forced post-start callback commit failure"):
+            await transport_task
 
-    assert isinstance(worker.lifecycle_error, RuntimeError)
-    assert str(worker.lifecycle_error) == "forced post-start callback commit failure"
-    assert worker._stop_requested is True
-    assert worker._client._stop.is_set()
-    assert worker.state is WorkerState.ONLINE
-    assert worker.state_history == history_before
-    assert await persisted_status(account_id) == "online"
+        assert isinstance(worker.lifecycle_error, RuntimeError)
+        assert str(worker.lifecycle_error) == "forced post-start callback commit failure"
+        assert worker._stop_requested is True
+        assert worker._client._stop.is_set()
+        assert worker.state is WorkerState.ONLINE
+        assert worker.state_history == history_before
+        assert await persisted_status(account_id) == "online"
 
-    monkeypatch.setattr(AsyncSession, "commit", original_commit)
     await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
+    await drain_pool_lifecycle_cleanup(pool)
 
 
 @pytest.mark.asyncio
