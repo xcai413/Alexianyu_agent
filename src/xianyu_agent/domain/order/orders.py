@@ -5,16 +5,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, select
 
 from xianyu_agent.db import Account, Order, get_async_session
 from xianyu_agent.db.models import OrderStatus
-from xianyu_agent.protocol.events import (
-    OrderCreated,
-    OrderDelivered,
-    OrderPaid,
-)
+from xianyu_agent.domain.events import OrderCreated, OrderDelivered, OrderPaid
 from xianyu_agent.protocol.orders_client import RemoteSoldOrder
 
 logger = logging.getLogger(__name__)
@@ -43,9 +40,13 @@ class ItemSalesSummary:
 
 async def upsert_from_event(
     event: OrderCreated | OrderPaid | OrderDelivered,
+    *,
+    raw_payload: dict[str, Any] | None = None,
 ) -> int | None:
-    """Insert or update an order row from an event.
-    Idempotent on (account_id, order_id).
+    """Insert or update an order row from a canonical Domain Event.
+
+    Idempotent on ``(account_id, order_id)``. ``raw_payload`` is separately-redacted
+    persistence metadata and is deliberately not part of the Domain Event contract.
     """
     async with get_async_session() as session:
         account = (
@@ -71,7 +72,7 @@ async def upsert_from_event(
                 buyer_name=getattr(event, "buyer_name", None),
                 amount=float(getattr(event, "amount", 0.0) or 0.0),
                 quantity=1,
-                raw_payload=event.raw,
+                raw_payload=raw_payload,
             )
             session.add(row)
         else:
@@ -173,7 +174,9 @@ async def list_for_account(
 ) -> Sequence[Order]:
     async with get_async_session() as session:
         account = (
-            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
+            await session.execute(
+                select(Account).where(Account.account_id == account_id).limit(1)
+            )
         ).scalar_one_or_none()
         if account is None:
             return []
@@ -198,7 +201,9 @@ async def sales_by_item(account_id: str) -> dict[str, ItemSalesSummary]:
     """
     async with get_async_session() as session:
         account = (
-            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
+            await session.execute(
+                select(Account).where(Account.account_id == account_id).limit(1)
+            )
         ).scalar_one_or_none()
         if account is None:
             return {}
