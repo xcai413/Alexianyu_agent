@@ -138,7 +138,10 @@ class WsClient:
         self._business_session_ready = asyncio.Event()
         self._business_session_ready.set()
         self._deferred_business_frames: deque[DeferredBusinessEvents] = deque()
+        self._deferred_business_slots = asyncio.BoundedSemaphore(MAX_CALLBACK_QUEUE_SIZE)
+        self._retained_business_drain_task: asyncio.Task[None] | None = None
         self._deferred_sync_frames: deque[WsFrame] = deque()
+        self._deferred_sync_slots = asyncio.BoundedSemaphore(MAX_DEFERRED_SYNC_FRAMES)
         self._dispatch_queue: asyncio.Queue[DispatchCallback] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
         self._dispatch_inflight = False
@@ -279,17 +282,23 @@ class WsClient:
                     len(self._deferred_business_frames),
                 )
 
+        retained_drain_active = False
+        if self._deferred_business_frames:
+            self._ensure_retained_business_drain()
+            retained_drain_active = self._retained_business_drain_active()
+
         remaining = max(0.0, deadline - loop.time())
-        if remaining > 0.0:
-            try:
-                await asyncio.wait_for(
-                    self._stop_dispatch_consumer(drain=True), timeout=remaining
-                )
-            except TimeoutError:
-                logger.warning("ws callback drain timed out account=%s", self.account_id)
+        if not retained_drain_active:
+            if remaining > 0.0:
+                try:
+                    await asyncio.wait_for(
+                        self._stop_dispatch_consumer(drain=True), timeout=remaining
+                    )
+                except TimeoutError:
+                    logger.warning("ws callback drain timed out account=%s", self.account_id)
+                    self._request_dispatch_stop_when_drained()
+            else:
                 self._request_dispatch_stop_when_drained()
-        else:
-            self._request_dispatch_stop_when_drained()
         await self._emit_state(ConnectionState.DISCONNECTED, "stop() called")
 
     def inject_frame(self, frame: WsFrame) -> None:
@@ -300,7 +309,11 @@ class WsClient:
 
     async def send_text(self, text: str) -> bool:
         """Send an outbound text frame. Returns False until the session is ready."""
-        if not self._outbound_ready or self._socket is None:
+        if (
+            not self._business_session_ready.is_set()
+            or not self._outbound_ready
+            or self._socket is None
+        ):
             return False
         return await ws_sender.send_text(self._socket, text)
 
@@ -341,10 +354,27 @@ class WsClient:
         )
 
     def _require_protocol_context(self) -> tuple[Any, ws_request_router.RequestRouter]:
-        if self._socket is None or self._router is None or not self._business_dispatch_ready:
+        if (
+            not self._business_session_ready.is_set()
+            or not self._business_dispatch_ready
+            or not self._outbound_ready
+            or self._socket is None
+            or self._router is None
+        ):
             msg = "WebSocket protocol session is not connected"
             raise ConnectionError(msg)
         return self._socket, self._router
+
+    def _set_business_session_ready(self, ready: bool) -> None:
+        """Open or close all business-facing session capabilities atomically."""
+        if ready:
+            self._outbound_ready = True
+            self._business_dispatch_ready = True
+            self._business_session_ready.set()
+            return
+        self._business_session_ready.clear()
+        self._business_dispatch_ready = False
+        self._outbound_ready = False
 
     async def _run_forever(self) -> None:
         """Main loop: connect -> heartbeat+recv -> disconnect -> bounded retry."""
@@ -419,10 +449,7 @@ class WsClient:
             self._start_dispatch_consumer()
         self._account_user_id = None
         self._subscription_ready = None
-        self._outbound_ready = False
-        self._business_dispatch_ready = False
-        self._business_session_ready.clear()
-        self._deferred_sync_frames.clear()
+        self._set_business_session_ready(False)
         await self._emit_state(ConnectionState.CONNECTING)
         credentials = await self.token_provider.get_credentials(self.account_id)
         cookie_value = await self.signer.load_cookie_value(self.account_id)
@@ -452,8 +479,7 @@ class WsClient:
                     if self._stop.is_set():
                         return
                     self._raise_if_receive_owner_finished(receive_task)
-                    self._outbound_ready = True
-                    self._business_session_ready.set()
+                    self._set_business_session_ready(True)
                     await self._flush_deferred_business_frames()
                     if self._stop.is_set():
                         return
@@ -462,9 +488,7 @@ class WsClient:
                     await self._emit_state(ConnectionState.CONNECTED)
                     await self._serve(ws, receive_task)
                 finally:
-                    self._business_session_ready.clear()
-                    self._business_dispatch_ready = False
-                    self._outbound_ready = False
+                    self._set_business_session_ready(False)
                     await self._cancel_protocol_tasks()
                     router.close()
                     if not receive_task.done():
@@ -477,10 +501,7 @@ class WsClient:
                         self._router = None
                         self._socket = None
         finally:
-            self._deferred_sync_frames.clear()
-            self._business_session_ready.clear()
-            self._business_dispatch_ready = False
-            self._outbound_ready = False
+            self._set_business_session_ready(False)
             self._subscription_ready = None
             self._account_user_id = None
             if owns_dispatch_consumer:
@@ -584,11 +605,25 @@ class WsClient:
 
                 frame = decoded.frame
                 await self._handle_or_defer_business_frame(frame)
-                await ws_ack.send_ack(ws, frame)
-                matched = router.match_frame(frame, decoded)
-
-                if not matched and ws_sync.requires_state_sync(frame):
-                    self._handle_or_defer_sync_frame(ws, router, frame)
+                reserve_sync = (
+                    ws_sync.requires_state_sync(frame)
+                    and not router.has_pending_frame(frame)
+                )
+                sync_slot_owned = False
+                if reserve_sync:
+                    await self._deferred_sync_slots.acquire()
+                    sync_slot_owned = True
+                try:
+                    await ws_ack.send_ack(ws, frame)
+                    matched = router.match_frame(frame, decoded)
+                    if sync_slot_owned and not matched:
+                        deferred = self._handle_or_defer_sync_frame(ws, router, frame)
+                        if not deferred:
+                            self._deferred_sync_slots.release()
+                        sync_slot_owned = False
+                finally:
+                    if sync_slot_owned:
+                        self._deferred_sync_slots.release()
         finally:
             if owns_dispatch_consumer:
                 await self._stop_dispatch_consumer(drain=True)
@@ -598,14 +633,12 @@ class WsClient:
         ws: Any,
         router: ws_request_router.RequestRouter,
         frame: WsFrame,
-    ) -> None:
-        if self._business_dispatch_ready:
+    ) -> bool:
+        if self._business_session_ready.is_set():
             self._start_sync_exchange(ws, router, frame)
-            return
-        if len(self._deferred_sync_frames) >= MAX_DEFERRED_SYNC_FRAMES:
-            msg = "registration sync backlog buffer overflow"
-            raise ConnectionError(msg)
+            return False
         self._deferred_sync_frames.append(frame)
+        return True
 
     def _start_deferred_sync_exchanges(
         self,
@@ -613,7 +646,14 @@ class WsClient:
         router: ws_request_router.RequestRouter,
     ) -> None:
         while self._deferred_sync_frames:
-            self._start_sync_exchange(ws, router, self._deferred_sync_frames.popleft())
+            frame = self._deferred_sync_frames.popleft()
+            try:
+                self._start_sync_exchange(ws, router, frame)
+            except Exception:
+                self._deferred_sync_frames.appendleft(frame)
+                raise
+            else:
+                self._deferred_sync_slots.release()
 
     def _start_sync_exchange(
         self,
@@ -908,17 +948,49 @@ class WsClient:
     async def _handle_or_defer_business_frame(self, frame: WsFrame) -> None:
         await self._queue_frame_callback(frame)
         events = self._parse_frame_events(frame)
-        if not self._business_dispatch_ready and events and self.on_event is not None:
-            self._deferred_business_frames.append(events)
+        if not self._business_session_ready.is_set() and events and self.on_event is not None:
+            await self._deferred_business_slots.acquire()
+            if self._business_session_ready.is_set():
+                self._deferred_business_slots.release()
+                await self._queue_events(events)
+            else:
+                self._deferred_business_frames.append(events)
             return
         await self._queue_events(events)
 
     async def _flush_deferred_business_frames(self) -> None:
+        if self._business_session_ready.is_set():
+            self._business_dispatch_ready = True
         while self._deferred_business_frames:
             events = self._deferred_business_frames[0]
             await self._queue_events(events)
             self._deferred_business_frames.popleft()
-        self._business_dispatch_ready = True
+            self._deferred_business_slots.release()
+
+    def _retained_business_drain_active(self) -> bool:
+        task = self._retained_business_drain_task
+        return task is not None and not task.done()
+
+    def _ensure_retained_business_drain(self) -> None:
+        if not self._deferred_business_frames or self._retained_business_drain_active():
+            return
+        self._retained_business_drain_task = asyncio.create_task(
+            self._drain_retained_business_after_stop(),
+            name=f"ws-retained-business-drain-{self.account_id}",
+        )
+
+    async def _drain_retained_business_after_stop(self) -> None:
+        current = asyncio.current_task()
+        try:
+            self._start_dispatch_consumer()
+            await self._flush_deferred_business_frames()
+            queue = self._dispatch_queue
+            if queue is not None:
+                await queue.join()
+            await self._stop_dispatch_consumer(drain=False)
+        finally:
+            if self._retained_business_drain_task is current:
+                self._retained_business_drain_task = None
 
     async def _handle_frame(self, frame: WsFrame) -> None:
         await self._emit_frame_callback(frame)
