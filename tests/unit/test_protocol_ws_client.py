@@ -707,16 +707,16 @@ async def test_send_text_rejects_transport_until_outbound_ready() -> None:
     client = _make_client()
     socket = _SingleOwnerSocket()
     client._socket = socket
-    client._outbound_ready = False
+    client._set_business_session_ready(False)
 
     assert await client.send_text("too-early") is False
     assert socket.sent == []
 
-    client._outbound_ready = True
+    client._set_business_session_ready(True)
     assert await client.send_text("ready-text") is True
     assert socket.sent == ["ready-text"]
 
-    client._outbound_ready = False
+    client._set_business_session_ready(False)
     client._socket = None
 
 
@@ -839,7 +839,7 @@ async def test_registration_backlog_is_retained_when_receive_fails_before_ready(
 
     client._start_dispatch_consumer()
     # The retained callback is connection-gated; simulate the next session becoming ready.
-    client._business_session_ready.set()
+    client._set_business_session_ready(True)
     await client._flush_deferred_business_frames()
     assert client._dispatch_queue is not None
     await client._dispatch_queue.join()
@@ -1015,7 +1015,7 @@ async def test_history_rejects_requests_until_registration_ready() -> None:
     router = request_router.RequestRouter()
     client._socket = socket
     client._router = router
-    client._business_dispatch_ready = False
+    client._set_business_session_ready(False)
 
     with pytest.raises(ConnectionError, match="protocol session is not connected"):
         await client.request_conversations(timeout_s=0.01)
@@ -1025,7 +1025,6 @@ async def test_history_rejects_requests_until_registration_ready() -> None:
 
     client._socket = None
     client._router = None
-    client._business_dispatch_ready = True
     router.close()
 
 
@@ -1036,6 +1035,7 @@ async def test_history_requests_share_receive_owner_and_router() -> None:
     router = request_router.RequestRouter()
     client._socket = socket
     client._router = router
+    client._set_business_session_ready(True)
     receive_task = asyncio.create_task(client._receive_loop(socket, router))
 
     conversations_task = asyncio.create_task(client.request_conversations(timeout_s=0.2))
@@ -1070,6 +1070,7 @@ async def test_history_requests_share_receive_owner_and_router() -> None:
     assert socket.iterator_count == 1
     assert socket.recv_called is False
 
+    client._set_business_session_ready(False)
     client._socket = None
     client._router = None
     await socket.close()
