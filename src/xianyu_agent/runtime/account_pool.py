@@ -10,6 +10,7 @@ the daemon reconciles this in-memory pool against that persistent control plane.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -28,6 +29,7 @@ class AccountPool:
     def __init__(self, *, worker_factory: WorkerFactory | None = None) -> None:
         self._workers: dict[str, AccountWorker] = {}
         self._worker_factory = worker_factory or AccountWorker
+        self._startup_tasks: dict[str, asyncio.Task[None]] = {}
 
     @classmethod
     async def from_enabled_accounts(
@@ -69,6 +71,44 @@ class AccountPool:
             pool._workers[acc.account_id] = pool._worker_factory(acc.account_id)
         return pool
 
+    def _observe_startup(
+        self,
+        account_id: str,
+        worker: AccountWorker,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        """Own a scheduled startup outcome for synchronous pool entry points."""
+        if task is None:
+            return
+        self._startup_tasks[account_id] = task
+
+        def _completed(completed: asyncio.Task[None]) -> None:
+            if self._startup_tasks.get(account_id) is completed:
+                self._startup_tasks.pop(account_id, None)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is None:
+                return
+            if self._workers.get(account_id) is worker:
+                self._workers.pop(account_id, None)
+            logger.error(
+                "account worker startup failed account=%s error=%s",
+                account_id,
+                error,
+            )
+
+        task.add_done_callback(_completed)
+
+    def _start_observed(
+        self,
+        account_id: str,
+        worker: AccountWorker,
+    ) -> asyncio.Task[None] | None:
+        task = worker.start()
+        self._observe_startup(account_id, worker, task)
+        return task
+
     @property
     def account_ids(self) -> list[str]:
         return list(self._workers)
@@ -84,14 +124,15 @@ class AccountPool:
         worker = self._workers.get(account_id)
         if worker is None:
             return False
-        worker.start()
+        self._start_observed(account_id, worker)
         return True
 
     def start_all(self) -> list[str]:
         started: list[str] = []
         for account_id in list(self._workers):
+            worker = self._workers[account_id]
             try:
-                self._workers[account_id].start()
+                self._start_observed(account_id, worker)
             except AccountConnectionAlreadyRunningError:
                 self._workers.pop(account_id, None)
                 logger.warning("account connection lock busy account=%s", account_id)
@@ -125,10 +166,17 @@ class AccountPool:
             worker = self._worker_factory(account_id)
             self._workers[account_id] = worker
             try:
-                worker.start()
+                task = worker.start()
+                if task is not None:
+                    await task
             except AccountConnectionAlreadyRunningError:
-                self._workers.pop(account_id, None)
+                if self._workers.get(account_id) is worker:
+                    self._workers.pop(account_id, None)
                 logger.warning("account connection lock busy account=%s", account_id)
+            except Exception as exc:
+                if self._workers.get(account_id) is worker:
+                    self._workers.pop(account_id, None)
+                logger.error("account worker startup failed account=%s error=%s", account_id, exc)
             else:
                 started.append(account_id)
         return {"started": started, "stopped": stopped}
@@ -141,12 +189,12 @@ class AccountPool:
         """确保一个 Worker 在池中运行。"""
         worker = self._workers.get(account_id)
         if worker is not None:
-            worker.start()
+            self._start_observed(account_id, worker)
             return "already_running"
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
-            worker.start()
+            self._start_observed(account_id, worker)
         except Exception:
             self._workers.pop(account_id, None)
             raise
@@ -168,9 +216,12 @@ class AccountPool:
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
-            worker.start()
+            task = worker.start()
+            if task is not None:
+                await task
         except Exception:
-            self._workers.pop(account_id, None)
+            if self._workers.get(account_id) is worker:
+                self._workers.pop(account_id, None)
             raise
         return "restarted"
 
@@ -178,7 +229,7 @@ class AccountPool:
         worker = self._workers.get(account_id)
         if worker is None:
             return False
-        worker.start()
+        self._start_observed(account_id, worker)
         return True
 
     async def status(self) -> list[dict]:
