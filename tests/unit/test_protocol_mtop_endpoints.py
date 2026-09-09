@@ -8,8 +8,7 @@ import respx
 
 from xianyu_agent.protocol import items_client as legacy_items
 from xianyu_agent.protocol import orders_client as legacy_orders
-from xianyu_agent.protocol.mtop import signer as canonical_signer
-from xianyu_agent.protocol.mtop import endpoints
+from xianyu_agent.protocol.mtop import endpoints, signer as canonical_signer
 from xianyu_agent.protocol.mtop.endpoints import items as canonical_items
 from xianyu_agent.protocol.mtop.endpoints import orders as canonical_orders
 
