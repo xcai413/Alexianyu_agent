@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
@@ -250,3 +251,33 @@ async def test_readiness_and_reconnect_persistence_are_serialized(
     )
     for current, target in zip(worker.state_history, worker.state_history[1:], strict=False):
         assert transition_worker_state(current, target) is target
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_advance_memory_or_history(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "commit-failure"
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+
+    await advance_to_connecting(worker)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    await worker._set_worker_state(WorkerState.ONLINE)
+    assert worker.state is WorkerState.ONLINE
+    assert await persisted_status(account_id) == "online"
+    history_before = worker.state_history
+
+    async def fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("forced worker-state commit failure")
+
+    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+
+    with pytest.raises(RuntimeError, match="forced worker-state commit failure"):
+        await worker._set_worker_state(WorkerState.RECONNECTING, detail="network")
+
+    assert worker.state is WorkerState.ONLINE
+    assert worker.state_history == history_before
+    assert await persisted_status(account_id) == "online"
