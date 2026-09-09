@@ -30,7 +30,7 @@ from xianyu_agent.domain.order import orders as domain_orders
 from xianyu_agent.domain.runtime.worker_state import (
     InvalidWorkerStateTransition,
     WorkerState,
-    legacy_worker_status_for,
+    serialize_worker_state,
     transition_worker_state,
     worker_state_from_persistence,
 )
@@ -617,7 +617,7 @@ class AccountWorker:
             self._state_history.append(next_state)
 
     async def _load_persisted_worker_state(self) -> WorkerState | None:
-        """Normalize the legacy status row, using durable validation as authority."""
+        """Normalize canonical or legacy status, using durable validation as authority."""
         try:
             async with get_async_session() as session:
                 account = (
@@ -648,7 +648,7 @@ class AccountWorker:
         *,
         detail: str | None = None,
     ) -> None:
-        """Persist the lossy worker_status compatibility projection."""
+        """Persist the canonical WorkerState while retaining legacy read compatibility."""
         try:
             async with get_async_session() as session:
                 account = (
@@ -663,12 +663,12 @@ class AccountWorker:
                         select(WorkerStatus).where(WorkerStatus.account_id == account.id).limit(1)
                     )
                 ).scalar_one_or_none()
-                projected = legacy_worker_status_for(state)
+                persisted = serialize_worker_state(state)
                 if row is None:
-                    row = WorkerStatus(account_id=account.id, status=projected)
+                    row = WorkerStatus(account_id=account.id, status=persisted)
                     session.add(row)
                 else:
-                    row.status = projected
+                    row.status = persisted
                 if state is WorkerState.ONLINE:
                     row.last_error = None
                     row.last_heartbeat_at = datetime.now(UTC)
