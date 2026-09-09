@@ -189,7 +189,7 @@ class DeliveryService:
                 fail_reason = "发送器返回失败"
         else:
             fail_reason = "未配置发送器(sender=None)"
-        await self._record_outcome(order_id, delivered=ok, code=code, fail_reason=fail_reason)
+        await self._record_outcome(row.id, delivered=ok, code=code, fail_reason=fail_reason)
         if ok:
             logger.info("retry delivered order=%s", row.order_id)
             return DeliveryResult(delivered=True, order_id=row.order_id, code=code)
