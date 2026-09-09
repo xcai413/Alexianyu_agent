@@ -160,12 +160,11 @@ def make_worker(
     async def no_wait(_delay: float) -> None:
         await asyncio.sleep(0)
 
-    recovery = RecoverySupervisor(fake_credentials)
     worker = AccountWorker(
         account_id,
         client=fake_client,  # type: ignore[arg-type]
         credential_supervisor=fake_credentials,  # type: ignore[arg-type]
-        recovery_supervisor=recovery,
+        recovery_supervisor=RecoverySupervisor(fake_credentials),
         retry_sleep=retry_sleep or no_wait,
         readiness_poll_s=0.001,
         persist_events=False,
@@ -174,29 +173,30 @@ def make_worker(
     return worker, fake_client, fake_credentials
 
 
-async def wait_for(predicate: Predicate, *, timeout: float = 1.0) -> None:
-    async with asyncio.timeout(timeout):
-        while not predicate():
-            await asyncio.sleep(0.001)
+async def wait_until(predicate: Predicate) -> None:
+    for _ in range(2000):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise TimeoutError("condition did not become true")
 
 
 async def bring_online(worker: AccountWorker, client: FakeClient) -> None:
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
     assert worker.state is WorkerState.CONNECTING
     await client.emit(ConnectionState.CONNECTING)
     await client.emit(ConnectionState.CONNECTED)
     assert worker.state is WorkerState.SYNCING
     client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 1})
-    await wait_for(lambda: worker.state is WorkerState.ONLINE)
+    await wait_until(lambda: worker.state is WorkerState.ONLINE)
 
 
 @pytest.mark.asyncio
 async def test_normal_start_requires_subscription_ready_before_online() -> None:
     worker, client, credentials = make_worker()
-
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
 
     assert credentials.ensure_calls == 1
     assert worker.state is WorkerState.CONNECTING
@@ -206,7 +206,7 @@ async def test_normal_start_requires_subscription_ready_before_online() -> None:
     assert WorkerState.ONLINE not in worker.state_history
 
     client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 7})
-    await wait_for(lambda: worker.state is WorkerState.ONLINE)
+    await wait_until(lambda: worker.state is WorkerState.ONLINE)
     assert worker.state_history[-4:] == (
         WorkerState.CONNECTING,
         WorkerState.REGISTERING,
@@ -229,7 +229,7 @@ async def test_disconnect_reconnects_through_canonical_intermediate_states() -> 
     assert worker.state is WorkerState.SYNCING
 
     client.subscription_ready = SubscriptionReady(sync_type=2, state_body={"pts": 9})
-    await wait_for(lambda: worker.state is WorkerState.ONLINE)
+    await wait_until(lambda: worker.state is WorkerState.ONLINE)
     assert worker.state_history[-5:] == (
         WorkerState.RECONNECTING,
         WorkerState.CONNECTING,
@@ -246,9 +246,8 @@ async def test_credential_ensure_refresh_is_reflected_in_worker_state() -> None:
         ensure_results=[success("acc-1", refreshed=True)],
     )
     worker, client, _ = make_worker(credentials=credentials)
-
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
 
     assert worker.state is WorkerState.CONNECTING
     assert worker.state_history[:6] == (
@@ -295,13 +294,9 @@ async def test_retryable_credential_failure_retries_same_ensure_route() -> None:
         "acc-1",
         ensure_results=[retryable("acc-1"), success("acc-1")],
     )
-    worker, client, _ = make_worker(
-        credentials=credentials,
-        retry_sleep=capture_delay,
-    )
-
+    worker, client, _ = make_worker(credentials=credentials, retry_sleep=capture_delay)
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
 
     assert credentials.ensure_calls == 2
     assert delays == [2.0]
@@ -327,8 +322,8 @@ async def test_needs_validation_stops_only_that_account_and_never_auto_retries()
 
     blocked.start()
     healthy.start()
-    await wait_for(lambda: blocked.state is WorkerState.NEEDS_VALIDATION)
-    await wait_for(lambda: healthy_client.start_calls == 1)
+    await wait_until(lambda: blocked.state is WorkerState.NEEDS_VALIDATION)
+    await wait_until(lambda: healthy_client.start_calls == 1)
 
     assert blocked_client.start_calls == 0
     assert blocked_credentials.ensure_calls == 1
@@ -339,7 +334,7 @@ async def test_needs_validation_stops_only_that_account_and_never_auto_retries()
 
     await healthy_client.emit(ConnectionState.CONNECTED)
     healthy_client.subscription_ready = SubscriptionReady(sync_type=1, state_body={})
-    await wait_for(lambda: healthy.state is WorkerState.ONLINE)
+    await wait_until(lambda: healthy.state is WorkerState.ONLINE)
     assert blocked.state is WorkerState.NEEDS_VALIDATION
 
 
@@ -352,7 +347,7 @@ async def test_validation_recovery_is_explicit_and_single_attempt() -> None:
     )
     worker, client, _ = make_worker(credentials=credentials)
     worker.start()
-    await wait_for(lambda: worker.state is WorkerState.NEEDS_VALIDATION)
+    await wait_until(lambda: worker.state is WorkerState.NEEDS_VALIDATION)
     assert client.start_calls == 0
 
     assert await worker.recover_validation() is True
@@ -363,14 +358,10 @@ async def test_validation_recovery_is_explicit_and_single_attempt() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_credential_failure_fails_closed_to_error() -> None:
-    credentials = FakeCredentials(
-        "acc-1",
-        ensure_results=[terminal("acc-1")],
-    )
+    credentials = FakeCredentials("acc-1", ensure_results=[terminal("acc-1")])
     worker, client, _ = make_worker(credentials=credentials)
-
     worker.start()
-    await wait_for(lambda: worker.state is WorkerState.ERROR)
+    await wait_until(lambda: worker.state is WorkerState.ERROR)
 
     assert client.start_calls == 0
     assert credentials.ensure_calls == 1
@@ -381,7 +372,7 @@ async def test_terminal_credential_failure_fails_closed_to_error() -> None:
 async def test_stop_during_connecting_or_syncing_reaches_disabled(phase: WorkerState) -> None:
     worker, client, _ = make_worker()
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
     if phase is WorkerState.SYNCING:
         await client.emit(ConnectionState.CONNECTED)
         assert worker.state is WorkerState.SYNCING
@@ -399,7 +390,6 @@ async def test_stop_during_connecting_or_syncing_reaches_disabled(phase: WorkerS
 async def test_stop_from_online_reaches_stopping_then_disabled() -> None:
     worker, client, _ = make_worker()
     await bring_online(worker, client)
-
     await worker.stop()
 
     assert worker.state is WorkerState.DISABLED
@@ -410,7 +400,6 @@ async def test_stop_from_online_reaches_stopping_then_disabled() -> None:
 @pytest.mark.asyncio
 async def test_invalid_transition_is_rejected_without_mutating_state() -> None:
     worker, _, _ = make_worker()
-
     with pytest.raises(InvalidWorkerStateTransition):
         await worker._set_worker_state(WorkerState.ONLINE)
 
@@ -440,11 +429,10 @@ async def test_restart_normalizes_legacy_status_without_promoting_connected_to_o
 
     worker, client, _ = make_worker()
     worker.start()
-    await wait_for(lambda: client.start_calls == 1)
+    await wait_until(lambda: client.start_calls == 1)
 
     assert worker.restored_state is WorkerState.SYNCING
     assert worker.state is WorkerState.CONNECTING
-
     await client.emit(ConnectionState.CONNECTED)
     assert worker.state is WorkerState.SYNCING
     row = await domain_accounts.worker_status_for("acc-1")
@@ -452,7 +440,7 @@ async def test_restart_normalizes_legacy_status_without_promoting_connected_to_o
     assert row.status == "connected"
 
     client.subscription_ready = SubscriptionReady(sync_type=1, state_body={})
-    await wait_for(lambda: worker.state is WorkerState.ONLINE)
+    await wait_until(lambda: worker.state is WorkerState.ONLINE)
     row = await domain_accounts.worker_status_for("acc-1")
     assert row is not None
     assert row.status == "online"
@@ -474,7 +462,7 @@ async def test_persisted_validation_gate_blocks_restart_before_credential_ensure
     credentials = FakeCredentials("acc-1", ensure_results=[success("acc-1")])
     worker, client, _ = make_worker(credentials=credentials)
     worker.start()
-    await wait_for(lambda: worker.state is WorkerState.NEEDS_VALIDATION)
+    await wait_until(lambda: worker.state is WorkerState.NEEDS_VALIDATION)
 
     assert worker.restored_state is WorkerState.NEEDS_VALIDATION
     assert credentials.ensure_calls == 0
