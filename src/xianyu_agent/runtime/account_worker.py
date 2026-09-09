@@ -87,6 +87,49 @@ class _WorkerConnectionLock(AccountConnectionLock):
             self._held_by_worker = False
 
 
+class _WorkerOwnedWsClient(WsClient):
+    """Transport client whose AccountWorker owner exclusively persists lifecycle status."""
+
+    async def _update_worker_status(
+        self,
+        *,
+        state: ConnectionState,
+        detail: str | None,
+    ) -> None:
+        """Preserve transport diagnostics without overwriting canonical WorkerState."""
+        try:
+            async with get_async_session() as session:
+                account = (
+                    await session.execute(
+                        select(Account).where(Account.account_id == self.account_id).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if account is None:
+                    return
+                row = (
+                    await session.execute(
+                        select(WorkerStatus).where(WorkerStatus.account_id == account.id).limit(1)
+                    )
+                ).scalar_one_or_none()
+                # AccountWorker persists STARTING before transport start, so a missing
+                # row means there is no canonical lifecycle row to annotate yet.
+                if row is None:
+                    return
+                if state is ConnectionState.DISCONNECTED and row.risk_recovery_required:
+                    await session.commit()
+                    return
+                if state is ConnectionState.CONNECTED:
+                    row.reconnect_attempts = self._reconnect_attempts
+                    row.last_heartbeat_at = datetime.now(UTC)
+                    row.started_at = row.started_at or datetime.now(UTC)
+                    row.last_error = None
+                if detail and state in {ConnectionState.ERROR, ConnectionState.DISCONNECTED}:
+                    row.last_error = detail
+                await session.commit()
+        except Exception as exc:
+            logger.warning("worker transport diagnostics update failed: %s", exc)
+
+
 class AccountWorker:
     """Own one account's canonical lifecycle and business-event wiring."""
 
@@ -115,7 +158,7 @@ class AccountWorker:
         self._connection_lock: _WorkerConnectionLock | None = None
         if client is None:
             self._connection_lock = _WorkerConnectionLock(settings.account_lock_path(account_id))
-            self._client = WsClient(
+            self._client = _WorkerOwnedWsClient(
                 account_id,
                 on_event=self._on_event if persist_events else None,
                 on_auth_failure=self._on_auth_failure,
@@ -133,6 +176,7 @@ class AccountWorker:
         self._readiness_poll_s = max(0.001, readiness_poll_s)
         self._worker_state = WorkerState.DISABLED
         self._state_history: list[WorkerState] = [WorkerState.DISABLED]
+        self._state_transition_lock = asyncio.Lock()
         self._restored_state: WorkerState | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._readiness_task: asyncio.Task[None] | None = None
@@ -202,7 +246,7 @@ class AccountWorker:
                 await self._handle_transport_failure(event.detail)
         except InvalidWorkerStateTransition as exc:
             logger.exception("worker lifecycle transition rejected account=%s", self.account_id)
-            await self._persist_worker_state(self._worker_state, detail=str(exc))
+            await self._persist_current_worker_state(detail=str(exc))
         finally:
             if self._previous_state_handler is not None:
                 with suppress(Exception):
@@ -367,7 +411,10 @@ class AccountWorker:
         try:
             restored = await self._load_persisted_worker_state()
             self._restored_state = restored
-            await self._persist_worker_state(WorkerState.STARTING)
+            async with self._state_transition_lock:
+                if self._worker_state is not WorkerState.STARTING:
+                    return
+                await self._persist_worker_state(WorkerState.STARTING)
             if restored is WorkerState.NEEDS_VALIDATION:
                 await self._set_worker_state(WorkerState.NEEDS_VALIDATION)
                 return
@@ -451,7 +498,7 @@ class AccountWorker:
         """Converge to a RecoverySupervisor target without skipping the state graph."""
         target = decision.worker_state
         if target is self._worker_state:
-            await self._persist_worker_state(target, detail=decision.code)
+            await self._set_worker_state(target, detail=decision.code)
             return
         if target is WorkerState.RECONNECTING:
             await self._set_worker_state(target, detail=decision.code)
@@ -493,7 +540,7 @@ class AccountWorker:
         )
         decision = outcome.decision
         if decision.retry:
-            await self._persist_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
+            await self._set_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
             return False
         if decision.worker_state is not WorkerState.CHECKING_SESSION:
             await self._apply_recovery_decision(decision)
@@ -610,11 +657,16 @@ class AccountWorker:
         *,
         detail: str | None = None,
     ) -> None:
-        next_state = transition_worker_state(self._worker_state, target)
-        await self._persist_worker_state(next_state, detail=detail)
-        if next_state is not self._worker_state:
-            self._worker_state = next_state
-            self._state_history.append(next_state)
+        async with self._state_transition_lock:
+            next_state = transition_worker_state(self._worker_state, target)
+            await self._persist_worker_state(next_state, detail=detail)
+            if next_state is not self._worker_state:
+                self._worker_state = next_state
+                self._state_history.append(next_state)
+
+    async def _persist_current_worker_state(self, *, detail: str | None = None) -> None:
+        async with self._state_transition_lock:
+            await self._persist_worker_state(self._worker_state, detail=detail)
 
     async def _load_persisted_worker_state(self) -> WorkerState | None:
         """Normalize canonical or legacy status, using durable validation as authority."""
