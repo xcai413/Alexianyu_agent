@@ -244,23 +244,48 @@ class WsClient:
         self._inject_task = None
 
     async def stop(self) -> None:
-        """Request clean shutdown and wait for the task to exit."""
+        """Request clean shutdown within the configured stop deadline."""
         self._stop.set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, self.config.stop_timeout_s)
         if self._task is not None:
             if self._socket is not None:
                 with suppress(Exception):
                     await self._socket.close()
+            remaining = max(0.0, deadline - loop.time())
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(self._task), timeout=self.config.stop_timeout_s
-                )
+                await asyncio.wait_for(asyncio.shield(self._task), timeout=remaining)
             except TimeoutError:
                 self._task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self._task
             self._task = None
         await self._drain_injected()
-        await self._stop_dispatch_consumer(drain=True)
+
+        remaining = max(0.0, deadline - loop.time())
+        if self._deferred_business_frames and remaining > 0.0:
+            try:
+                await asyncio.wait_for(
+                    self._flush_deferred_business_frames(), timeout=remaining
+                )
+            except TimeoutError:
+                logger.warning(
+                    "ws deferred business drain timed out account=%s remaining=%d",
+                    self.account_id,
+                    len(self._deferred_business_frames),
+                )
+
+        remaining = max(0.0, deadline - loop.time())
+        if remaining > 0.0:
+            try:
+                await asyncio.wait_for(
+                    self._stop_dispatch_consumer(drain=True), timeout=remaining
+                )
+            except TimeoutError:
+                logger.warning("ws callback drain timed out account=%s", self.account_id)
+                await self._stop_dispatch_consumer(drain=False)
+        else:
+            await self._stop_dispatch_consumer(drain=False)
         await self._emit_state(ConnectionState.DISCONNECTED, "stop() called")
 
     def inject_frame(self, frame: WsFrame) -> None:
@@ -423,8 +448,10 @@ class WsClient:
                         return
                     self._raise_if_receive_owner_finished(receive_task)
                     self._outbound_ready = True
-                    self._start_deferred_sync_exchanges(ws, router)
                     await self._flush_deferred_business_frames()
+                    if self._stop.is_set():
+                        return
+                    self._start_deferred_sync_exchanges(ws, router)
                     self._reconnect_attempts = 0
                     await self._emit_state(ConnectionState.CONNECTED)
                     await self._serve(ws, receive_task)
@@ -671,7 +698,10 @@ class WsClient:
             try:
                 await callback()
             except asyncio.CancelledError:
-                raise
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                logger.warning("ws callback cancelled account=%s", self.account_id)
             except Exception as exc:
                 logger.warning("ws callback dispatch failed account=%s error=%s", self.account_id, exc)
             finally:
@@ -804,7 +834,9 @@ class WsClient:
 
     async def _flush_deferred_business_frames(self) -> None:
         while self._deferred_business_frames:
-            await self._queue_events(self._deferred_business_frames.popleft())
+            events = self._deferred_business_frames[0]
+            await self._queue_events(events)
+            self._deferred_business_frames.popleft()
         self._business_dispatch_ready = True
 
     async def _handle_frame(self, frame: WsFrame) -> None:
