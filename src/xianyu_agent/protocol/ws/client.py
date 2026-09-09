@@ -135,10 +135,14 @@ class WsClient:
         self._subscription_ready: ws_sync.SubscriptionReady | None = None
         self._outbound_ready = False
         self._business_dispatch_ready = True
+        self._business_session_ready = asyncio.Event()
+        self._business_session_ready.set()
         self._deferred_business_frames: deque[DeferredBusinessEvents] = deque()
         self._deferred_sync_frames: deque[WsFrame] = deque()
         self._dispatch_queue: asyncio.Queue[DispatchCallback] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
+        self._dispatch_inflight = False
+        self._dispatch_stop_when_drained = False
 
     @property
     def state(self) -> ConnectionState:
@@ -283,9 +287,9 @@ class WsClient:
                 )
             except TimeoutError:
                 logger.warning("ws callback drain timed out account=%s", self.account_id)
-                await self._stop_dispatch_consumer(drain=False)
+                self._request_dispatch_stop_when_drained()
         else:
-            await self._stop_dispatch_consumer(drain=False)
+            self._request_dispatch_stop_when_drained()
         await self._emit_state(ConnectionState.DISCONNECTED, "stop() called")
 
     def inject_frame(self, frame: WsFrame) -> None:
@@ -417,6 +421,7 @@ class WsClient:
         self._subscription_ready = None
         self._outbound_ready = False
         self._business_dispatch_ready = False
+        self._business_session_ready.clear()
         self._deferred_sync_frames.clear()
         await self._emit_state(ConnectionState.CONNECTING)
         credentials = await self.token_provider.get_credentials(self.account_id)
@@ -448,6 +453,7 @@ class WsClient:
                         return
                     self._raise_if_receive_owner_finished(receive_task)
                     self._outbound_ready = True
+                    self._business_session_ready.set()
                     await self._flush_deferred_business_frames()
                     if self._stop.is_set():
                         return
@@ -456,6 +462,9 @@ class WsClient:
                     await self._emit_state(ConnectionState.CONNECTED)
                     await self._serve(ws, receive_task)
                 finally:
+                    self._business_session_ready.clear()
+                    self._business_dispatch_ready = False
+                    self._outbound_ready = False
                     await self._cancel_protocol_tasks()
                     router.close()
                     if not receive_task.done():
@@ -469,6 +478,7 @@ class WsClient:
                         self._socket = None
         finally:
             self._deferred_sync_frames.clear()
+            self._business_session_ready.clear()
             self._business_dispatch_ready = False
             self._outbound_ready = False
             self._subscription_ready = None
@@ -663,12 +673,14 @@ class WsClient:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def _start_dispatch_consumer(self) -> None:
+        self._dispatch_stop_when_drained = False
         if self._dispatch_task is not None and not self._dispatch_task.done():
             return
         queue: asyncio.Queue[DispatchCallback] = asyncio.Queue(
             maxsize=MAX_CALLBACK_QUEUE_SIZE
         )
         self._dispatch_queue = queue
+        self._dispatch_inflight = False
         self._dispatch_task = asyncio.create_task(
             self._dispatch_loop(queue),
             name=f"ws-dispatch-{self.account_id}",
@@ -681,31 +693,67 @@ class WsClient:
             self._dispatch_queue = None
             self._dispatch_task = None
             return
-        try:
-            if drain and not task.done():
-                await queue.join()
-        finally:
-            if not task.done():
-                task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        if drain and not task.done():
+            await queue.join()
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        if self._dispatch_task is task:
+            self._dispatch_task = None
+        if self._dispatch_queue is queue:
+            self._dispatch_queue = None
+        self._dispatch_inflight = False
+
+    def _request_dispatch_stop_when_drained(self) -> None:
+        queue = self._dispatch_queue
+        task = self._dispatch_task
+        if queue is None or task is None:
             self._dispatch_queue = None
             self._dispatch_task = None
+            self._dispatch_inflight = False
+            return
+        self._dispatch_stop_when_drained = True
+        if task.done():
+            self._dispatch_task = None
+            if queue.empty():
+                self._dispatch_queue = None
+            self._dispatch_inflight = False
+            return
+        if queue.empty() and not self._dispatch_inflight:
+            task.cancel()
 
     async def _dispatch_loop(self, queue: asyncio.Queue[DispatchCallback]) -> None:
-        while True:
-            callback = await queue.get()
-            try:
-                await callback()
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise
-                logger.warning("ws callback cancelled account=%s", self.account_id)
-            except Exception as exc:
-                logger.warning("ws callback dispatch failed account=%s error=%s", self.account_id, exc)
-            finally:
-                queue.task_done()
+        current = asyncio.current_task()
+        try:
+            while True:
+                if self._dispatch_stop_when_drained and queue.empty():
+                    return
+                callback = await queue.get()
+                self._dispatch_inflight = True
+                try:
+                    await callback()
+                except asyncio.CancelledError:
+                    if current is not None and current.cancelling():
+                        raise
+                    logger.warning("ws callback cancelled account=%s", self.account_id)
+                except Exception as exc:
+                    logger.warning(
+                        "ws callback dispatch failed account=%s error=%s",
+                        self.account_id,
+                        exc,
+                    )
+                finally:
+                    self._dispatch_inflight = False
+                    queue.task_done()
+                if self._dispatch_stop_when_drained and queue.empty():
+                    return
+        finally:
+            self._dispatch_inflight = False
+            if self._dispatch_task is current:
+                self._dispatch_task = None
+            if self._dispatch_queue is queue and queue.empty():
+                self._dispatch_queue = None
 
     async def _queue_dispatch(self, callback: DispatchCallback) -> None:
         queue = self._dispatch_queue
@@ -728,9 +776,25 @@ class WsClient:
             return
 
         async def dispatch_events() -> None:
-            await self._dispatch_events(events)
+            await self._dispatch_events(events, require_session_ready=True)
 
         await self._queue_dispatch(dispatch_events)
+
+    async def _wait_for_business_session_or_stop(self) -> None:
+        if self._business_session_ready.is_set() or self._stop.is_set():
+            return
+        ready_waiter = asyncio.create_task(self._business_session_ready.wait())
+        stop_waiter = asyncio.create_task(self._stop.wait())
+        try:
+            await asyncio.wait(
+                {ready_waiter, stop_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for waiter in (ready_waiter, stop_waiter):
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(ready_waiter, stop_waiter, return_exceptions=True)
 
     async def _serve(self, ws: Any, receive_task: asyncio.Task[None]) -> None:
         heartbeat_task = asyncio.create_task(
@@ -820,9 +884,26 @@ class WsClient:
             with suppress(Exception):
                 await self.on_frame(frame)
 
-    async def _dispatch_events(self, events: tuple[EventEnvelope, ...]) -> None:
+    async def _dispatch_events(
+        self,
+        events: tuple[EventEnvelope, ...],
+        *,
+        require_session_ready: bool = False,
+    ) -> None:
         for event in events:
-            await self._emit_event(event)
+            if require_session_ready:
+                await self._wait_for_business_session_or_stop()
+            try:
+                await self._emit_event(event)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                logger.warning(
+                    "ws event callback cancelled account=%s event=%s",
+                    self.account_id,
+                    type(event).__name__,
+                )
 
     async def _handle_or_defer_business_frame(self, frame: WsFrame) -> None:
         await self._queue_frame_callback(frame)
