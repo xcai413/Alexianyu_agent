@@ -605,10 +605,7 @@ class WsClient:
 
                 frame = decoded.frame
                 await self._handle_or_defer_business_frame(frame)
-                reserve_sync = (
-                    ws_sync.requires_state_sync(frame)
-                    and not router.has_pending_frame(frame)
-                )
+                reserve_sync = ws_sync.requires_state_sync(frame)
                 sync_slot_owned = False
                 if reserve_sync:
                     await self._deferred_sync_slots.acquire()
