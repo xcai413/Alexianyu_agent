@@ -1,9 +1,9 @@
 """AccountWorker: canonical lifecycle owner for one account runtime.
 
 The worker owns the canonical :class:`WorkerState` lifecycle and composes the
-CredentialSupervisor, RecoverySupervisor, and WsClient public contracts.  The
+CredentialSupervisor, RecoverySupervisor, and WsClient public contracts. The
 WsClient remains transport/protocol-only: its ``CONNECTED`` state is never
-interpreted as business readiness.  ``ONLINE`` is reached only after the active
+interpreted as business readiness. ``ONLINE`` is reached only after the active
 connection exposes a canonical ``SubscriptionReady`` marker.
 """
 
@@ -40,11 +40,7 @@ from xianyu_agent.protocol import event_mapper
 from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.event_mapper import ProtocolDomainEvent
-from xianyu_agent.protocol.events import (
-    ConnectionState,
-    ConnectionStateChanged,
-    EventEnvelope,
-)
+from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged, EventEnvelope
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
@@ -119,13 +115,7 @@ class AccountWorker:
             )
 
     def _build_default_credentials(self) -> CredentialSupervisor[Any] | None:
-        """Build the production credential adapter from the WsClient public objects.
-
-        Injected test doubles are allowed to omit signer/token-provider attributes; in
-        that case tests must inject a CredentialSupervisor when exercising lifecycle
-        credential behavior.
-        """
-
+        """Adapt the WsClient credential primitives without reimplementing them."""
         signer = getattr(self._client, "signer", None)
         provider = getattr(self._client, "token_provider", None)
         if signer is None or provider is None:
@@ -134,8 +124,7 @@ class AccountWorker:
         return CredentialSupervisor(backend, LegacyValidationGate())
 
     async def _on_auth_failure(self, error: WsAuthError) -> bool:
-        """Recover explicit auth failures or fail closed on validation/terminal errors."""
-
+        """Recover auth failures or fail closed on validation/terminal errors."""
         if worker_risk.is_user_validate_error(error):
             await worker_risk.open_user_validate(self.account_id)
             decision = self._recovery.decide(RecoveryCause.NEEDS_VALIDATION)
@@ -146,43 +135,35 @@ class AccountWorker:
         if self._credentials is None:
             await self._set_worker_state(WorkerState.ERROR, detail="credential supervisor missing")
             return True
-
-        outcome = await self._recover_credentials(CredentialRecoveryRoute.REFRESH)
-        if outcome:
-            # WsClient owns the transport retry loop. Returning False allows it to
-            # reconnect using the newly refreshed credential material.
-            return False
-        return True
+        recovered = await self._recover_credentials(CredentialRecoveryRoute.REFRESH)
+        # WsClient owns transport retry. False lets it reconnect using refreshed material.
+        return not recovered
 
     async def _on_client_state(self, event: ConnectionStateChanged) -> None:
         """Project transport observations into the canonical worker lifecycle."""
-
         try:
             if event.state is ConnectionState.CONNECTING:
                 await self._advance_to_connecting()
             elif event.state is ConnectionState.CONNECTED:
                 await self._advance_transport_connected()
-            elif event.state in {
-                ConnectionState.RECONNECTING,
-                ConnectionState.ERROR,
+            elif event.state in {ConnectionState.RECONNECTING, ConnectionState.ERROR}:
+                await self._handle_transport_failure(event.detail)
+            elif event.state is ConnectionState.DISCONNECTED and self._worker_state not in {
+                WorkerState.DISABLED,
+                WorkerState.STOPPING,
+                WorkerState.NEEDS_VALIDATION,
+                WorkerState.ERROR,
             }:
                 await self._handle_transport_failure(event.detail)
-            elif event.state is ConnectionState.DISCONNECTED:
-                if self._worker_state not in {
-                    WorkerState.DISABLED,
-                    WorkerState.STOPPING,
-                    WorkerState.NEEDS_VALIDATION,
-                    WorkerState.ERROR,
-                }:
-                    await self._handle_transport_failure(event.detail)
         except InvalidWorkerStateTransition as exc:
-            # Fail closed: never mutate to an illegal state. WsClient suppresses callback
-            # exceptions, so record diagnostics and leave the canonical state unchanged.
-            logger.error("worker lifecycle rejected account=%s transition=%s", self.account_id, exc)
-            await self._persist_worker_state(
-                self._worker_state,
-                detail=str(exc),
+            # WsClient suppresses callback errors. Keep the canonical state unchanged
+            # and persist the rejected edge instead of manufacturing an illegal state.
+            logger.exception(
+                "worker lifecycle rejected account=%s transition=%s",
+                self.account_id,
+                exc,
             )
+            await self._persist_worker_state(self._worker_state, detail=str(exc))
         finally:
             if self._previous_state_handler is not None:
                 with suppress(Exception):
@@ -196,22 +177,17 @@ class AccountWorker:
             WorkerState.ERROR,
         }:
             return
-        decision = self._recovery.decide(
-            RecoveryCause.TRANSPORT_FAILURE,
-            code=detail,
-        )
+        decision = self._recovery.decide(RecoveryCause.TRANSPORT_FAILURE, code=detail)
         await self._apply_recovery_decision(decision)
 
     async def _advance_to_connecting(self) -> None:
-        if self._worker_state is WorkerState.ONLINE:
+        if self._worker_state in {
+            WorkerState.ONLINE,
+            WorkerState.SYNCING,
+            WorkerState.REGISTERING,
+        }:
             await self._set_worker_state(WorkerState.RECONNECTING)
-        if self._worker_state is WorkerState.SYNCING:
-            await self._set_worker_state(WorkerState.RECONNECTING)
-        if self._worker_state is WorkerState.REGISTERING:
-            await self._set_worker_state(WorkerState.RECONNECTING)
-        if self._worker_state is WorkerState.RECONNECTING:
-            await self._set_worker_state(WorkerState.CONNECTING)
-        elif self._worker_state is WorkerState.CHECKING_SESSION:
+        if self._worker_state in {WorkerState.RECONNECTING, WorkerState.CHECKING_SESSION}:
             await self._set_worker_state(WorkerState.CONNECTING)
         elif self._worker_state is WorkerState.REFRESHING_CREDENTIAL:
             await self._set_worker_state(WorkerState.CHECKING_SESSION)
@@ -219,11 +195,8 @@ class AccountWorker:
 
     async def _advance_transport_connected(self) -> None:
         """Transport CONNECTED proves registration path only; never ONLINE directly."""
-
         await self._cancel_readiness_monitor()
-        if self._worker_state is WorkerState.RECONNECTING:
-            await self._set_worker_state(WorkerState.CONNECTING)
-        if self._worker_state is WorkerState.CHECKING_SESSION:
+        if self._worker_state in {WorkerState.RECONNECTING, WorkerState.CHECKING_SESSION}:
             await self._set_worker_state(WorkerState.CONNECTING)
         if self._worker_state is WorkerState.CONNECTING:
             await self._set_worker_state(WorkerState.REGISTERING)
@@ -241,7 +214,6 @@ class AccountWorker:
 
     async def _watch_subscription_ready(self) -> None:
         """Promote SYNCING to ONLINE only for the active connection's ready marker."""
-
         try:
             while (
                 not self._stop_requested
@@ -255,7 +227,11 @@ class AccountWorker:
         except asyncio.CancelledError:
             raise
         except InvalidWorkerStateTransition as exc:
-            logger.error("worker readiness transition rejected account=%s: %s", self.account_id, exc)
+            logger.exception(
+                "worker readiness transition rejected account=%s: %s",
+                self.account_id,
+                exc,
+            )
 
     async def _on_event(self, event: EventEnvelope) -> None:
         """Map one protocol DTO, then route only canonical events downstream."""
@@ -286,10 +262,7 @@ class AccountWorker:
             domain_event,
             (domain_events.OrderCreated, domain_events.OrderPaid, domain_events.OrderDelivered),
         ):
-            await domain_orders.upsert_from_event(
-                domain_event,
-                raw_payload=raw_payload,
-            )
+            await domain_orders.upsert_from_event(domain_event, raw_payload=raw_payload)
             if isinstance(domain_event, domain_events.OrderPaid) and self._delivery_service is not None:
                 await self._delivery_service.deliver(domain_event)
         elif isinstance(domain_event, domain_events.SystemNotice):
@@ -324,7 +297,6 @@ class AccountWorker:
 
     def start(self) -> None:
         """Start the canonical lifecycle without bypassing credential/session checks."""
-
         if self._worker_state is WorkerState.NEEDS_VALIDATION:
             return
         if self._startup_task is not None and not self._startup_task.done():
@@ -342,9 +314,10 @@ class AccountWorker:
 
     async def _run_startup(self) -> None:
         try:
-            await self._persist_worker_state(WorkerState.STARTING)
+            # Read compatibility state before STARTING overwrites the lossy DB projection.
             restored = await self._load_persisted_worker_state()
             self._restored_state = restored
+            await self._persist_worker_state(WorkerState.STARTING)
             if restored is WorkerState.NEEDS_VALIDATION:
                 await self._set_worker_state(WorkerState.NEEDS_VALIDATION)
                 return
@@ -355,6 +328,8 @@ class AccountWorker:
                 if not ready:
                     return
             else:
+                # Compatibility for injected protocol-only test clients. Production
+                # WsClient always exposes signer/token_provider and gets a supervisor.
                 await self._set_worker_state(WorkerState.CONNECTING)
 
             if self._stop_requested:
@@ -374,7 +349,6 @@ class AccountWorker:
 
     async def _recover_credentials(self, route: CredentialRecoveryRoute) -> bool:
         """Execute a supervisor route until success or a fail-closed terminal decision."""
-
         attempt = 1
         while not self._stop_requested:
             outcome = await self._recovery.recover_credential(
@@ -387,22 +361,22 @@ class AccountWorker:
 
             if decision.retry:
                 await self._apply_recovery_decision(decision)
-                delay = decision.retry_delay_s or 0.0
-                await self._retry_sleep(delay)
+                await self._retry_sleep(decision.retry_delay_s or 0.0)
                 attempt += 1
                 continue
-
             if decision.worker_state is WorkerState.NEEDS_VALIDATION:
                 await self._apply_recovery_decision(decision)
                 return False
             if decision.worker_state is WorkerState.ERROR:
                 await self._apply_recovery_decision(decision)
                 return False
-
-            if result is not None and result.refreshed:
-                if self._worker_state is WorkerState.CHECKING_SESSION:
-                    await self._set_worker_state(WorkerState.REFRESHING_CREDENTIAL)
-                    await self._set_worker_state(WorkerState.CHECKING_SESSION)
+            if (
+                result is not None
+                and result.refreshed
+                and self._worker_state is WorkerState.CHECKING_SESSION
+            ):
+                await self._set_worker_state(WorkerState.REFRESHING_CREDENTIAL)
+                await self._set_worker_state(WorkerState.CHECKING_SESSION)
             await self._apply_recovery_decision(decision)
             return True
         return False
@@ -415,15 +389,14 @@ class AccountWorker:
             WorkerState.ONLINE,
         }:
             await self._set_worker_state(WorkerState.RECONNECTING)
-        if target is WorkerState.REFRESHING_CREDENTIAL:
-            if self._worker_state is WorkerState.RECONNECTING:
-                await self._set_worker_state(WorkerState.REFRESHING_CREDENTIAL)
-            elif self._worker_state is WorkerState.CHECKING_SESSION:
-                await self._set_worker_state(WorkerState.REFRESHING_CREDENTIAL)
+        if target is WorkerState.REFRESHING_CREDENTIAL and self._worker_state in {
+            WorkerState.RECONNECTING,
+            WorkerState.CHECKING_SESSION,
+        }:
+            await self._set_worker_state(WorkerState.REFRESHING_CREDENTIAL)
 
     async def _apply_recovery_decision(self, decision: RecoveryDecision) -> None:
         """Converge to a RecoverySupervisor target without skipping the state graph."""
-
         target = decision.worker_state
         if target is self._worker_state:
             await self._persist_worker_state(target, detail=decision.code)
@@ -440,9 +413,10 @@ class AccountWorker:
                 WorkerState.ONLINE,
             }:
                 await self._set_worker_state(WorkerState.RECONNECTING)
-            if self._worker_state is WorkerState.REFRESHING_CREDENTIAL:
-                await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
-            elif self._worker_state is WorkerState.RECONNECTING:
+            if self._worker_state in {
+                WorkerState.REFRESHING_CREDENTIAL,
+                WorkerState.RECONNECTING,
+            }:
                 await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
             return
         if target is WorkerState.REFRESHING_CREDENTIAL:
@@ -459,10 +433,7 @@ class AccountWorker:
 
     async def recover_validation(self) -> bool:
         """Explicit operator-triggered validation recovery; never called automatically."""
-
-        if self._worker_state is not WorkerState.NEEDS_VALIDATION:
-            return False
-        if self._credentials is None:
+        if self._worker_state is not WorkerState.NEEDS_VALIDATION or self._credentials is None:
             return False
         outcome = await self._recovery.recover_credential(
             self.account_id,
@@ -470,8 +441,7 @@ class AccountWorker:
         )
         decision = outcome.decision
         if decision.retry:
-            # A manual validation action executes one attempt only. A retryable result
-            # remains behind the validation gate and requires another explicit action.
+            # Manual validation recovery is one attempt per explicit operator action.
             await self._persist_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
             return False
         if decision.worker_state is not WorkerState.CHECKING_SESSION:
@@ -530,7 +500,6 @@ class AccountWorker:
 
     async def _load_persisted_worker_state(self) -> WorkerState | None:
         """Normalize the legacy status row, using durable validation as authority."""
-
         try:
             async with get_async_session() as session:
                 account = (
@@ -562,7 +531,6 @@ class AccountWorker:
         detail: str | None = None,
     ) -> None:
         """Persist the lossy worker_status compatibility projection."""
-
         try:
             async with get_async_session() as session:
                 account = (
@@ -600,25 +568,21 @@ class AccountWorker:
     @property
     def state(self) -> WorkerState:
         """Canonical AccountWorker runtime state."""
-
         return self._worker_state
 
     @property
     def connection_state(self) -> ConnectionState:
         """Legacy transport state for compatibility diagnostics."""
-
         return self._client.state
 
     @property
     def restored_state(self) -> WorkerState | None:
         """Normalized persisted state observed during the latest startup."""
-
         return self._restored_state
 
     @property
     def state_history(self) -> tuple[WorkerState, ...]:
         """In-process lifecycle history used for diagnostics and regression tests."""
-
         return tuple(self._state_history)
 
     @property
