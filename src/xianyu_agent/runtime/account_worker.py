@@ -379,11 +379,10 @@ class AccountWorker:
                 await fail_closed()
             else:
                 await self._client.stop()
-        except Exception as cleanup_error:
+        except Exception:
             logger.exception(
-                "worker lifecycle fail-closed cleanup failed account=%s error=%s",
+                "worker lifecycle fail-closed cleanup failed account=%s",
                 self.account_id,
-                cleanup_error,
             )
         finally:
             if self._connection_lock is not None:
@@ -741,10 +740,9 @@ class AccountWorker:
                 pass
             except Exception as exc:
                 self._lifecycle_error = exc
-                logger.error(
-                    "worker startup failed while stopping account=%s error=%s",
+                logger.exception(
+                    "worker startup failed while stopping account=%s",
                     self.account_id,
-                    exc,
                 )
         finally:
             if self._startup_task is task:
