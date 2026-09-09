@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +20,8 @@ from xianyu_agent.domain.runtime.worker_state import WorkerState, transition_wor
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged
 from xianyu_agent.protocol.ws.sync import SubscriptionReady
+from xianyu_agent.runtime import account_pool as account_pool_mod
+from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.account_worker import AccountWorker
 from xianyu_agent.runtime.recovery import RecoverySupervisor
 
@@ -36,6 +39,9 @@ class FakeClient:
         self.on_state: Callable[[ConnectionStateChanged], Awaitable[None]] | None = None
         self.on_auth_failure = None
         self.on_event = None
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.live_business = True
 
     async def emit(self, state: ConnectionState, detail: str | None = None) -> None:
         self.state = state
@@ -52,13 +58,25 @@ class FakeClient:
         )
 
     def start(self) -> None:
+        self.start_calls += 1
         raise AssertionError("focused serialization tests must not start a real transport")
 
     async def stop(self) -> None:
-        return None
+        self.stop_calls += 1
+        self.live_business = False
+        self.state = ConnectionState.DISCONNECTED
 
     async def send_text(self, _text: str) -> bool:
         return False
+
+
+class StartableFakeClient(FakeClient):
+    """Lifecycle transport double that records successful physical starts/stops."""
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self.live_business = True
+        self.state = ConnectionState.CONNECTING
 
 
 class UnusedCredentials:
@@ -362,3 +380,196 @@ async def test_worker_owned_state_callback_failure_propagates_and_stops_transpor
     assert worker.state is WorkerState.ONLINE
     assert worker.state_history == history_before
     assert await persisted_status(account_id) == "online"
+
+
+@pytest.mark.asyncio
+async def test_account_pool_removes_failed_startup_and_reconcile_retries(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "pool-startup-retry"
+    await domain_accounts.create_account(account_id, enabled=True)
+
+    async def desired_accounts():
+        return [SimpleNamespace(account_id=account_id)]
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    clients: list[StartableFakeClient] = []
+
+    def build_worker(worker_account_id: str) -> AccountWorker:
+        client = StartableFakeClient(worker_account_id)
+        clients.append(client)
+        return AccountWorker(
+            worker_account_id,
+            client=client,  # type: ignore[arg-type]
+            persist_events=False,
+            automation_mode="passive",
+        )
+
+    original_persist = AccountWorker._persist_worker_state
+    fail_first_starting = True
+
+    async def fail_once_on_starting(
+        worker: AccountWorker,
+        state: WorkerState,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        nonlocal fail_first_starting
+        if state is WorkerState.STARTING and fail_first_starting:
+            fail_first_starting = False
+            raise RuntimeError("forced pooled STARTING commit failure")
+        await original_persist(worker, state, detail=detail)
+
+    monkeypatch.setattr(AccountWorker, "_persist_worker_state", fail_once_on_starting)
+
+    pool = AccountPool(worker_factory=build_worker)
+    first = await pool.reconcile_desired_accounts()
+
+    assert first["started"] == []
+    assert pool.has(account_id) is False
+    assert len(clients) == 1
+    assert clients[0].start_calls == 0
+
+    second = await pool.reconcile_desired_accounts()
+
+    assert second["started"] == [account_id]
+    assert pool.has(account_id) is True
+    assert len(clients) == 2
+    assert clients[1].start_calls == 1
+
+    assert await pool.stop(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_queued_startup_before_event_loop_yield(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "queued-start-stop"
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+    physical_starts = 0
+
+    def record_start() -> None:
+        nonlocal physical_starts
+        physical_starts += 1
+
+    monkeypatch.setattr(worker._client, "start", record_start)
+
+    startup = worker.start()
+    assert startup is not None
+    assert startup.done() is False
+
+    await worker.stop()
+    await asyncio.sleep(0)
+
+    assert physical_starts == 0
+    assert worker.state is WorkerState.DISABLED
+    assert worker.state_history == (WorkerState.DISABLED,)
+    assert worker._startup_task is None
+    assert worker._connection_lock is not None
+    assert worker._connection_lock._held_by_worker is False
+    assert worker._client._task is None
+
+
+@pytest.mark.asyncio
+async def test_readiness_online_persistence_failure_fails_closed_transport(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "readiness-online-failure"
+    await domain_accounts.create_account(account_id, enabled=True)
+    client = StartableFakeClient(account_id)
+    worker = AccountWorker(
+        account_id,
+        client=client,  # type: ignore[arg-type]
+        readiness_poll_s=0.001,
+        persist_events=False,
+        automation_mode="passive",
+    )
+
+    await advance_to_connecting(worker)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    client.state = ConnectionState.CONNECTED
+    history_before = worker.state_history
+    assert await persisted_status(account_id) == "syncing"
+
+    original_persist = worker._persist_worker_state
+
+    async def fail_online(state: WorkerState, *, detail: str | None = None) -> None:
+        if state is WorkerState.ONLINE:
+            raise RuntimeError("forced ONLINE commit failure")
+        await original_persist(state, detail=detail)
+
+    monkeypatch.setattr(worker, "_persist_worker_state", fail_online)
+
+    await worker._advance_transport_connected()
+    assert worker._readiness_task is not None
+    client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 99})
+
+    await wait_until(lambda: worker.lifecycle_error is not None)
+    await asyncio.sleep(0)
+
+    assert isinstance(worker.lifecycle_error, RuntimeError)
+    assert str(worker.lifecycle_error) == "forced ONLINE commit failure"
+    assert worker.state is WorkerState.SYNCING
+    assert worker.state_history == history_before
+    assert await persisted_status(account_id) == "syncing"
+    assert worker._stop_requested is True
+    assert client.stop_calls == 1
+    assert client.live_business is False
+    assert worker._readiness_task is None
+
+
+@pytest.mark.asyncio
+async def test_stopping_persistence_failure_still_closes_transport_and_releases_lock(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "stopping-commit-failure"
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+
+    await advance_to_connecting(worker)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    await worker._set_worker_state(WorkerState.ONLINE)
+    worker.started_at = NOW
+    assert worker._connection_lock is not None
+    worker._connection_lock.acquire(owner_id="test-stop-cleanup")
+    history_before = worker.state_history
+    physical_stops = 0
+
+    async def record_stop() -> None:
+        nonlocal physical_stops
+        physical_stops += 1
+
+    monkeypatch.setattr(worker._client, "stop", record_stop)
+    original_persist = worker._persist_worker_state
+
+    async def fail_stopping(state: WorkerState, *, detail: str | None = None) -> None:
+        if state is WorkerState.STOPPING:
+            raise RuntimeError("forced STOPPING commit failure")
+        await original_persist(state, detail=detail)
+
+    monkeypatch.setattr(worker, "_persist_worker_state", fail_stopping)
+
+    with pytest.raises(RuntimeError, match="forced STOPPING commit failure"):
+        await worker.stop()
+
+    assert physical_stops == 1
+    assert worker._connection_lock._held_by_worker is False
+    assert worker.state is WorkerState.ONLINE
+    assert worker.state_history == history_before
+    assert WorkerState.STOPPING not in worker.state_history
+    assert await persisted_status(account_id) == "online"
+    assert worker.started_at is None
+    assert worker._startup_task is None
+    assert worker._readiness_task is None
