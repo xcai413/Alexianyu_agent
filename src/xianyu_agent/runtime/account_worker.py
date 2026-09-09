@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -48,6 +50,7 @@ from xianyu_agent.protocol.events import (
 )
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.ws_auth import WsAuthError
+from xianyu_agent.runtime.account_lock import AccountConnectionLock
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
     RecoveryCause,
@@ -60,6 +63,28 @@ from xianyu_agent.services.reply_engine import ReplyEngine
 
 logger = logging.getLogger(__name__)
 RetrySleep = Callable[[float], Awaitable[None]]
+
+
+class _WorkerConnectionLock(AccountConnectionLock):
+    """One lock reservation shared by AccountWorker startup and WsClient lifetime."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self._held_by_worker = False
+
+    def acquire(self, *, owner_id: str) -> None:
+        if self._held_by_worker:
+            return
+        super().acquire(owner_id=owner_id)
+        self._held_by_worker = True
+
+    def release(self) -> None:
+        if not self._held_by_worker:
+            return
+        try:
+            super().release()
+        finally:
+            self._held_by_worker = False
 
 
 class AccountWorker:
@@ -85,12 +110,19 @@ class AccountWorker:
         self._reply_engine = reply_engine
         self._delivery_service = delivery_service
         self._guardrails = guardrails
-        self._automation_mode = automation_mode or get_settings().automation_mode
-        self._client = client or WsClient(
-            account_id,
-            on_event=self._on_event if persist_events else None,
-            on_auth_failure=self._on_auth_failure,
-        )
+        settings = get_settings()
+        self._automation_mode = automation_mode or settings.automation_mode
+        self._connection_lock: _WorkerConnectionLock | None = None
+        if client is None:
+            self._connection_lock = _WorkerConnectionLock(settings.account_lock_path(account_id))
+            self._client = WsClient(
+                account_id,
+                on_event=self._on_event if persist_events else None,
+                on_auth_failure=self._on_auth_failure,
+                account_lock=self._connection_lock,
+            )
+        else:
+            self._client = client
         self._previous_state_handler = getattr(self._client, "on_state", None)
         self._client.on_state = self._on_client_state
         self._client.on_auth_failure = self._on_auth_failure
@@ -104,7 +136,8 @@ class AccountWorker:
         self._restored_state: WorkerState | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._readiness_task: asyncio.Task[None] | None = None
-        self._injected_tasks: set[asyncio.Task[None]] = set()
+        self._injected_queue: asyncio.Queue[WsFrame] | None = None
+        self._injected_task: asyncio.Task[None] | None = None
         self._stop_requested = False
 
         if self._guardrails is None and self._automation_mode == "active":
@@ -305,16 +338,32 @@ class AccountWorker:
             return
         if self._worker_state not in {WorkerState.DISABLED, WorkerState.ERROR}:
             return
-        self._worker_state = transition_worker_state(self._worker_state, WorkerState.STARTING)
-        self._state_history.append(self._worker_state)
-        self.started_at = datetime.now(UTC)
-        self._stop_requested = False
-        self._startup_task = asyncio.create_task(
-            self._run_startup(),
-            name=f"worker-startup-{self.account_id}",
-        )
+
+        previous_state = self._worker_state
+        if self._connection_lock is not None:
+            self._connection_lock.acquire(
+                owner_id=f"worker:{self.account_id}:{uuid.uuid4().hex}"
+            )
+        try:
+            self._worker_state = transition_worker_state(self._worker_state, WorkerState.STARTING)
+            self._state_history.append(self._worker_state)
+            self.started_at = datetime.now(UTC)
+            self._stop_requested = False
+            self._startup_task = asyncio.create_task(
+                self._run_startup(),
+                name=f"worker-startup-{self.account_id}",
+            )
+        except Exception:
+            self._worker_state = previous_state
+            if self._state_history[-1] is WorkerState.STARTING:
+                self._state_history.pop()
+            self.started_at = None
+            if self._connection_lock is not None:
+                self._connection_lock.release()
+            raise
 
     async def _run_startup(self) -> None:
+        transport_started = False
         try:
             restored = await self._load_persisted_worker_state()
             self._restored_state = restored
@@ -334,6 +383,7 @@ class AccountWorker:
             if self._stop_requested:
                 return
             self._client.start()
+            transport_started = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -345,6 +395,9 @@ class AccountWorker:
             }:
                 with suppress(InvalidWorkerStateTransition):
                     await self._set_worker_state(WorkerState.ERROR, detail=str(exc))
+        finally:
+            if not transport_started and self._connection_lock is not None:
+                self._connection_lock.release()
 
     async def _recover_credentials(self, route: CredentialRecoveryRoute) -> bool:
         """Execute a supervisor route until success or a fail-closed terminal decision."""
@@ -445,21 +498,57 @@ class AccountWorker:
         if decision.worker_state is not WorkerState.CHECKING_SESSION:
             await self._apply_recovery_decision(decision)
             return False
-        await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
-        await self._set_worker_state(WorkerState.CONNECTING)
-        self._stop_requested = False
-        self.started_at = self.started_at or datetime.now(UTC)
-        self._client.start()
+
+        if self._connection_lock is not None:
+            self._connection_lock.acquire(
+                owner_id=f"worker-validation:{self.account_id}:{uuid.uuid4().hex}"
+            )
+        try:
+            await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
+            await self._set_worker_state(WorkerState.CONNECTING)
+            self._stop_requested = False
+            self.started_at = self.started_at or datetime.now(UTC)
+            self._client.start()
+        except Exception:
+            if self._connection_lock is not None:
+                self._connection_lock.release()
+            raise
         return True
 
     def inject_frame(self, frame: Any) -> None:
-        """Replay a synthetic frame without bypassing the real transport credential gate."""
-        task = asyncio.create_task(
-            self._dispatch_injected_frame(cast(WsFrame, frame)),
-            name=f"worker-inject-{self.account_id}",
-        )
-        self._injected_tasks.add(task)
-        task.add_done_callback(self._injected_tasks.discard)
+        """Replay synthetic frames serially without depending on live credential startup."""
+        if self._injected_queue is None:
+            self._injected_queue = asyncio.Queue()
+        self._injected_queue.put_nowait(cast(WsFrame, frame))
+        task = self._injected_task
+        if task is None or task.done():
+            self._injected_task = asyncio.create_task(
+                self._pump_injected_frames(),
+                name=f"worker-inject-{self.account_id}",
+            )
+
+    async def _pump_injected_frames(self) -> None:
+        current = asyncio.current_task()
+        try:
+            while True:
+                queue = self._injected_queue
+                if queue is None:
+                    return
+                try:
+                    frame = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await self._dispatch_injected_frame(frame)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("synthetic frame dispatch failed account=%s", self.account_id)
+                finally:
+                    queue.task_done()
+        finally:
+            if self._injected_task is current:
+                self._injected_task = None
 
     async def _dispatch_injected_frame(self, frame: WsFrame) -> None:
         for event in parse_frame(frame, self.account_id):
@@ -470,7 +559,9 @@ class AccountWorker:
 
     async def stop(self) -> None:
         if self._worker_state is WorkerState.DISABLED:
-            await self._drain_injected_tasks()
+            await self._drain_injected_frames()
+            if self._connection_lock is not None:
+                self._connection_lock.release()
             self.started_at = None
             return
         self._stop_requested = True
@@ -482,15 +573,20 @@ class AccountWorker:
             startup.cancel()
             with suppress(asyncio.CancelledError):
                 await startup
-        await self._drain_injected_tasks()
+        await self._drain_injected_frames()
         await self._client.stop()
+        if self._connection_lock is not None:
+            self._connection_lock.release()
         await self._set_worker_state(WorkerState.DISABLED)
         self.started_at = None
 
-    async def _drain_injected_tasks(self) -> None:
-        tasks = tuple(self._injected_tasks)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    async def _drain_injected_frames(self) -> None:
+        queue = self._injected_queue
+        if queue is not None:
+            await queue.join()
+        task = self._injected_task
+        if task is not None and task is not asyncio.current_task():
+            await task
 
     async def _cancel_readiness_monitor(self) -> None:
         task = self._readiness_task
