@@ -248,5 +248,5 @@ async def test_readiness_and_reconnect_persistence_are_serialized(
         WorkerState.ONLINE,
         WorkerState.RECONNECTING,
     )
-    for current, target in zip(worker.state_history, worker.state_history[1:]):
+    for current, target in zip(worker.state_history, worker.state_history[1:], strict=False):
         assert transition_worker_state(current, target) is target
