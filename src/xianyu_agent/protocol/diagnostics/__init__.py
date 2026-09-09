@@ -1,9 +1,6 @@
-"""Compatibility facade for canonical protocol diagnostics capture helpers.
+"""Canonical protocol diagnostics capture helpers."""
 
-New code should import from :mod:`xianyu_agent.protocol.diagnostics.capture`.
-"""
-
-from xianyu_agent.protocol.diagnostics.capture import (
+from .capture import (
     CalibrationRecorder,
     CaptureCounts,
     CaptureVerification,
