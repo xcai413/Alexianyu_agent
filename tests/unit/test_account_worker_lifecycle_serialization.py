@@ -573,3 +573,114 @@ async def test_stopping_persistence_failure_still_closes_transport_and_releases_
     assert worker.started_at is None
     assert worker._startup_task is None
     assert worker._readiness_task is None
+
+
+@pytest.mark.asyncio
+async def test_account_pool_removes_failure_after_starting_and_reconcile_retries(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "pool-post-starting-retry"
+    await domain_accounts.create_account(account_id, enabled=True)
+
+    async def desired_accounts():
+        return [SimpleNamespace(account_id=account_id)]
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    clients: list[StartableFakeClient] = []
+
+    def build_worker(worker_account_id: str) -> AccountWorker:
+        client = StartableFakeClient(worker_account_id)
+        clients.append(client)
+        return AccountWorker(
+            worker_account_id,
+            client=client,  # type: ignore[arg-type]
+            persist_events=False,
+            automation_mode="passive",
+        )
+
+    original_persist = AccountWorker._persist_worker_state
+    fail_first_checking = True
+
+    async def fail_once_after_starting(
+        worker: AccountWorker,
+        state: WorkerState,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        nonlocal fail_first_checking
+        if state is WorkerState.CHECKING_SESSION and fail_first_checking:
+            fail_first_checking = False
+            raise RuntimeError("forced post-STARTING startup failure")
+        await original_persist(worker, state, detail=detail)
+
+    monkeypatch.setattr(AccountWorker, "_persist_worker_state", fail_once_after_starting)
+
+    pool = AccountPool(worker_factory=build_worker)
+    first = await pool.reconcile_desired_accounts()
+
+    assert first["started"] == []
+    assert pool.has(account_id) is False
+    assert len(clients) == 1
+    assert clients[0].start_calls == 0
+    assert await persisted_status(account_id) == "error"
+
+    second = await pool.reconcile_desired_accounts()
+
+    assert second["started"] == [account_id]
+    assert pool.has(account_id) is True
+    assert len(clients) == 2
+    assert clients[1].start_calls == 1
+
+    assert await pool.stop(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_immediate_ready_online_persistence_failure_uses_worker_fail_closed_ownership(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "immediate-ready-online-failure"
+    await domain_accounts.create_account(account_id, enabled=True)
+    client = StartableFakeClient(account_id)
+    worker = AccountWorker(
+        account_id,
+        client=client,  # type: ignore[arg-type]
+        persist_events=False,
+        automation_mode="passive",
+    )
+
+    await advance_to_connecting(worker)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    client.state = ConnectionState.CONNECTED
+    client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 100})
+    history_before = worker.state_history
+    assert await persisted_status(account_id) == "syncing"
+
+    original_persist = worker._persist_worker_state
+
+    async def fail_online(state: WorkerState, *, detail: str | None = None) -> None:
+        if state is WorkerState.ONLINE:
+            raise RuntimeError("forced immediate ONLINE commit failure")
+        await original_persist(state, detail=detail)
+
+    monkeypatch.setattr(worker, "_persist_worker_state", fail_online)
+
+    with pytest.raises(RuntimeError, match="forced immediate ONLINE commit failure"):
+        await worker._advance_transport_connected()
+
+    assert isinstance(worker.lifecycle_error, RuntimeError)
+    assert str(worker.lifecycle_error) == "forced immediate ONLINE commit failure"
+    assert worker._stop_requested is True
+    assert worker.state is WorkerState.SYNCING
+    assert worker.state_history == history_before
+    assert await persisted_status(account_id) == "syncing"
+    assert client.stop_calls == 1
+    assert client.live_business is False
+    assert worker._readiness_task is None
