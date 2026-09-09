@@ -40,7 +40,13 @@ from xianyu_agent.protocol import event_mapper
 from xianyu_agent.protocol.capture import redact_structure
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.event_mapper import ProtocolDomainEvent
-from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged, EventEnvelope
+from xianyu_agent.protocol.events import (
+    ConnectionState,
+    ConnectionStateChanged,
+    EventEnvelope,
+    WsFrame,
+)
+from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
@@ -98,6 +104,7 @@ class AccountWorker:
         self._restored_state: WorkerState | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._readiness_task: asyncio.Task[None] | None = None
+        self._injected_tasks: set[asyncio.Task[None]] = set()
         self._stop_requested = False
 
         if self._guardrails is None and self._automation_mode == "active":
@@ -161,8 +168,6 @@ class AccountWorker:
             ):
                 await self._handle_transport_failure(event.detail)
         except InvalidWorkerStateTransition as exc:
-            # WsClient suppresses callback errors. Keep the canonical state unchanged
-            # and persist the rejected edge instead of manufacturing an illegal state.
             logger.exception("worker lifecycle transition rejected account=%s", self.account_id)
             await self._persist_worker_state(self._worker_state, detail=str(exc))
         finally:
@@ -311,7 +316,6 @@ class AccountWorker:
 
     async def _run_startup(self) -> None:
         try:
-            # Read compatibility state before STARTING overwrites the lossy DB projection.
             restored = await self._load_persisted_worker_state()
             self._restored_state = restored
             await self._persist_worker_state(WorkerState.STARTING)
@@ -325,8 +329,6 @@ class AccountWorker:
                 if not ready:
                     return
             else:
-                # Compatibility for injected protocol-only test clients. Production
-                # WsClient always exposes signer/token_provider and gets a supervisor.
                 await self._set_worker_state(WorkerState.CONNECTING)
 
             if self._stop_requested:
@@ -438,7 +440,6 @@ class AccountWorker:
         )
         decision = outcome.decision
         if decision.retry:
-            # Manual validation recovery is one attempt per explicit operator action.
             await self._persist_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
             return False
         if decision.worker_state is not WorkerState.CHECKING_SESSION:
@@ -452,13 +453,24 @@ class AccountWorker:
         return True
 
     def inject_frame(self, frame: Any) -> None:
-        self._client.inject_frame(frame)
+        """Replay a synthetic frame without bypassing the real transport credential gate."""
+        task = asyncio.create_task(
+            self._dispatch_injected_frame(cast(WsFrame, frame)),
+            name=f"worker-inject-{self.account_id}",
+        )
+        self._injected_tasks.add(task)
+        task.add_done_callback(self._injected_tasks.discard)
+
+    async def _dispatch_injected_frame(self, frame: WsFrame) -> None:
+        for event in parse_frame(frame, self.account_id):
+            await self._on_event(event)
 
     async def send_text(self, text: str) -> bool:
         return await self._client.send_text(text)
 
     async def stop(self) -> None:
         if self._worker_state is WorkerState.DISABLED:
+            await self._drain_injected_tasks()
             self.started_at = None
             return
         self._stop_requested = True
@@ -470,9 +482,15 @@ class AccountWorker:
             startup.cancel()
             with suppress(asyncio.CancelledError):
                 await startup
+        await self._drain_injected_tasks()
         await self._client.stop()
         await self._set_worker_state(WorkerState.DISABLED)
         self.started_at = None
+
+    async def _drain_injected_tasks(self) -> None:
+        tasks = tuple(self._injected_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _cancel_readiness_monitor(self) -> None:
         task = self._readiness_task
@@ -490,10 +508,10 @@ class AccountWorker:
         detail: str | None = None,
     ) -> None:
         next_state = transition_worker_state(self._worker_state, target)
+        await self._persist_worker_state(next_state, detail=detail)
         if next_state is not self._worker_state:
             self._worker_state = next_state
             self._state_history.append(next_state)
-        await self._persist_worker_state(next_state, detail=detail)
 
     async def _load_persisted_worker_state(self) -> WorkerState | None:
         """Normalize the legacy status row, using durable validation as authority."""
