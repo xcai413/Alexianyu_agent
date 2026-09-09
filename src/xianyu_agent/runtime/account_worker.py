@@ -734,6 +734,7 @@ class AccountWorker:
                 await session.commit()
         except Exception as exc:
             logger.warning("worker state persistence failed account=%s: %s", self.account_id, exc)
+            raise
 
     @property
     def state(self) -> WorkerState:
