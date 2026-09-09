@@ -47,6 +47,7 @@ async def upsert_from_event(
 
     Idempotent on ``(account_id, order_id)``. ``raw_payload`` is separately-redacted
     persistence metadata and is deliberately not part of the Domain Event contract.
+    Legacy protocol DTOs remain structurally accepted during consumer migration.
     """
     async with get_async_session() as session:
         account = (
@@ -82,16 +83,23 @@ async def upsert_from_event(
                 row.amount = float(getattr(event, "amount", 0.0) or 0.0)
             if getattr(event, "buyer_name", None):
                 row.buyer_name = event.buyer_name
-        if isinstance(event, OrderCreated):
+
+        # Legacy protocol DTOs intentionally share these stable class names. Keep
+        # structural runtime compatibility without importing protocol event types back
+        # into Domain while AccountWorker and other consumers migrate to canonical events.
+        event_type = type(event).__name__
+        if isinstance(event, OrderCreated) or event_type == "OrderCreated":
             row.status = OrderStatus.PENDING_PAYMENT.value
-        elif isinstance(event, OrderPaid):
+        elif isinstance(event, OrderPaid) or event_type == "OrderPaid":
             row.status = OrderStatus.PAID.value
-            row.paid_at = event.paid_at
-        elif isinstance(event, OrderDelivered) and row.delivery_content is not None:
+            row.paid_at = getattr(event, "paid_at", None)
+        elif (
+            isinstance(event, OrderDelivered) or event_type == "OrderDelivered"
+        ) and row.delivery_content is not None:
             # Only accept an upstream delivered-confirmation when we actually
             # delivered content; otherwise it could mask a send failure.
             row.status = OrderStatus.DELIVERED.value
-            row.delivered_at = event.delivered_at or row.delivered_at
+            row.delivered_at = getattr(event, "delivered_at", None) or row.delivered_at
         await session.commit()
         await session.refresh(row)
         return row.id
