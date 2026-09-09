@@ -146,23 +146,24 @@ class AccountWorker:
                 await self._advance_to_connecting()
             elif event.state is ConnectionState.CONNECTED:
                 await self._advance_transport_connected()
-            elif event.state in {ConnectionState.RECONNECTING, ConnectionState.ERROR}:
-                await self._handle_transport_failure(event.detail)
-            elif event.state is ConnectionState.DISCONNECTED and self._worker_state not in {
-                WorkerState.DISABLED,
-                WorkerState.STOPPING,
-                WorkerState.NEEDS_VALIDATION,
-                WorkerState.ERROR,
-            }:
+            elif (
+                event.state in {ConnectionState.RECONNECTING, ConnectionState.ERROR}
+                or (
+                    event.state is ConnectionState.DISCONNECTED
+                    and self._worker_state
+                    not in {
+                        WorkerState.DISABLED,
+                        WorkerState.STOPPING,
+                        WorkerState.NEEDS_VALIDATION,
+                        WorkerState.ERROR,
+                    }
+                )
+            ):
                 await self._handle_transport_failure(event.detail)
         except InvalidWorkerStateTransition as exc:
             # WsClient suppresses callback errors. Keep the canonical state unchanged
             # and persist the rejected edge instead of manufacturing an illegal state.
-            logger.exception(
-                "worker lifecycle rejected account=%s transition=%s",
-                self.account_id,
-                exc,
-            )
+            logger.exception("worker lifecycle transition rejected account=%s", self.account_id)
             await self._persist_worker_state(self._worker_state, detail=str(exc))
         finally:
             if self._previous_state_handler is not None:
@@ -226,12 +227,8 @@ class AccountWorker:
                 await asyncio.sleep(self._readiness_poll_s)
         except asyncio.CancelledError:
             raise
-        except InvalidWorkerStateTransition as exc:
-            logger.exception(
-                "worker readiness transition rejected account=%s: %s",
-                self.account_id,
-                exc,
-            )
+        except InvalidWorkerStateTransition:
+            logger.exception("worker readiness transition rejected account=%s", self.account_id)
 
     async def _on_event(self, event: EventEnvelope) -> None:
         """Map one protocol DTO, then route only canonical events downstream."""
