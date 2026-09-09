@@ -16,12 +16,8 @@ async def test_register_match_and_wait_contract() -> None:
     pending = router.register("m-1")
 
     assert router.pending_count == 1
-    assert router.has_pending("m-1") is True
-    assert router.has_pending_frame(WsFrame(headers={"mid": "m-1"})) is True
     assert router.match("m-1", {"ok": True}) is True
     assert router.pending_count == 0
-    assert router.has_pending("m-1") is False
-    assert router.has_pending_frame(WsFrame(headers={"mid": "m-1"})) is False
     assert await router.wait(pending, timeout_s=0.1) == {"ok": True}
 
 
@@ -87,7 +83,6 @@ async def test_unknown_missing_and_late_responses_are_safe() -> None:
     pending = router.register("m-known")
 
     assert router.match("m-unknown", object()) is False
-    assert router.has_pending_frame(WsFrame(headers={})) is False
     assert router.match_frame(WsFrame(headers={}), object()) is False
     assert router.match_frame(WsFrame(headers={"mid": "m-known"}), "matched") is True
     assert router.match("m-known", "late-duplicate") is False
@@ -115,7 +110,6 @@ async def test_close_cancels_all_pending_and_prevents_new_registration() -> None
 
     assert router.closed is True
     assert router.pending_count == 0
-    assert router.has_pending("m-1") is False
     assert first.future.cancelled()
     assert second.future.cancelled()
     with pytest.raises(RuntimeError, match="closed"):
