@@ -339,7 +339,7 @@ class AccountWorker:
         if task.cancelled():
             return
         error = task.exception()
-        if error is None:
+        if not isinstance(error, Exception):
             return
         self._lifecycle_error = error
         logger.error(
@@ -730,7 +730,7 @@ class AccountWorker:
             if task.done():
                 if not task.cancelled():
                     error = task.exception()
-                    if error is not None:
+                    if isinstance(error, Exception):
                         self._lifecycle_error = error
                 return
             task.cancel()
