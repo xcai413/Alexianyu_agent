@@ -484,7 +484,7 @@ class AccountWorker:
                 self._connection_lock.release()
             raise
 
-    async def _run_startup(self) -> None:
+    async def _run_startup(self) -> None:  # noqa: PLR0912
         transport_started = False
         starting_committed = False
         try:
