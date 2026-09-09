@@ -90,6 +90,29 @@ class _WorkerConnectionLock(AccountConnectionLock):
 class _WorkerOwnedWsClient(WsClient):
     """Transport client whose AccountWorker owner exclusively persists lifecycle status."""
 
+    async def _emit_state(self, new_state: ConnectionState, detail: str | None = None) -> None:
+        """Propagate canonical lifecycle callback failures instead of suppressing them."""
+        self._state = new_state
+        event = ConnectionStateChanged(
+            event_id=uuid.uuid4().hex,
+            account_id=self.account_id,
+            state=new_state,
+            detail=detail,
+            occurred_at=datetime.now(UTC),
+        )
+        await self._update_worker_status(state=new_state, detail=detail)
+        if self.on_state is None:
+            return
+        try:
+            await self.on_state(event)
+        except Exception:
+            # Standalone WsClient keeps its compatibility suppression. An
+            # AccountWorker-owned transport must stop and surface canonical
+            # persistence/lifecycle failures instead of silently reconnecting.
+            self._stop.set()
+            self._release_account_lock()
+            raise
+
     async def _update_worker_status(
         self,
         *,
@@ -374,33 +397,27 @@ class AccountWorker:
     async def _send_reply(self, _account_id: str, _chat_id: str, text: str) -> bool:
         return await self._client.send_text(text)
 
-    def start(self) -> None:
-        """Start the canonical lifecycle without bypassing credential/session checks."""
+    def start(self) -> asyncio.Task[None] | None:
+        """Schedule startup and return the task that owns its durable outcome."""
         if self._worker_state is WorkerState.NEEDS_VALIDATION:
-            return
+            return None
         if self._startup_task is not None and not self._startup_task.done():
-            return
+            return self._startup_task
         if self._worker_state not in {WorkerState.DISABLED, WorkerState.ERROR}:
-            return
+            return None
 
-        previous_state = self._worker_state
         if self._connection_lock is not None:
             self._connection_lock.acquire(
                 owner_id=f"worker:{self.account_id}:{uuid.uuid4().hex}"
             )
         try:
-            self._worker_state = transition_worker_state(self._worker_state, WorkerState.STARTING)
-            self._state_history.append(self._worker_state)
-            self.started_at = datetime.now(UTC)
             self._stop_requested = False
             self._startup_task = asyncio.create_task(
                 self._run_startup(),
                 name=f"worker-startup-{self.account_id}",
             )
+            return self._startup_task
         except Exception:
-            self._worker_state = previous_state
-            if self._state_history[-1] is WorkerState.STARTING:
-                self._state_history.pop()
             self.started_at = None
             if self._connection_lock is not None:
                 self._connection_lock.release()
@@ -408,13 +425,14 @@ class AccountWorker:
 
     async def _run_startup(self) -> None:
         transport_started = False
+        starting_committed = False
         try:
             restored = await self._load_persisted_worker_state()
             self._restored_state = restored
-            async with self._state_transition_lock:
-                if self._worker_state is not WorkerState.STARTING:
-                    return
-                await self._persist_worker_state(WorkerState.STARTING)
+            await self._set_worker_state(WorkerState.STARTING)
+            starting_committed = True
+            self.started_at = datetime.now(UTC)
+
             if restored is WorkerState.NEEDS_VALIDATION:
                 await self._set_worker_state(WorkerState.NEEDS_VALIDATION)
                 return
@@ -435,6 +453,9 @@ class AccountWorker:
             raise
         except Exception as exc:
             logger.exception("worker startup failed account=%s", self.account_id)
+            if not starting_committed:
+                self.started_at = None
+                raise
             if self._worker_state not in {
                 WorkerState.STOPPING,
                 WorkerState.DISABLED,
