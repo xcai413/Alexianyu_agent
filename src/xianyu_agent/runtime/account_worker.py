@@ -118,7 +118,8 @@ class _WorkerOwnedWsClient(WsClient):
             # Standalone WsClient keeps its compatibility suppression. An
             # AccountWorker-owned transport must stop and surface canonical
             # persistence/lifecycle failures instead of silently reconnecting.
-            await self.fail_closed_after_lifecycle_error()
+            if not self._stop.is_set():
+                await self.fail_closed_after_lifecycle_error()
             raise
 
     async def _update_worker_status(
@@ -323,7 +324,7 @@ class AccountWorker:
         if self._worker_state is not WorkerState.SYNCING:
             return
         if getattr(self._client, "subscription_ready", None) is not None:
-            await self._set_worker_state(WorkerState.ONLINE)
+            await self._promote_online_fail_closed()
             return
         task = asyncio.create_task(
             self._watch_subscription_ready(),
@@ -357,13 +358,20 @@ class AccountWorker:
                 and getattr(self._client, "state", None) is ConnectionState.CONNECTED
             ):
                 if getattr(self._client, "subscription_ready", None) is not None:
-                    await self._set_worker_state(WorkerState.ONLINE)
+                    await self._promote_online_fail_closed()
                     return
                 await asyncio.sleep(self._readiness_poll_s)
         except asyncio.CancelledError:
             raise
         except InvalidWorkerStateTransition:
             logger.exception("worker readiness transition rejected account=%s", self.account_id)
+
+    async def _promote_online_fail_closed(self) -> None:
+        """Commit ONLINE or fail closed under AccountWorker lifecycle ownership."""
+        try:
+            await self._set_worker_state(WorkerState.ONLINE)
+        except InvalidWorkerStateTransition:
+            raise
         except Exception as exc:
             await self._fail_closed_transport_after_lifecycle_error(exc)
             raise
@@ -514,8 +522,16 @@ class AccountWorker:
                 WorkerState.DISABLED,
                 WorkerState.NEEDS_VALIDATION,
             }:
-                with suppress(InvalidWorkerStateTransition):
+                try:
                     await self._set_worker_state(WorkerState.ERROR, detail=str(exc))
+                except InvalidWorkerStateTransition:
+                    pass
+                except Exception:
+                    logger.exception(
+                        "worker ERROR projection failed after startup error account=%s",
+                        self.account_id,
+                    )
+            raise
         finally:
             if not transport_started and self._connection_lock is not None:
                 self._connection_lock.release()
