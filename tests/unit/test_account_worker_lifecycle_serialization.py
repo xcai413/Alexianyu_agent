@@ -160,6 +160,55 @@ async def test_standalone_ws_client_keeps_legacy_connected_writer_compatibility(
 
 
 @pytest.mark.asyncio
+async def test_standalone_ws_client_still_suppresses_state_callback_failure(clean_db) -> None:
+    callback_called = asyncio.Event()
+
+    async def fail_state_callback(_event: ConnectionStateChanged) -> None:
+        callback_called.set()
+        raise RuntimeError("standalone callback failure")
+
+    client = WsClient("standalone-callback", on_state=fail_state_callback)
+    await client._emit_state(ConnectionState.RECONNECTING, "compat")
+
+    assert callback_called.is_set()
+    assert client.state is ConnectionState.RECONNECTING
+
+
+@pytest.mark.asyncio
+async def test_starting_commit_failure_is_atomic_and_visible_to_start_caller(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "starting-commit-failure"
+    account = await domain_accounts.create_account(account_id, enabled=True)
+    async with get_async_session() as session:
+        session.add(WorkerStatus(account_id=account.id, status="disabled"))
+        await session.commit()
+
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+    history_before = worker.state_history
+
+    async def fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("forced STARTING commit failure")
+
+    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+
+    startup = worker.start()
+    assert startup is not None
+    with pytest.raises(RuntimeError, match="forced STARTING commit failure"):
+        await startup
+
+    assert worker.state is WorkerState.DISABLED
+    assert worker.state_history == history_before
+    assert WorkerState.STARTING not in worker.state_history
+    assert worker.started_at is None
+    assert worker.is_running is False
+    assert await persisted_status(account_id) == "disabled"
+    assert worker._connection_lock is not None
+    assert worker._connection_lock._held_by_worker is False
+
+
+@pytest.mark.asyncio
 async def test_readiness_and_reconnect_persistence_are_serialized(
     clean_db,
     monkeypatch: pytest.MonkeyPatch,
@@ -278,6 +327,38 @@ async def test_persistence_failure_does_not_advance_memory_or_history(
     with pytest.raises(RuntimeError, match="forced worker-state commit failure"):
         await worker._set_worker_state(WorkerState.RECONNECTING, detail="network")
 
+    assert worker.state is WorkerState.ONLINE
+    assert worker.state_history == history_before
+    assert await persisted_status(account_id) == "online"
+
+
+@pytest.mark.asyncio
+async def test_worker_owned_state_callback_failure_propagates_and_stops_transport(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "owned-callback-failure"
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+
+    await advance_to_connecting(worker)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    await worker._set_worker_state(WorkerState.ONLINE)
+    assert worker.state is WorkerState.ONLINE
+    assert await persisted_status(account_id) == "online"
+    history_before = worker.state_history
+
+    async def fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("forced reconnect commit failure")
+
+    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+
+    with pytest.raises(RuntimeError, match="forced reconnect commit failure"):
+        await worker._client._emit_state(ConnectionState.RECONNECTING, "network")
+
+    assert worker._client.state is ConnectionState.RECONNECTING
+    assert worker._client._stop.is_set()
     assert worker.state is WorkerState.ONLINE
     assert worker.state_history == history_before
     assert await persisted_status(account_id) == "online"
