@@ -9,8 +9,7 @@ from typing import Any
 import pytest
 
 from xianyu_agent.protocol.events import EventEnvelope
-from xianyu_agent.protocol.ws import client as ws_client_module
-from xianyu_agent.protocol.ws import request_router
+from xianyu_agent.protocol.ws import client as ws_client_module, request_router
 
 
 class _NoopLock:
