@@ -838,6 +838,8 @@ async def test_registration_backlog_is_retained_when_receive_fails_before_ready(
     assert client._dispatch_queue is None
 
     client._start_dispatch_consumer()
+    # The retained callback is connection-gated; simulate the next session becoming ready.
+    client._business_session_ready.set()
     await client._flush_deferred_business_frames()
     assert client._dispatch_queue is not None
     await client._dispatch_queue.join()
