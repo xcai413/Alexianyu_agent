@@ -19,16 +19,18 @@ from xianyu_agent.application.session.health import (
     CredentialResultState,
 )
 from xianyu_agent.application.session.ports import CredentialFailureCode
-from xianyu_agent.config import reset_settings_cache
+from xianyu_agent.config import get_settings, reset_settings_cache
 from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.domain.runtime.worker_state import (
     InvalidWorkerStateTransition,
     WorkerState,
 )
-from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged
+from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged, WsFrame
 from xianyu_agent.protocol.ws.sync import SubscriptionReady
 from xianyu_agent.protocol.ws_auth import WsAuthError
+from xianyu_agent.runtime.account_lock import AccountConnectionLock
+from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.account_worker import AccountWorker
 from xianyu_agent.runtime.recovery import RecoverySupervisor
 
@@ -467,3 +469,92 @@ async def test_persisted_validation_gate_blocks_restart_before_credential_ensure
     assert worker.restored_state is WorkerState.NEEDS_VALIDATION
     assert credentials.ensure_calls == 0
     assert client.start_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_synthetic_injection_is_serial_and_preserves_injection_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker, _, _ = make_worker()
+    active = 0
+    max_active = 0
+    observed: list[str] = []
+
+    async def capture_dispatch(frame: WsFrame) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        observed.append(frame.packet_id)
+        active -= 1
+
+    monkeypatch.setattr(worker, "_dispatch_injected_frame", capture_dispatch)
+    frames = [
+        WsFrame(code=0, packet_id=f"p-{index}", headers={}, body={}, received_at=NOW)
+        for index in range(1, 4)
+    ]
+    for frame in frames:
+        worker.inject_frame(frame)
+    await worker._drain_injected_frames()
+
+    assert observed == ["p-1", "p-2", "p-3"]
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_synthetic_injection_remains_available_after_terminal_credential_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials = FakeCredentials("acc-1", ensure_results=[terminal("acc-1")])
+    worker, client, _ = make_worker(credentials=credentials)
+    observed: list[str] = []
+
+    async def capture_dispatch(frame: WsFrame) -> None:
+        observed.append(frame.packet_id)
+
+    monkeypatch.setattr(worker, "_dispatch_injected_frame", capture_dispatch)
+    worker.start()
+    await wait_until(lambda: worker.state is WorkerState.ERROR)
+    assert client.start_calls == 0
+
+    worker.inject_frame(WsFrame(code=0, packet_id="offline", headers={}, body={}, received_at=NOW))
+    await worker._drain_injected_frames()
+
+    assert observed == ["offline"]
+
+
+@pytest.mark.asyncio
+async def test_account_pool_removes_worker_when_connection_lock_is_already_held(clean_db) -> None:
+    account_id = "locked-account"
+    external_lock = AccountConnectionLock(get_settings().account_lock_path(account_id))
+    external_lock.acquire(owner_id="external-test-owner")
+    try:
+        worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+        pool = AccountPool()
+        pool._workers[account_id] = worker
+
+        assert pool.start_all() == []
+        assert pool.has(account_id) is False
+        assert worker.state is WorkerState.DISABLED
+        assert worker.started_at is None
+    finally:
+        external_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_worker_releases_reserved_lock_when_credential_gate_fails(clean_db) -> None:
+    account_id = "credential-failure"
+    credentials = FakeCredentials(account_id, ensure_results=[terminal(account_id)])
+    worker = AccountWorker(
+        account_id,
+        persist_events=False,
+        automation_mode="passive",
+        credential_supervisor=credentials,  # type: ignore[arg-type]
+        recovery_supervisor=RecoverySupervisor(credentials),
+    )
+    worker.start()
+    await wait_until(lambda: worker.state is WorkerState.ERROR)
+
+    probe = AccountConnectionLock(get_settings().account_lock_path(account_id))
+    probe.acquire(owner_id="probe-after-terminal")
+    probe.release()
