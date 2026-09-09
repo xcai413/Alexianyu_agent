@@ -12,7 +12,11 @@ from typing import Any
 from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
 
-from xianyu_agent.application.health.observability import RuntimeSnapshot, build_runtime_snapshot
+from xianyu_agent.application.health.observability import (
+    RuntimeSnapshot,
+    build_runtime_snapshot,
+    is_worker_healthy_online,
+)
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import (
     Account,
@@ -59,7 +63,11 @@ async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
         raise ValueError(msg)
     snapshot = await build_runtime_snapshot()
     observed = _account_from(snapshot, account_id)
-    if not snapshot.daemon_health.healthy or not observed.aligned or observed.actual_state != "connected":
+    if (
+        not snapshot.daemon_health.healthy
+        or not observed.aligned
+        or not is_worker_healthy_online(observed.actual_state)
+    ):
         msg = (
             f"启动条件不满足:daemon={snapshot.daemon_health.observed},"
             f"account={observed.actual_state},aligned={observed.aligned}"
@@ -245,7 +253,7 @@ def evidence_path(run_id: str) -> Path:
 def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str, Any]:
     healthy = (
         snapshot.daemon_health.healthy
-        and account.actual_state == "connected"
+        and is_worker_healthy_online(account.actual_state)
         and account.aligned
         and not account.last_error
         and not snapshot.operational_alerts
