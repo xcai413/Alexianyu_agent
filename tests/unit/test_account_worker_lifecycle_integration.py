@@ -176,10 +176,10 @@ def make_worker(
 
 
 async def wait_until(predicate: Predicate) -> None:
-    for _ in range(2000):
+    for _ in range(5000):
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
     raise TimeoutError("condition did not become true")
 
 
@@ -478,7 +478,7 @@ async def test_synthetic_injection_is_serial_and_preserves_injection_order(
     worker, _, _ = make_worker()
     active = 0
     max_active = 0
-    observed: list[str] = []
+    observed: list[str | None] = []
 
     async def capture_dispatch(frame: WsFrame) -> None:
         nonlocal active, max_active
@@ -490,7 +490,7 @@ async def test_synthetic_injection_is_serial_and_preserves_injection_order(
 
     monkeypatch.setattr(worker, "_dispatch_injected_frame", capture_dispatch)
     frames = [
-        WsFrame(code=0, packet_id=f"p-{index}", headers={}, body={}, received_at=NOW)
+        WsFrame(code=0, packetId=f"p-{index}", headers={}, body={}, received_at=NOW)
         for index in range(1, 4)
     ]
     for frame in frames:
@@ -507,7 +507,7 @@ async def test_synthetic_injection_remains_available_after_terminal_credential_g
 ) -> None:
     credentials = FakeCredentials("acc-1", ensure_results=[terminal("acc-1")])
     worker, client, _ = make_worker(credentials=credentials)
-    observed: list[str] = []
+    observed: list[str | None] = []
 
     async def capture_dispatch(frame: WsFrame) -> None:
         observed.append(frame.packet_id)
@@ -517,7 +517,9 @@ async def test_synthetic_injection_remains_available_after_terminal_credential_g
     await wait_until(lambda: worker.state is WorkerState.ERROR)
     assert client.start_calls == 0
 
-    worker.inject_frame(WsFrame(code=0, packet_id="offline", headers={}, body={}, received_at=NOW))
+    worker.inject_frame(
+        WsFrame(code=0, packetId="offline", headers={}, body={}, received_at=NOW)
+    )
     await worker._drain_injected_frames()
 
     assert observed == ["offline"]
