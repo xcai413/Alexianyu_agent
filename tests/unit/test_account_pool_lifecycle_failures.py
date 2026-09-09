@@ -74,17 +74,14 @@ async def persisted_status(account_id: str) -> str:
     return str(row.status)
 
 
-@pytest.mark.asyncio
-async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
-    clean_db,
+async def start_worker_with_owned_transport(
+    account_id: str,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    account_id = "post-start-transport-failure"
+) -> tuple[AccountPool, AccountWorker, asyncio.Event]:
     await domain_accounts.create_account(account_id, enabled=True)
     worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
     pool = AccountPool()
     pool._workers[account_id] = worker
-
     release_transport = asyncio.Event()
 
     async def transport_lifetime() -> None:
@@ -99,12 +96,10 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
 
     monkeypatch.setattr(worker._client, "start", start_owned_transport)
     worker._credentials = None
-
     startup = pool._start_observed(account_id, worker)
     assert startup is not None
     await startup
     await asyncio.sleep(0)
-
     assert pool.has(account_id) is True
     assert worker.state is WorkerState.CONNECTING
     assert worker._client._task is not None
@@ -114,33 +109,14 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
     await worker._set_worker_state(WorkerState.SYNCING)
     await worker._set_worker_state(WorkerState.ONLINE)
     assert await persisted_status(account_id) == "online"
-    history_before = worker.state_history
+    return pool, worker, release_transport
 
-    original_commit = AsyncSession.commit
 
-    async def fail_commit(_session: AsyncSession) -> None:
-        raise RuntimeError("forced post-start callback commit failure")
-
-    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
-    release_transport.set()
-
-    await wait_until(lambda: worker.lifecycle_error is not None and not pool.has(account_id))
-
-    transport_task = worker._client._task
-    assert transport_task is not None
-    with pytest.raises(RuntimeError, match="forced post-start callback commit failure"):
-        await transport_task
-
-    assert isinstance(worker.lifecycle_error, RuntimeError)
-    assert str(worker.lifecycle_error) == "forced post-start callback commit failure"
-    assert worker._stop_requested is True
-    assert worker._client._stop.is_set()
-    assert worker.state is WorkerState.ONLINE
-    assert worker.state_history == history_before
-    assert await persisted_status(account_id) == "online"
-
-    monkeypatch.setattr(AsyncSession, "commit", original_commit)
-
+async def assert_reconcile_retries_removed_worker(
+    pool: AccountPool,
+    account_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def desired_accounts():
         return [SimpleNamespace(account_id=account_id)]
 
@@ -163,12 +139,48 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
 
     pool._worker_factory = build_replacement
     result = await pool.reconcile_desired_accounts()
-
     assert result["started"] == [account_id]
     assert pool.has(account_id) is True
     assert len(replacements) == 1
     assert replacements[0].start_calls == 1
     assert await pool.stop(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "post-start-transport-failure"
+    pool, worker, release_transport = await start_worker_with_owned_transport(
+        account_id,
+        monkeypatch,
+    )
+    history_before = worker.state_history
+    original_commit = AsyncSession.commit
+
+    async def fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("forced post-start callback commit failure")
+
+    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+    release_transport.set()
+    await wait_until(lambda: worker.lifecycle_error is not None and not pool.has(account_id))
+
+    transport_task = worker._client._task
+    assert transport_task is not None
+    with pytest.raises(RuntimeError, match="forced post-start callback commit failure"):
+        await transport_task
+
+    assert isinstance(worker.lifecycle_error, RuntimeError)
+    assert str(worker.lifecycle_error) == "forced post-start callback commit failure"
+    assert worker._stop_requested is True
+    assert worker._client._stop.is_set()
+    assert worker.state is WorkerState.ONLINE
+    assert worker.state_history == history_before
+    assert await persisted_status(account_id) == "online"
+
+    monkeypatch.setattr(AsyncSession, "commit", original_commit)
+    await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
 
 
 @pytest.mark.asyncio
