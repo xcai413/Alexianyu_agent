@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.protocol.events import EventEnvelope
@@ -30,6 +31,8 @@ class AccountPool:
         self._workers: dict[str, AccountWorker] = {}
         self._worker_factory = worker_factory or AccountWorker
         self._startup_tasks: dict[str, asyncio.Task[None]] = {}
+        self._transport_tasks: dict[str, asyncio.Task[None]] = {}
+        self._lifecycle_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def from_enabled_accounts(
@@ -79,6 +82,7 @@ class AccountPool:
     ) -> None:
         """Own a scheduled startup outcome for synchronous pool entry points."""
         if task is None:
+            self._observe_transport_task(account_id, worker)
             return
         self._startup_tasks[account_id] = task
 
@@ -89,6 +93,7 @@ class AccountPool:
                 return
             error = completed.exception()
             if error is None:
+                self._observe_transport_task(account_id, worker)
                 return
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
@@ -99,6 +104,56 @@ class AccountPool:
             )
 
         task.add_done_callback(_completed)
+
+    def _observe_transport_task(self, account_id: str, worker: AccountWorker) -> None:
+        """Own the worker transport task after startup so callback faults retire the worker."""
+        task = cast(
+            asyncio.Task[None] | None,
+            getattr(getattr(worker, "_client", None), "_task", None),
+        )
+        if task is None or self._transport_tasks.get(account_id) is task:
+            return
+        self._transport_tasks[account_id] = task
+
+        def _completed(completed: asyncio.Task[None]) -> None:
+            if self._transport_tasks.get(account_id) is completed:
+                self._transport_tasks.pop(account_id, None)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if not isinstance(error, Exception):
+                return
+            cleanup = asyncio.create_task(
+                self._retire_failed_transport(account_id, worker, error),
+                name=f"worker-lifecycle-failure-{account_id}",
+            )
+            self._lifecycle_cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(self._lifecycle_cleanup_tasks.discard)
+
+        task.add_done_callback(_completed)
+
+    async def _retire_failed_transport(
+        self,
+        account_id: str,
+        worker: AccountWorker,
+        error: Exception,
+    ) -> None:
+        """Route transport-task failure through AccountWorker fail-closed ownership."""
+        try:
+            await worker._fail_closed_transport_after_lifecycle_error(error)
+        except Exception:
+            logger.exception(
+                "account worker lifecycle fail-closed cleanup failed account=%s",
+                account_id,
+            )
+        finally:
+            if self._workers.get(account_id) is worker:
+                self._workers.pop(account_id, None)
+            logger.error(
+                "account worker transport lifecycle failed account=%s error=%s",
+                account_id,
+                error,
+            )
 
     def _start_observed(
         self,
@@ -148,7 +203,7 @@ class AccountPool:
         return True
 
     async def stop_all(self) -> None:
-        for worker in self._workers.values():
+        for worker in list(self._workers.values()):
             await worker.stop()
 
     async def reconcile_desired_accounts(self) -> dict[str, list[str]]:
@@ -178,6 +233,7 @@ class AccountPool:
                     self._workers.pop(account_id, None)
                 logger.exception("account worker startup failed account=%s", account_id)
             else:
+                self._observe_transport_task(account_id, worker)
                 started.append(account_id)
         return {"started": started, "stopped": stopped}
 
@@ -223,6 +279,7 @@ class AccountPool:
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
             raise
+        self._observe_transport_task(account_id, worker)
         return "restarted"
 
     def restart(self, account_id: str) -> bool:
