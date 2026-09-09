@@ -551,8 +551,15 @@ class AccountWorker:
                 self._injected_task = None
 
     async def _dispatch_injected_frame(self, frame: WsFrame) -> None:
+        receiver = getattr(self._client, "on_event", None)
+        if receiver is None:
+            return
         for event in parse_frame(frame, self.account_id):
-            await self._on_event(event)
+            await receiver(event)
+
+    async def drain_injected_frames(self) -> None:
+        """Wait until all synthetic frames already queued for this worker are consumed."""
+        await self._drain_injected_frames()
 
     async def send_text(self, text: str) -> bool:
         return await self._client.send_text(text)
