@@ -10,9 +10,9 @@ from sqlalchemy import select, update
 
 from xianyu_agent.db import Account, Card, CardConsumption, Order, get_async_session
 from xianyu_agent.db.models import OrderStatus
+from xianyu_agent.domain.events import OrderPaid
 from xianyu_agent.domain.inventory import cards as domain_cards
 from xianyu_agent.domain.order import orders as domain_orders
-from xianyu_agent.protocol.events import OrderPaid
 from xianyu_agent.services.guardrails import Guardrails, write_guardrail_event
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ class DeliveryService:
                 fail_reason = "发送器返回失败"
         else:
             fail_reason = "未配置发送器(sender=None)"
-        await self._record_outcome(row.id, delivered=ok, code=code, fail_reason=fail_reason)
+        await self._record_outcome(order_id, delivered=ok, code=code, fail_reason=fail_reason)
         if ok:
             logger.info("retry delivered order=%s", row.order_id)
             return DeliveryResult(delivered=True, order_id=row.order_id, code=code)
