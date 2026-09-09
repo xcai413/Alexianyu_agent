@@ -75,54 +75,59 @@ class _OrdersBootstrapSigner:
 
 @pytest.mark.asyncio
 async def test_items_bootstrap_set_cookie_merge_survives_migration() -> None:
-    router = respx.mock(assert_all_called=True)
-    route = router.post(canonical_items.ITEM_LIST_URL).mock(
-        side_effect=[
-            httpx.Response(
-                200,
-                json={"ret": ["FAIL_SYS_TOKEN_EXPIRED::token"]},
-                headers={"Set-Cookie": "_m_h5_tk=seed_abc; Path=/"},
-            ),
-            httpx.Response(200, json={"ret": ["SUCCESS::调用成功"], "data": {"cardList": []}}),
-        ]
-    )
-    with router:
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(canonical_items.ITEM_LIST_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"ret": ["FAIL_SYS_TOKEN_EXPIRED::token"]},
+                    headers={"Set-Cookie": "_m_h5_tk=seed_abc; Path=/"},
+                ),
+                httpx.Response(
+                    200,
+                    json={"ret": ["SUCCESS::调用成功"], "data": {"cardList": []}},
+                ),
+            ]
+        )
         page = await canonical_items.XianyuItemsClient(
             _ItemsBootstrapSigner()
         ).fetch_on_sale_page("acc-items")
+        assert route.call_count == 2
 
-    assert route.call_count == 2
     assert page.items == []
     assert page.raw_card_count == 0
 
 
 @pytest.mark.asyncio
 async def test_orders_bootstrap_set_cookie_merge_survives_migration() -> None:
-    router = respx.mock(assert_all_called=True)
-    route = router.post(canonical_orders.SOLD_ORDERS_URL).mock(
-        side_effect=[
-            httpx.Response(
-                200,
-                json={"ret": ["FAIL_SYS_TOKEN_EXPIRED::token"]},
-                headers={"Set-Cookie": "_m_h5_tk=seed_abc; Path=/"},
-            ),
-            httpx.Response(
-                200,
-                json={
-                    "ret": ["SUCCESS::调用成功"],
-                    "data": {
-                        "module": {"items": [], "totalCount": "0", "nextPage": "false"}
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(canonical_orders.SOLD_ORDERS_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"ret": ["FAIL_SYS_TOKEN_EXPIRED::token"]},
+                    headers={"Set-Cookie": "_m_h5_tk=seed_abc; Path=/"},
+                ),
+                httpx.Response(
+                    200,
+                    json={
+                        "ret": ["SUCCESS::调用成功"],
+                        "data": {
+                            "module": {
+                                "items": [],
+                                "totalCount": "0",
+                                "nextPage": "false",
+                            }
+                        },
                     },
-                },
-            ),
-        ]
-    )
-    with router:
+                ),
+            ]
+        )
         page = await canonical_orders.XianyuOrdersClient(
             _OrdersBootstrapSigner(), page_delay_s=0
         ).fetch_sold_page("acc-orders")
+        assert route.call_count == 2
 
-    assert route.call_count == 2
     assert page.orders == []
     assert page.total_count == 0
     assert page.has_next_page is False
