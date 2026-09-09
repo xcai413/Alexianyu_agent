@@ -90,6 +90,15 @@ class _WorkerConnectionLock(AccountConnectionLock):
 class _WorkerOwnedWsClient(WsClient):
     """Transport client whose AccountWorker owner exclusively persists lifecycle status."""
 
+    async def fail_closed_after_lifecycle_error(self) -> None:
+        """Stop business capability without awaiting the client's own run task."""
+        self._stop.set()
+        self._set_business_session_ready(False)
+        if self._socket is not None:
+            with suppress(Exception):
+                await self._socket.close()
+        self._release_account_lock()
+
     async def _emit_state(self, new_state: ConnectionState, detail: str | None = None) -> None:
         """Propagate canonical lifecycle callback failures instead of suppressing them."""
         self._state = new_state
@@ -109,8 +118,7 @@ class _WorkerOwnedWsClient(WsClient):
             # Standalone WsClient keeps its compatibility suppression. An
             # AccountWorker-owned transport must stop and surface canonical
             # persistence/lifecycle failures instead of silently reconnecting.
-            self._stop.set()
-            self._release_account_lock()
+            await self.fail_closed_after_lifecycle_error()
             raise
 
     async def _update_worker_status(
@@ -179,6 +187,7 @@ class AccountWorker:
         settings = get_settings()
         self._automation_mode = automation_mode or settings.automation_mode
         self._connection_lock: _WorkerConnectionLock | None = None
+        self._client: WsClient
         if client is None:
             self._connection_lock = _WorkerConnectionLock(settings.account_lock_path(account_id))
             self._client = _WorkerOwnedWsClient(
@@ -206,6 +215,7 @@ class AccountWorker:
         self._injected_queue: asyncio.Queue[WsFrame] | None = None
         self._injected_task: asyncio.Task[None] | None = None
         self._stop_requested = False
+        self._lifecycle_error: Exception | None = None
 
         if self._guardrails is None and self._automation_mode == "active":
             self._guardrails = Guardrails()
@@ -276,6 +286,8 @@ class AccountWorker:
                     await self._previous_state_handler(event)
 
     async def _handle_transport_failure(self, detail: str | None) -> None:
+        if self._stop_requested:
+            return
         if self._worker_state in {
             WorkerState.STOPPING,
             WorkerState.DISABLED,
@@ -313,9 +325,27 @@ class AccountWorker:
         if getattr(self._client, "subscription_ready", None) is not None:
             await self._set_worker_state(WorkerState.ONLINE)
             return
-        self._readiness_task = asyncio.create_task(
+        task = asyncio.create_task(
             self._watch_subscription_ready(),
             name=f"worker-readiness-{self.account_id}",
+        )
+        self._readiness_task = task
+        task.add_done_callback(self._observe_readiness_task)
+
+    def _observe_readiness_task(self, task: asyncio.Task[None]) -> None:
+        """Consume readiness outcomes so lifecycle failures are never orphaned tasks."""
+        if self._readiness_task is task:
+            self._readiness_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        self._lifecycle_error = error
+        logger.error(
+            "worker readiness lifecycle failed account=%s error=%s",
+            self.account_id,
+            error,
         )
 
     async def _watch_subscription_ready(self) -> None:
@@ -334,6 +364,30 @@ class AccountWorker:
             raise
         except InvalidWorkerStateTransition:
             logger.exception("worker readiness transition rejected account=%s", self.account_id)
+        except Exception as exc:
+            await self._fail_closed_transport_after_lifecycle_error(exc)
+            raise
+
+    async def _fail_closed_transport_after_lifecycle_error(self, error: Exception) -> None:
+        """Stop the owned transport after a canonical lifecycle persistence failure."""
+        self._lifecycle_error = error
+        self._stop_requested = True
+        await self._cancel_readiness_monitor()
+        try:
+            fail_closed = getattr(self._client, "fail_closed_after_lifecycle_error", None)
+            if fail_closed is not None:
+                await fail_closed()
+            else:
+                await self._client.stop()
+        except Exception as cleanup_error:
+            logger.exception(
+                "worker lifecycle fail-closed cleanup failed account=%s error=%s",
+                self.account_id,
+                cleanup_error,
+            )
+        finally:
+            if self._connection_lock is not None:
+                self._connection_lock.release()
 
     async def _on_event(self, event: EventEnvelope) -> None:
         """Map one protocol DTO, then route only canonical events downstream."""
@@ -633,27 +687,68 @@ class AccountWorker:
         return await self._client.send_text(text)
 
     async def stop(self) -> None:
-        if self._worker_state is WorkerState.DISABLED:
+        """Stop physical transport even when canonical STOPPING persistence fails."""
+        self._stop_requested = True
+        await self._cancel_startup_task()
+
+        stopping_error: Exception | None = None
+        if self._worker_state not in {WorkerState.DISABLED, WorkerState.STOPPING}:
+            try:
+                await self._set_worker_state(WorkerState.STOPPING)
+            except Exception as exc:
+                stopping_error = exc
+
+        cleanup_error: Exception | None = None
+        try:
+            await self._cancel_readiness_monitor()
             await self._drain_injected_frames()
+            await self._client.stop()
+        except Exception as exc:
+            cleanup_error = exc
+        finally:
             if self._connection_lock is not None:
                 self._connection_lock.release()
             self.started_at = None
+
+        if stopping_error is not None:
+            if cleanup_error is not None:
+                logger.error(
+                    "worker physical cleanup also failed account=%s error=%s",
+                    self.account_id,
+                    cleanup_error,
+                )
+            raise stopping_error
+        if cleanup_error is not None:
+            raise cleanup_error
+        if self._worker_state is WorkerState.STOPPING:
+            await self._set_worker_state(WorkerState.DISABLED)
+
+    async def _cancel_startup_task(self) -> None:
+        task = self._startup_task
+        if task is None or task is asyncio.current_task():
             return
-        self._stop_requested = True
-        if self._worker_state is not WorkerState.STOPPING:
-            await self._set_worker_state(WorkerState.STOPPING)
-        await self._cancel_readiness_monitor()
-        startup = self._startup_task
-        if startup is not None and not startup.done() and startup is not asyncio.current_task():
-            startup.cancel()
-            with suppress(asyncio.CancelledError):
-                await startup
-        await self._drain_injected_frames()
-        await self._client.stop()
-        if self._connection_lock is not None:
-            self._connection_lock.release()
-        await self._set_worker_state(WorkerState.DISABLED)
-        self.started_at = None
+        try:
+            if task.done():
+                if not task.cancelled():
+                    error = task.exception()
+                    if error is not None:
+                        self._lifecycle_error = error
+                return
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self._lifecycle_error = exc
+                logger.error(
+                    "worker startup failed while stopping account=%s error=%s",
+                    self.account_id,
+                    exc,
+                )
+        finally:
+            if self._startup_task is task:
+                self._startup_task = None
 
     async def _drain_injected_frames(self) -> None:
         queue = self._injected_queue
@@ -776,6 +871,11 @@ class AccountWorker:
     def state_history(self) -> tuple[WorkerState, ...]:
         """In-process lifecycle history used for diagnostics and regression tests."""
         return tuple(self._state_history)
+
+    @property
+    def lifecycle_error(self) -> Exception | None:
+        """Latest observed background lifecycle failure, if any."""
+        return self._lifecycle_error
 
     @property
     def is_running(self) -> bool:
