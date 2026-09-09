@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from xianyu_agent.application.session.health import (
     CredentialHandle,
@@ -19,8 +21,10 @@ from xianyu_agent.application.session.health import (
     CredentialResultState,
 )
 from xianyu_agent.application.session.ports import CredentialFailureCode
+from xianyu_agent.application.session.supervisor import CredentialSupervisor
+from xianyu_agent.cli.commands import protocol as protocol_cli
 from xianyu_agent.config import get_settings, reset_settings_cache
-from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
+from xianyu_agent.db import Order, WorkerStatus, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.domain.runtime.worker_state import (
     InvalidWorkerStateTransition,
@@ -495,7 +499,7 @@ async def test_synthetic_injection_is_serial_and_preserves_injection_order(
     ]
     for frame in frames:
         worker.inject_frame(frame)
-    await worker._drain_injected_frames()
+    await worker.drain_injected_frames()
 
     assert observed == ["p-1", "p-2", "p-3"]
     assert max_active == 1
@@ -515,12 +519,169 @@ async def test_synthetic_injection_is_available_without_startup(
     worker.inject_frame(
         WsFrame(code=0, packetId="offline", headers={}, body={}, received_at=NOW)
     )
-    await worker._drain_injected_frames()
+    await worker.drain_injected_frames()
 
     assert worker.state is WorkerState.DISABLED
     assert client.start_calls == 0
     assert credentials.ensure_calls == 0
     assert observed == ["offline"]
+
+
+@pytest.mark.asyncio
+async def test_synthetic_order_lifecycle_is_fifo_and_does_not_race_unique_constraint(clean_db) -> None:
+    await domain_accounts.create_account("acc-1", enabled=True)
+    worker = AccountWorker("acc-1", automation_mode="passive")
+    frames = [
+        WsFrame(
+            code=0,
+            packetId="order-created",
+            headers={},
+            body={
+                "bizType": "order",
+                "5": {
+                    "orderId": "O-FIFO-1",
+                    "buyerId": "buyer-1",
+                    "buyerNick": "buyer",
+                    "amount": 9.9,
+                    "status": "created",
+                },
+                "100": {"itemId": "I-1", "title": "item"},
+                "6": {"time": 1700000001000},
+            },
+            received_at=NOW,
+        ),
+        WsFrame(
+            code=0,
+            packetId="order-paid",
+            headers={},
+            body={
+                "bizType": "order",
+                "5": {
+                    "orderId": "O-FIFO-1",
+                    "buyerId": "buyer-1",
+                    "amount": 9.9,
+                    "status": "paid",
+                },
+                "6": {"time": 1700000002000},
+            },
+            received_at=NOW,
+        ),
+        WsFrame(
+            code=0,
+            packetId="order-delivered",
+            headers={},
+            body={
+                "bizType": "order",
+                "5": {"orderId": "O-FIFO-1", "status": "delivered"},
+                "6": {"time": 1700000003000},
+            },
+            received_at=NOW,
+        ),
+    ]
+
+    for frame in frames:
+        worker.inject_frame(frame)
+    await worker.drain_injected_frames()
+    await worker.stop()
+
+    async with get_async_session() as session:
+        rows = list((await session.execute(select(Order))).scalars().all())
+    assert len(rows) == 1
+    assert rows[0].order_id == "O-FIFO-1"
+    # No local delivery content exists, so the delivered ack must not mask the paid state.
+    assert rows[0].status == "paid"
+
+
+@pytest.mark.asyncio
+async def test_synthetic_replay_with_persistence_disabled_does_not_write_db(clean_db) -> None:
+    await domain_accounts.create_account("acc-1", enabled=True)
+    worker = AccountWorker("acc-1", persist_events=False, automation_mode="passive")
+    worker.inject_frame(
+        WsFrame(
+            code=0,
+            packetId="no-persist",
+            headers={},
+            body={
+                "bizType": "order",
+                "5": {
+                    "orderId": "O-NO-PERSIST",
+                    "buyerId": "buyer-1",
+                    "status": "paid",
+                },
+            },
+            received_at=NOW,
+        )
+    )
+    await worker.drain_injected_frames()
+    await worker.stop()
+
+    async with get_async_session() as session:
+        rows = list((await session.execute(select(Order))).scalars().all())
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_synthetic_replay_uses_custom_configured_event_receiver() -> None:
+    worker, client, _ = make_worker()
+    observed: list[str] = []
+
+    async def custom_receiver(event: Any) -> None:
+        observed.append(type(event).__name__)
+
+    # Match AccountPool's existing post-construction custom on_event configuration.
+    client.on_event = custom_receiver
+    worker.inject_frame(
+        WsFrame(
+            code=0,
+            packetId="custom-receiver",
+            headers={},
+            body={
+                "bizType": "order",
+                "5": {
+                    "orderId": "O-CUSTOM",
+                    "buyerId": "buyer-1",
+                    "status": "paid",
+                },
+            },
+            received_at=NOW,
+        )
+    )
+    await worker.drain_injected_frames()
+
+    assert observed == ["OrderPaid"]
+
+
+def test_protocol_inject_is_fully_offline_even_when_account_lock_is_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "cli-offline"
+    monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XIANYU_DB_PATH", str(tmp_path / "cli-offline.db"))
+    reset_settings_cache()
+    fixture = tmp_path / "offline.jsonl"
+    fixture.write_text(
+        json.dumps({"code": 0, "packetId": "offline", "headers": {}, "body": {}}) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_start(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("offline protocol inject must not start a live worker or websocket")
+
+    async def forbidden_ensure(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("offline protocol inject must not ensure credentials")
+
+    external_lock = AccountConnectionLock(get_settings().account_lock_path(account_id))
+    external_lock.acquire(owner_id="daemon-test-owner")
+    try:
+        monkeypatch.setattr(AccountWorker, "start", forbidden_start)
+        monkeypatch.setattr(protocol_cli.WsClient, "start", forbidden_start)
+        monkeypatch.setattr(CredentialSupervisor, "ensure", forbidden_ensure)
+
+        protocol_cli.inject(account_id=account_id, fixture=str(fixture), count=1)
+    finally:
+        external_lock.release()
+        reset_settings_cache()
 
 
 @pytest.mark.asyncio
