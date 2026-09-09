@@ -443,7 +443,8 @@ async def test_restart_normalizes_legacy_status_without_promoting_connected_to_o
     assert worker.state is WorkerState.SYNCING
     row = await domain_accounts.worker_status_for("acc-1")
     assert row is not None
-    assert row.status == "connected"
+    # Legacy connected remains readable, but a canonical writer must not emit it.
+    assert row.status == "syncing"
 
     client.subscription_ready = SubscriptionReady(sync_type=1, state_body={})
     await wait_until(lambda: worker.state is WorkerState.ONLINE)
