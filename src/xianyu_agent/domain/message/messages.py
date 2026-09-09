@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 
 from xianyu_agent.db import Account, Message, get_async_session
-from xianyu_agent.protocol.events import (
+from xianyu_agent.domain.events import (
     MessageContentType,
     MessageDirection,
     MessageReceived,
@@ -19,9 +20,16 @@ from xianyu_agent.protocol.events import (
 logger = logging.getLogger(__name__)
 
 
-async def upsert_inbound(event: MessageReceived) -> int | None:
-    """Persist a received message. Returns the row id, or None if the
-    owning account is unknown. Idempotent on `message_id` when present.
+async def upsert_inbound(
+    event: MessageReceived,
+    *,
+    raw_payload: dict[str, Any] | None = None,
+) -> int | None:
+    """Persist a received message and optional separately-redacted transport payload.
+
+    Returns the row id, or None if the owning account is unknown. Idempotent on
+    ``message_id`` when present. ``raw_payload`` is persistence metadata and is not
+    part of the canonical Domain Event contract.
     """
     async with get_async_session() as session:
         account = await _get_account(session, event.account_id)
@@ -53,7 +61,7 @@ async def upsert_inbound(event: MessageReceived) -> int | None:
             else str(event.content_type),
             content=event.content,
             image_url=event.image_url,
-            raw_payload=event.raw,
+            raw_payload=raw_payload,
             received_at=event.received_at,
             sent_at=event.sent_at,
         )
