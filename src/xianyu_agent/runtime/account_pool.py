@@ -311,14 +311,11 @@ class AccountPool:
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
-            task = worker.start()
-            if task is not None:
-                await task
+            self._start_observed(account_id, worker)
         except Exception:
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
             raise
-        self._observe_transport_task(account_id, worker)
         return "restarted"
 
     def restart(self, account_id: str) -> bool:
@@ -366,7 +363,9 @@ class AccountPool:
                     if worker and worker.started_at
                     else status_data.get("started_at"),
                     "risk_code": status_data.get("risk_code"),
-                    "risk_cooldown_until": status_data.get("risk_cooldown_until"),
+                    "risk_cooldown_until": format_local(status_data.get("risk_cooldown_until"))
+                    if status_data.get("risk_cooldown_until")
+                    else None,
                     "risk_recovery_required": status_data.get("risk_recovery_required", False),
                 }
             )
