@@ -175,12 +175,21 @@ class AccountPool:
                 error,
             )
 
+    def _claim_worker_retirement(self, account_id: str, worker: AccountWorker) -> bool:
+        """Atomically claim cleanup ownership for the currently mapped worker instance."""
+        if self._workers.get(account_id) is not worker:
+            return False
+        self._workers.pop(account_id, None)
+        return True
+
     async def _retire_terminal_transport(
         self,
         account_id: str,
         worker: AccountWorker,
     ) -> None:
         """Retire a normally-ended transport whose owner reached terminal ERROR."""
+        if not self._claim_worker_retirement(account_id, worker):
+            return
         try:
             await worker.stop()
         except Exception:
@@ -189,8 +198,6 @@ class AccountPool:
                 account_id,
             )
         finally:
-            if self._workers.get(account_id) is worker:
-                self._workers.pop(account_id, None)
             logger.error(
                 "account worker transport ended in terminal state account=%s state=%s",
                 account_id,
