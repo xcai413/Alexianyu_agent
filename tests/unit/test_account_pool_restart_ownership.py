@@ -319,3 +319,93 @@ async def test_reconcile_stop_does_not_remove_replacement_inserted_during_stop(
     assert old_worker.stop_calls == 1
     assert replacement.stop_calls == 0
     assert pool.get("race-worker") is replacement
+
+
+@pytest.mark.asyncio
+async def test_terminal_retirement_claims_worker_before_awaiting_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AccountPool()
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class TerminalWorker:
+        state = WorkerState.ERROR
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+
+    worker = TerminalWorker()
+    pool._workers = cast(dict[str, AccountWorker], {"terminal-worker": cast(Any, worker)})
+
+    async def desired_accounts():
+        return []
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    retirement_task = asyncio.create_task(
+        pool._retire_terminal_transport("terminal-worker", cast(Any, worker))
+    )
+    await stop_entered.wait()
+
+    assert pool.has("terminal-worker") is False
+    reconcile = await pool.reconcile_desired_accounts()
+    assert reconcile == {"started": [], "stopped": []}
+    assert worker.stop_calls == 1
+
+    release_stop.set()
+    await retirement_task
+    assert worker.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_retirement_skips_worker_already_claimed_by_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AccountPool()
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class TerminalWorker:
+        state = WorkerState.ERROR
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+
+    worker = TerminalWorker()
+    pool._workers = cast(dict[str, AccountWorker], {"terminal-worker": cast(Any, worker)})
+
+    async def desired_accounts():
+        return []
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    reconcile_task = asyncio.create_task(pool.reconcile_desired_accounts())
+    await stop_entered.wait()
+    assert pool.has("terminal-worker") is False
+
+    await pool._retire_terminal_transport("terminal-worker", cast(Any, worker))
+    assert worker.stop_calls == 1
+
+    release_stop.set()
+    reconcile = await reconcile_task
+    assert reconcile == {"started": [], "stopped": ["terminal-worker"]}
+    assert worker.stop_calls == 1
