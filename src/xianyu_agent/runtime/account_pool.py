@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import cast
 
 from xianyu_agent.domain.account import state as domain_accounts
+from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.events import EventEnvelope
 from xianyu_agent.runtime.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.runtime.account_worker import AccountWorker
@@ -106,7 +107,7 @@ class AccountPool:
         task.add_done_callback(_completed)
 
     def _observe_transport_task(self, account_id: str, worker: AccountWorker) -> None:
-        """Own the worker transport task after startup so callback faults retire the worker."""
+        """Own transport completion so dead workers cannot remain current forever."""
         task = cast(
             asyncio.Task[None] | None,
             getattr(getattr(worker, "_client", None), "_task", None),
@@ -121,12 +122,18 @@ class AccountPool:
             if completed.cancelled():
                 return
             error = completed.exception()
-            if not isinstance(error, Exception):
+            if isinstance(error, Exception):
+                cleanup = asyncio.create_task(
+                    self._retire_failed_transport(account_id, worker, error),
+                    name=f"worker-lifecycle-failure-{account_id}",
+                )
+            elif not worker._stop_requested and worker.state is WorkerState.ERROR:
+                cleanup = asyncio.create_task(
+                    self._retire_terminal_transport(account_id, worker),
+                    name=f"worker-terminal-transport-{account_id}",
+                )
+            else:
                 return
-            cleanup = asyncio.create_task(
-                self._retire_failed_transport(account_id, worker, error),
-                name=f"worker-lifecycle-failure-{account_id}",
-            )
             self._lifecycle_cleanup_tasks.add(cleanup)
             cleanup.add_done_callback(self._lifecycle_cleanup_tasks.discard)
 
@@ -153,6 +160,28 @@ class AccountPool:
                 "account worker transport lifecycle failed account=%s error=%s",
                 account_id,
                 error,
+            )
+
+    async def _retire_terminal_transport(
+        self,
+        account_id: str,
+        worker: AccountWorker,
+    ) -> None:
+        """Retire a normally-ended transport whose owner reached terminal ERROR."""
+        try:
+            await worker.stop()
+        except Exception:
+            logger.exception(
+                "account worker terminal transport cleanup failed account=%s",
+                account_id,
+            )
+        finally:
+            if self._workers.get(account_id) is worker:
+                self._workers.pop(account_id, None)
+            logger.error(
+                "account worker transport ended in terminal state account=%s state=%s",
+                account_id,
+                worker.state.value,
             )
 
     def _start_observed(
