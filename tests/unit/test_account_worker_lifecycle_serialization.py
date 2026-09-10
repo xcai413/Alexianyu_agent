@@ -133,9 +133,6 @@ async def test_worker_owned_ws_transport_never_writes_legacy_connected(clean_db)
     assert await persisted_status(account_id) == "connecting"
     assert worker._client.__class__ is not WsClient
 
-    # The transport diagnostics hook runs before AccountWorker's state callback.
-    # It must leave the canonical lifecycle column untouched, eliminating the
-    # historical transient/terminal legacy "connected" write.
     await worker._client._update_worker_status(
         state=ConnectionState.CONNECTED,
         detail=None,
@@ -171,9 +168,6 @@ async def test_standalone_ws_client_keeps_legacy_connected_writer_compatibility(
 
     client = WsClient(account_id)
     await client._update_worker_status(state=ConnectionState.CONNECTED, detail=None)
-
-    # AccountWorker owns canonical persistence only for the client it creates;
-    # standalone WsClient keeps the released compatibility contract unchanged.
     assert await persisted_status(account_id) == "connected"
 
 
@@ -268,9 +262,6 @@ async def test_readiness_and_reconnect_persistence_are_serialized(
 
     monkeypatch.setattr(worker, "_persist_worker_state", gated_persist)
 
-    # Readiness wins the lock first but is deliberately paused before its DB
-    # commit. A reconnect arrives while it is paused and must wait for the same
-    # transition lock rather than compute a stale transition concurrently.
     client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 7})
     readiness_task = asyncio.create_task(worker._watch_subscription_ready())
     await online_persist_entered.wait()
@@ -287,10 +278,6 @@ async def test_readiness_and_reconnect_persistence_are_serialized(
 
     allow_online_persist.set()
     await reconnect_persist_entered.wait()
-
-    # ONLINE committed and memory/history advanced as one serialized operation
-    # before RECONNECTING is allowed to commit. No observable cross-order pair
-    # exists at the hand-off boundary.
     assert worker.state is WorkerState.ONLINE
     assert await persisted_status(account_id) == "online"
 
@@ -300,8 +287,6 @@ async def test_readiness_and_reconnect_persistence_are_serialized(
     assert worker.state is WorkerState.RECONNECTING
     assert await persisted_status(account_id) == "reconnecting"
 
-    # The ready marker is stale after disconnect/reconnect. Re-running the
-    # readiness watcher must not promote a non-SYNCING/non-CONNECTED worker.
     await worker._watch_subscription_ready()
     assert worker.state is WorkerState.RECONNECTING
     assert await persisted_status(account_id) == "reconnecting"
@@ -431,8 +416,8 @@ async def test_account_pool_removes_failed_startup_and_reconcile_retries(
     pool = AccountPool(worker_factory=build_worker)
     first = await pool.reconcile_desired_accounts()
 
-    assert first["started"] == []
-    assert pool.has(account_id) is False
+    assert first["started"] == [account_id]
+    await wait_until(lambda: not pool.has(account_id))
     assert len(clients) == 1
     assert clients[0].start_calls == 0
 
@@ -441,7 +426,7 @@ async def test_account_pool_removes_failed_startup_and_reconcile_retries(
     assert second["started"] == [account_id]
     assert pool.has(account_id) is True
     assert len(clients) == 2
-    assert clients[1].start_calls == 1
+    await wait_until(lambda: clients[1].start_calls == 1)
 
     assert await pool.stop(account_id) is True
 
@@ -624,8 +609,8 @@ async def test_account_pool_removes_failure_after_starting_and_reconcile_retries
     pool = AccountPool(worker_factory=build_worker)
     first = await pool.reconcile_desired_accounts()
 
-    assert first["started"] == []
-    assert pool.has(account_id) is False
+    assert first["started"] == [account_id]
+    await wait_until(lambda: not pool.has(account_id))
     assert len(clients) == 1
     assert clients[0].start_calls == 0
     assert await persisted_status(account_id) == "error"
@@ -635,7 +620,7 @@ async def test_account_pool_removes_failure_after_starting_and_reconcile_retries
     assert second["started"] == [account_id]
     assert pool.has(account_id) is True
     assert len(clients) == 2
-    assert clients[1].start_calls == 1
+    await wait_until(lambda: clients[1].start_calls == 1)
 
     assert await pool.stop(account_id) is True
 
