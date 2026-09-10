@@ -16,6 +16,7 @@ from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
 from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged
+from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime import account_pool as account_pool_mod
 from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.account_worker import AccountWorker
@@ -238,7 +239,7 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
 
 
 @pytest.mark.asyncio
-async def test_normal_transport_end_in_error_retires_worker_and_reconcile_retries(
+async def test_normal_transport_end_after_terminal_auth_retires_and_retries(
     clean_db,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,7 +249,8 @@ async def test_normal_transport_end_in_error_retires_worker_and_reconcile_retrie
         monkeypatch,
     )
 
-    await worker._set_worker_state(WorkerState.ERROR, detail="terminal auth failure")
+    stop_transport = await worker._on_auth_failure(WsAuthError("terminal auth failure"))
+    assert stop_transport is True
     assert worker.state is WorkerState.ERROR
     assert worker._stop_requested is False
     assert await persisted_status(account_id) == "error"
@@ -267,7 +269,7 @@ async def test_normal_transport_end_in_error_retires_worker_and_reconcile_retrie
 
 
 @pytest.mark.asyncio
-async def test_normal_transport_end_in_needs_validation_stays_fail_closed(
+async def test_normal_transport_end_after_validation_auth_stays_fail_closed(
     clean_db,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,7 +279,8 @@ async def test_normal_transport_end_in_needs_validation_stays_fail_closed(
         monkeypatch,
     )
 
-    await worker._set_worker_state(WorkerState.NEEDS_VALIDATION, detail="manual validation")
+    stop_transport = await worker._on_auth_failure(WsAuthError("FAIL_SYS_USER_VALIDATE"))
+    assert stop_transport is True
     assert worker.state is WorkerState.NEEDS_VALIDATION
     transport_task = worker._client._task
     assert transport_task is not None
