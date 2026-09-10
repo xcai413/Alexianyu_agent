@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,6 +12,13 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from xianyu_agent.application.session.health import (
+    CredentialHealth,
+    CredentialHealthState,
+    CredentialResult,
+    CredentialResultState,
+)
+from xianyu_agent.application.session.ports import CredentialFailureCode
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
 from xianyu_agent.domain.account import state as domain_accounts
@@ -20,6 +28,7 @@ from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime import account_pool as account_pool_mod
 from xianyu_agent.runtime.account_pool import AccountPool
 from xianyu_agent.runtime.account_worker import AccountWorker
+from xianyu_agent.runtime.recovery import RecoverySupervisor
 
 Predicate = Callable[[], bool]
 
@@ -47,6 +56,62 @@ class StartableFakeClient:
 
     async def send_text(self, _text: str) -> bool:
         return False
+
+
+class PermanentlyRetryingCredentials:
+    def __init__(self, account_id: str) -> None:
+        self.account_id = account_id
+        self.ensure_calls = 0
+
+    async def ensure(self, account_id: str) -> CredentialResult[str]:
+        assert account_id == self.account_id
+        self.ensure_calls += 1
+        return CredentialResult(
+            state=CredentialResultState.RETRYABLE_FAILURE,
+            health=CredentialHealth(account_id=account_id, state=CredentialHealthState.HEALTHY),
+            code=CredentialFailureCode.NETWORK_ERROR.value,
+        )
+
+    async def refresh(
+        self,
+        account_id: str,
+        *,
+        validation_recovery: bool = False,
+    ) -> CredentialResult[str]:
+        raise AssertionError((account_id, validation_recovery))
+
+
+class ValidationTerminalCredentials:
+    def __init__(self, account_id: str) -> None:
+        self.account_id = account_id
+        self.ensure_calls = 0
+        self.refresh_calls: list[bool] = []
+
+    async def ensure(self, account_id: str) -> CredentialResult[str]:
+        assert account_id == self.account_id
+        self.ensure_calls += 1
+        return CredentialResult(
+            state=CredentialResultState.NEEDS_VALIDATION,
+            health=CredentialHealth(
+                account_id=account_id,
+                state=CredentialHealthState.NEEDS_VALIDATION,
+            ),
+            code=CredentialFailureCode.NEEDS_VALIDATION.value,
+        )
+
+    async def refresh(
+        self,
+        account_id: str,
+        *,
+        validation_recovery: bool = False,
+    ) -> CredentialResult[str]:
+        assert account_id == self.account_id
+        self.refresh_calls.append(validation_recovery)
+        return CredentialResult(
+            state=CredentialResultState.TERMINAL_FAILURE,
+            health=CredentialHealth(account_id=account_id, state=CredentialHealthState.UNUSABLE),
+            code=CredentialFailureCode.IDENTITY_MISSING.value,
+        )
 
 
 @pytest.fixture
@@ -196,8 +261,77 @@ async def assert_reconcile_retries_removed_worker(
     assert result["started"] == [account_id]
     assert pool.has(account_id) is True
     assert len(replacements) == 1
-    assert replacements[0].start_calls == 1
+    await wait_until(lambda: replacements[0].start_calls == 1)
     assert await pool.stop(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_wait_for_permanent_credential_retry(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_id = "a-retrying"
+    healthy_id = "b-healthy"
+    await domain_accounts.create_account(retry_id, enabled=True)
+    await domain_accounts.create_account(healthy_id, enabled=True)
+    retry_entered = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def retry_sleep(_delay: float) -> None:
+        retry_entered.set()
+        await never_release.wait()
+
+    retry_credentials = PermanentlyRetryingCredentials(retry_id)
+    retry_client = StartableFakeClient(retry_id)
+    retry_worker = AccountWorker(
+        retry_id,
+        client=cast(Any, retry_client),
+        credential_supervisor=cast(Any, retry_credentials),
+        recovery_supervisor=RecoverySupervisor(cast(Any, retry_credentials)),
+        retry_sleep=retry_sleep,
+        persist_events=False,
+        automation_mode="passive",
+    )
+    healthy_client = StartableFakeClient(healthy_id)
+    healthy_worker = AccountWorker(
+        healthy_id,
+        client=cast(Any, healthy_client),
+        persist_events=False,
+        automation_mode="passive",
+    )
+    workers = {retry_id: retry_worker, healthy_id: healthy_worker}
+    pool = AccountPool(worker_factory=lambda account_id: workers[account_id])
+
+    async def desired_accounts():
+        return [SimpleNamespace(account_id=retry_id), SimpleNamespace(account_id=healthy_id)]
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+    reconcile_task = asyncio.create_task(pool.reconcile_desired_accounts())
+    try:
+        await retry_entered.wait()
+        await wait_until(lambda: healthy_client.start_calls == 1)
+        assert reconcile_task.done() is True
+        result = await reconcile_task
+        assert result["started"] == [retry_id, healthy_id]
+        assert retry_credentials.ensure_calls == 1
+        assert pool.has(retry_id) is True
+        assert pool.has(healthy_id) is True
+        assert retry_worker._startup_task is not None
+        assert retry_worker._startup_task.done() is False
+    finally:
+        if not reconcile_task.done():
+            reconcile_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconcile_task
+        await pool.stop_all()
+
+    assert retry_worker._startup_task is None
+    assert retry_worker.is_running is False
+    assert retry_client.start_calls == 0
 
 
 @pytest.mark.asyncio
@@ -235,6 +369,80 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
         assert await persisted_status(account_id) == "online"
 
     await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
+    await drain_pool_lifecycle_cleanup(pool)
+
+
+@pytest.mark.asyncio
+async def test_normal_transport_end_with_lifecycle_error_retires_and_retries(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "readiness-normal-end"
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+    pool = AccountPool()
+    pool._workers[account_id] = worker
+    release_transport = asyncio.Event()
+
+    async def transport_lifetime() -> None:
+        await release_transport.wait()
+
+    def start_owned_transport() -> None:
+        worker._client._task = asyncio.create_task(
+            transport_lifetime(),
+            name=f"test-readiness-normal-transport-{account_id}",
+        )
+
+    monkeypatch.setattr(worker._client, "start", start_owned_transport)
+    worker._credentials = None
+    startup = pool._start_observed(account_id, worker)
+    assert startup is not None
+    await startup
+    await asyncio.sleep(0)
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    assert await persisted_status(account_id) == "syncing"
+
+    async def fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("forced readiness online commit failure")
+
+    with monkeypatch.context() as commit_patch:
+        commit_patch.setattr(AsyncSession, "commit", fail_commit)
+        with pytest.raises(RuntimeError, match="forced readiness online commit failure"):
+            await worker._promote_online_fail_closed()
+
+    assert isinstance(worker.lifecycle_error, RuntimeError)
+    assert worker._stop_requested is True
+    assert worker.state is WorkerState.SYNCING
+    assert await persisted_status(account_id) == "syncing"
+    transport_task = worker._client._task
+    assert transport_task is not None
+    release_transport.set()
+    await transport_task
+    await wait_until(lambda: not pool.has(account_id))
+    await drain_pool_lifecycle_cleanup(pool)
+
+    await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
+    await drain_pool_lifecycle_cleanup(pool)
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_without_lifecycle_error_is_not_failure_retirement(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "explicit-stop-normal"
+    pool, worker, _release_transport = await start_worker_with_normally_ending_transport(
+        account_id,
+        monkeypatch,
+    )
+
+    await worker.stop()
+    await asyncio.sleep(0)
+
+    assert worker.lifecycle_error is None
+    assert worker.state is WorkerState.DISABLED
+    assert pool.get(account_id) is worker
     await drain_pool_lifecycle_cleanup(pool)
 
 
@@ -308,6 +516,40 @@ async def test_normal_transport_end_after_validation_auth_stays_fail_closed(
     assert pool.get(account_id) is worker
     assert replacements == []
     await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_validation_recovery_terminal_failure_persists_error_and_returns_false(
+    clean_db,
+) -> None:
+    account_id = "validation-terminal"
+    await domain_accounts.create_account(account_id, enabled=True)
+    credentials = ValidationTerminalCredentials(account_id)
+    client = StartableFakeClient(account_id)
+    worker = AccountWorker(
+        account_id,
+        client=cast(Any, client),
+        credential_supervisor=cast(Any, credentials),
+        recovery_supervisor=RecoverySupervisor(cast(Any, credentials)),
+        persist_events=False,
+        automation_mode="passive",
+    )
+    startup = worker.start()
+    assert startup is not None
+    await startup
+    assert worker.state is WorkerState.NEEDS_VALIDATION
+    assert await persisted_status(account_id) == "needs_validation"
+
+    recovered = await worker.recover_validation()
+
+    assert recovered is False
+    assert credentials.refresh_calls == [True]
+    assert worker.state is WorkerState.ERROR
+    assert worker.state_history[-2:] == (WorkerState.NEEDS_VALIDATION, WorkerState.ERROR)
+    assert await persisted_status(account_id) == "error"
+    assert client.start_calls == 0
+    await asyncio.sleep(0)
+    assert credentials.refresh_calls == [True]
 
 
 @pytest.mark.asyncio
