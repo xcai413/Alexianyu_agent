@@ -363,9 +363,7 @@ class AccountPool:
                     if worker and worker.started_at
                     else status_data.get("started_at"),
                     "risk_code": status_data.get("risk_code"),
-                    "risk_cooldown_until": format_local(status_data.get("risk_cooldown_until"))
-                    if status_data.get("risk_cooldown_until")
-                    else None,
+                    "risk_cooldown_until": status_data.get("risk_cooldown_until"),
                     "risk_recovery_required": status_data.get("risk_recovery_required", False),
                 }
             )
