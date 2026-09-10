@@ -163,10 +163,15 @@ async def test_runtime_daemon_reconciles_account_changes(daemon_db: Path) -> Non
     await domain_accounts.create_account("b", enabled=True)
     await domain_accounts.set_desired_state("b", "running")
     changes = await pool.reconcile_enabled_accounts()
+
     assert changes == {"started": ["b"], "stopped": ["a"]}
-    assert workers["a"].stopped == 1
     assert workers["b"].started == 1
     assert pool.account_ids == ["b"]
+
+    retirement = pool._retirement_tasks["a"]
+    await retirement
+
+    assert workers["a"].stopped == 1
 
 
 def test_daemon_lock_rejects_second_owner(tmp_path: Path) -> None:
