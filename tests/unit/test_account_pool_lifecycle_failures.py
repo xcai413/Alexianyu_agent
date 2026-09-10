@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xianyu_agent.config import reset_settings_cache
-from xianyu_agent.db import database as db_mod
+from xianyu_agent.db import WorkerStatus, database as db_mod, get_async_session
 from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.events import ConnectionState, ConnectionStateChanged
@@ -81,6 +81,12 @@ async def persisted_status(account_id: str) -> str:
     return str(row.status)
 
 
+async def persisted_last_error(account_id: str) -> str | None:
+    row = await domain_accounts.worker_status_for(account_id)
+    assert row is not None
+    return row.last_error
+
+
 async def drain_pool_lifecycle_cleanup(pool: AccountPool) -> None:
     """Await every pool-owned failure cleanup task scheduled before teardown."""
     while pool._lifecycle_cleanup_tasks:
@@ -123,6 +129,39 @@ async def start_worker_with_owned_transport(
     await worker._set_worker_state(WorkerState.SYNCING)
     await worker._set_worker_state(WorkerState.ONLINE)
     assert await persisted_status(account_id) == "online"
+    return pool, worker, release_transport
+
+
+async def start_worker_with_normally_ending_transport(
+    account_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AccountPool, AccountWorker, asyncio.Event]:
+    await domain_accounts.create_account(account_id, enabled=True)
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+    pool = AccountPool()
+    pool._workers[account_id] = worker
+    release_transport = asyncio.Event()
+
+    async def transport_lifetime() -> None:
+        await release_transport.wait()
+
+    def start_owned_transport() -> None:
+        worker._client._task = asyncio.create_task(
+            transport_lifetime(),
+            name=f"test-normal-transport-{account_id}",
+        )
+
+    monkeypatch.setattr(worker._client, "start", start_owned_transport)
+    worker._credentials = None
+    startup = pool._start_observed(account_id, worker)
+    assert startup is not None
+    await startup
+    await asyncio.sleep(0)
+    assert worker._client._task is not None
+    assert pool._transport_tasks.get(account_id) is worker._client._task
+    await worker._set_worker_state(WorkerState.REGISTERING)
+    await worker._set_worker_state(WorkerState.SYNCING)
+    await worker._set_worker_state(WorkerState.ONLINE)
     return pool, worker, release_transport
 
 
@@ -196,6 +235,98 @@ async def test_post_start_callback_failure_retires_worker_and_reconcile_retries(
 
     await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
     await drain_pool_lifecycle_cleanup(pool)
+
+
+@pytest.mark.asyncio
+async def test_normal_transport_end_in_error_retires_worker_and_reconcile_retries(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "terminal-auth-normal-end"
+    pool, worker, release_transport = await start_worker_with_normally_ending_transport(
+        account_id,
+        monkeypatch,
+    )
+
+    await worker._set_worker_state(WorkerState.ERROR, detail="terminal auth failure")
+    assert worker.state is WorkerState.ERROR
+    assert worker._stop_requested is False
+    assert await persisted_status(account_id) == "error"
+
+    transport_task = worker._client._task
+    assert transport_task is not None
+    release_transport.set()
+    await transport_task
+    await wait_until(lambda: not pool.has(account_id))
+    await drain_pool_lifecycle_cleanup(pool)
+
+    assert worker._stop_requested is True
+    assert pool.has(account_id) is False
+    await assert_reconcile_retries_removed_worker(pool, account_id, monkeypatch)
+    await drain_pool_lifecycle_cleanup(pool)
+
+
+@pytest.mark.asyncio
+async def test_normal_transport_end_in_needs_validation_stays_fail_closed(
+    clean_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = "needs-validation-normal-end"
+    pool, worker, release_transport = await start_worker_with_normally_ending_transport(
+        account_id,
+        monkeypatch,
+    )
+
+    await worker._set_worker_state(WorkerState.NEEDS_VALIDATION, detail="manual validation")
+    assert worker.state is WorkerState.NEEDS_VALIDATION
+    transport_task = worker._client._task
+    assert transport_task is not None
+    release_transport.set()
+    await transport_task
+    await asyncio.sleep(0)
+
+    async def desired_accounts():
+        return [SimpleNamespace(account_id=account_id)]
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+    replacements: list[str] = []
+    pool._worker_factory = lambda replacement_id: replacements.append(replacement_id)  # type: ignore[assignment,return-value]
+
+    result = await pool.reconcile_desired_accounts()
+    assert result["started"] == []
+    assert pool.get(account_id) is worker
+    assert replacements == []
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_error", [None, "live-worker-diagnostic"])
+async def test_never_started_explicit_stop_preserves_last_error(
+    clean_db,
+    existing_error: str | None,
+) -> None:
+    account_id = f"offline-stop-{existing_error or 'empty'}"
+    account = await domain_accounts.create_account(account_id, enabled=True)
+    async with get_async_session() as session:
+        session.add(
+            WorkerStatus(
+                account_id=account.id,
+                status="online",
+                last_error=existing_error,
+            )
+        )
+        await session.commit()
+
+    worker = AccountWorker(account_id, persist_events=False, automation_mode="passive")
+    assert worker._client._task is None
+    await worker.stop()
+
+    assert worker._client._task is None
+    assert await persisted_last_error(account_id) == existing_error
 
 
 @pytest.mark.asyncio
