@@ -92,14 +92,21 @@ class UnusedCredentials:
 
 @pytest.fixture
 async def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    previous_engine = db_mod.async_engine
+    previous_factory = db_mod.async_session_factory
     monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("XIANYU_DB_PATH", str(tmp_path / "worker-lifecycle-serialization.db"))
     reset_settings_cache()
     db_mod.reset_engine()
-    await db_mod.init_db()
-    yield
-    await db_mod.async_engine.dispose()
-    reset_settings_cache()
+    test_engine = db_mod.async_engine
+    try:
+        await db_mod.init_db()
+        yield
+    finally:
+        await test_engine.dispose()
+        db_mod.async_engine = previous_engine
+        db_mod.async_session_factory = previous_factory
+        reset_settings_cache()
 
 
 async def wait_until(predicate: Predicate) -> None:
