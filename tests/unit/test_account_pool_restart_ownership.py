@@ -1,4 +1,4 @@
-"""Regressions for AccountPool restart startup ownership."""
+"""Regressions for AccountPool restart and retirement ownership."""
 
 from __future__ import annotations
 
@@ -97,6 +97,24 @@ class TerminalCredentials:
         raise AssertionError((account_id, validation_recovery))
 
 
+class ReplacementWorker:
+    state = WorkerState.DISABLED
+    lifecycle_error = None
+    _stop_requested = False
+
+    def __init__(self, on_start: Callable[[], None] | None = None) -> None:
+        self._client = SimpleNamespace(_task=None)
+        self._on_start = on_start
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        if self._on_start is not None:
+            self._on_start()
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
 @pytest.fixture
 async def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     previous_engine = db_mod.async_engine
@@ -122,6 +140,11 @@ async def wait_until(predicate: Callable[[], bool]) -> None:
             return
         await asyncio.sleep(0.001)
     raise TimeoutError("condition did not become true")
+
+
+async def drain_retirements(pool: AccountPool) -> None:
+    await pool._drain_retirement_tasks()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -225,22 +248,26 @@ async def test_reconcile_stop_tolerates_worker_already_retired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = AccountPool()
-    first_stop_entered = asyncio.Event()
-    release_first_stop = asyncio.Event()
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_second = asyncio.Event()
 
     class ControlledWorker:
-        def __init__(self, *, block: bool = False) -> None:
-            self.block = block
+        state = WorkerState.ERROR
+
+        def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
+            self.entered = entered
+            self.release = release
             self.stop_calls = 0
 
         async def stop(self) -> None:
             self.stop_calls += 1
-            if self.block:
-                first_stop_entered.set()
-                await release_first_stop.wait()
+            self.entered.set()
+            await self.release.wait()
 
-    first = ControlledWorker(block=True)
-    second = ControlledWorker()
+    first = ControlledWorker(first_entered, release_first)
+    second = ControlledWorker(second_entered, release_second)
     pool._workers = cast(
         dict[str, AccountWorker],
         {"a-worker": cast(Any, first), "b-worker": cast(Any, second)},
@@ -255,17 +282,26 @@ async def test_reconcile_stop_tolerates_worker_already_retired(
         desired_accounts,
     )
 
-    reconcile_task = asyncio.create_task(pool.reconcile_desired_accounts())
-    await first_stop_entered.wait()
-    assert pool._workers.pop("b-worker", None) is second
-    release_first_stop.set()
+    second_wrapper = asyncio.create_task(
+        pool._retire_terminal_transport("b-worker", cast(Any, second))
+    )
+    await second_entered.wait()
 
-    result = await reconcile_task
+    result = await pool.reconcile_desired_accounts()
+    await first_entered.wait()
 
     assert result == {"started": [], "stopped": ["a-worker"]}
     assert first.stop_calls == 1
-    assert second.stop_calls == 0
+    assert second.stop_calls == 1
     assert pool.account_ids == []
+    assert set(pool._retirement_tasks) == {"a-worker", "b-worker"}
+
+    release_first.set()
+    release_second.set()
+    await second_wrapper
+    await drain_retirements(pool)
+    assert first.stop_calls == 1
+    assert second.stop_calls == 1
 
 
 @pytest.mark.asyncio
@@ -285,13 +321,6 @@ async def test_reconcile_stop_does_not_remove_replacement_inserted_during_stop(
             old_stop_entered.set()
             await release_old_stop.wait()
 
-    class ReplacementWorker:
-        def __init__(self) -> None:
-            self.stop_calls = 0
-
-        async def stop(self) -> None:
-            self.stop_calls += 1
-
     old_worker = OldWorker()
     replacement = ReplacementWorker()
     pool._workers = cast(
@@ -308,17 +337,19 @@ async def test_reconcile_stop_does_not_remove_replacement_inserted_during_stop(
         desired_accounts,
     )
 
-    reconcile_task = asyncio.create_task(pool.reconcile_desired_accounts())
+    result = await pool.reconcile_desired_accounts()
     await old_stop_entered.wait()
+    retirement = pool._retirement_tasks["race-worker"]
     pool._workers["race-worker"] = cast(Any, replacement)
     release_old_stop.set()
-
-    result = await reconcile_task
+    await retirement
+    await asyncio.sleep(0)
 
     assert result == {"started": [], "stopped": ["race-worker"]}
     assert old_worker.stop_calls == 1
     assert replacement.stop_calls == 0
     assert pool.get("race-worker") is replacement
+    assert "race-worker" not in pool._retirement_tasks
 
 
 @pytest.mark.asyncio
@@ -341,7 +372,8 @@ async def test_terminal_retirement_claims_worker_before_awaiting_stop(
             await release_stop.wait()
 
     worker = TerminalWorker()
-    pool._workers = cast(dict[str, AccountWorker], {"terminal-worker": cast(Any, worker)})
+    account_id = "terminal-worker"
+    pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, worker)})
 
     async def desired_accounts():
         return []
@@ -352,19 +384,22 @@ async def test_terminal_retirement_claims_worker_before_awaiting_stop(
         desired_accounts,
     )
 
-    retirement_task = asyncio.create_task(
-        pool._retire_terminal_transport("terminal-worker", cast(Any, worker))
-    )
+    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, worker)))
     await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
 
-    assert pool.has("terminal-worker") is False
+    assert pool.has(account_id) is False
+    assert canonical.done() is False
     reconcile = await pool.reconcile_desired_accounts()
     assert reconcile == {"started": [], "stopped": []}
     assert worker.stop_calls == 1
 
     release_stop.set()
-    await retirement_task
+    await wrapper
+    await asyncio.sleep(0)
+    assert canonical.done() is True
     assert worker.stop_calls == 1
+    assert account_id not in pool._retirement_tasks
 
 
 @pytest.mark.asyncio
@@ -387,7 +422,8 @@ async def test_terminal_retirement_skips_worker_already_claimed_by_reconcile(
             await release_stop.wait()
 
     worker = TerminalWorker()
-    pool._workers = cast(dict[str, AccountWorker], {"terminal-worker": cast(Any, worker)})
+    account_id = "terminal-worker"
+    pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, worker)})
 
     async def desired_accounts():
         return []
@@ -398,17 +434,20 @@ async def test_terminal_retirement_skips_worker_already_claimed_by_reconcile(
         desired_accounts,
     )
 
-    reconcile_task = asyncio.create_task(pool.reconcile_desired_accounts())
+    reconcile = await pool.reconcile_desired_accounts()
     await stop_entered.wait()
-    assert pool.has("terminal-worker") is False
+    canonical = pool._retirement_tasks[account_id]
+    assert reconcile == {"started": [], "stopped": [account_id]}
+    assert pool.has(account_id) is False
 
-    await pool._retire_terminal_transport("terminal-worker", cast(Any, worker))
+    await pool._retire_terminal_transport(account_id, cast(Any, worker))
     assert worker.stop_calls == 1
 
     release_stop.set()
-    reconcile = await reconcile_task
-    assert reconcile == {"started": [], "stopped": ["terminal-worker"]}
+    await canonical
+    await asyncio.sleep(0)
     assert worker.stop_calls == 1
+    assert account_id not in pool._retirement_tasks
 
 
 @pytest.mark.asyncio
@@ -439,13 +478,14 @@ async def test_failed_retirement_claim_blocks_duplicate_ensure_stop() -> None:
     account_id = "failed-retirement"
     pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, worker)})
 
-    retirement_task = asyncio.create_task(
+    wrapper = asyncio.create_task(
         pool._retire_failed_transport(account_id, cast(Any, worker), RuntimeError("boom"))
     )
     await fail_closed_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
 
     assert pool.has(account_id) is False
-    assert account_id in pool._retirement_barriers
+    assert canonical.done() is False
     ensure_task = asyncio.create_task(pool.ensure_stopped(account_id))
     await asyncio.sleep(0)
     assert ensure_task.done() is False
@@ -453,11 +493,12 @@ async def test_failed_retirement_claim_blocks_duplicate_ensure_stop() -> None:
     assert worker.stop_calls == 0
 
     release_fail_closed.set()
-    await retirement_task
+    await wrapper
     assert await ensure_task == "already_stopped"
     assert worker.fail_closed_calls == 1
     assert worker.stop_calls == 0
-    assert account_id not in pool._retirement_barriers
+    assert canonical.done() is True
+    assert account_id not in pool._retirement_tasks
 
 
 @pytest.mark.asyncio
@@ -480,15 +521,12 @@ async def test_stop_all_waits_for_claimed_lifecycle_cleanup() -> None:
     account_id = "shutdown-retirement"
     worker = TerminalWorker()
     pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, worker)})
-    cleanup = asyncio.create_task(
-        pool._retire_terminal_transport(account_id, cast(Any, worker))
-    )
-    pool._lifecycle_cleanup_tasks.add(cleanup)
-    cleanup.add_done_callback(pool._lifecycle_cleanup_tasks.discard)
+    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, worker)))
 
     await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
     assert pool.has(account_id) is False
-    assert account_id in pool._retirement_barriers
+    assert canonical.done() is False
 
     stop_all_task = asyncio.create_task(pool.stop_all())
     await asyncio.sleep(0)
@@ -496,10 +534,10 @@ async def test_stop_all_waits_for_claimed_lifecycle_cleanup() -> None:
 
     release_stop.set()
     await stop_all_task
-    assert cleanup.done() is True
+    await wrapper
+    assert canonical.done() is True
     assert worker.stop_calls == 1
-    assert pool._lifecycle_cleanup_tasks == set()
-    assert pool._retirement_barriers == {}
+    assert pool._retirement_tasks == {}
 
 
 @pytest.mark.asyncio
@@ -521,17 +559,6 @@ async def test_reconcile_waits_for_retirement_before_replacement_and_preserves_w
             await release_stop.wait()
             writes.append("old_disabled")
 
-    class ReplacementWorker:
-        state = WorkerState.DISABLED
-        lifecycle_error = None
-        _stop_requested = False
-
-        def __init__(self) -> None:
-            self._client = SimpleNamespace(_task=None)
-
-        def start(self) -> None:
-            writes.append("new_online")
-
     account_id = "generation-barrier"
     old_worker = OldWorker()
     pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, old_worker)})
@@ -547,13 +574,12 @@ async def test_reconcile_waits_for_retirement_before_replacement_and_preserves_w
 
     def build_replacement(replacement_id: str) -> AccountWorker:
         built.append(replacement_id)
-        return cast(Any, ReplacementWorker())
+        return cast(Any, ReplacementWorker(lambda: writes.append("new_online")))
 
     pool._worker_factory = build_replacement
-    retirement_task = asyncio.create_task(
-        pool._retire_terminal_transport(account_id, cast(Any, old_worker))
-    )
+    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, old_worker)))
     await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
 
     first_reconcile = await pool.reconcile_desired_accounts()
     assert first_reconcile == {"started": [], "stopped": []}
@@ -563,7 +589,9 @@ async def test_reconcile_waits_for_retirement_before_replacement_and_preserves_w
     assert built == []
 
     release_stop.set()
-    await retirement_task
+    await wrapper
+    await asyncio.sleep(0)
+    assert canonical.done() is True
     assert writes == ["old_stopping", "old_disabled"]
 
     second_reconcile = await pool.reconcile_desired_accounts()
@@ -587,17 +615,6 @@ async def test_restart_waits_for_existing_retirement_barrier() -> None:
             stop_entered.set()
             await release_stop.wait()
 
-    class ReplacementWorker:
-        state = WorkerState.DISABLED
-        lifecycle_error = None
-        _stop_requested = False
-
-        def __init__(self) -> None:
-            self._client = SimpleNamespace(_task=None)
-
-        def start(self) -> None:
-            return None
-
     account_id = "restart-generation-barrier"
     old_worker = OldWorker()
     pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, old_worker)})
@@ -607,10 +624,9 @@ async def test_restart_waits_for_existing_retirement_barrier() -> None:
         return cast(Any, ReplacementWorker())
 
     pool._worker_factory = build_replacement
-    retirement_task = asyncio.create_task(
-        pool._retire_terminal_transport(account_id, cast(Any, old_worker))
-    )
+    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, old_worker)))
     await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
 
     restart_task = asyncio.create_task(pool.restart_worker(account_id))
     await asyncio.sleep(0)
@@ -618,8 +634,9 @@ async def test_restart_waits_for_existing_retirement_barrier() -> None:
     assert built == []
 
     release_stop.set()
-    await retirement_task
+    await wrapper
     assert await restart_task == "restarted"
+    assert canonical.done() is True
     assert built == [account_id]
     assert pool.has(account_id) is True
 
@@ -645,17 +662,6 @@ async def test_slow_retirement_does_not_block_other_account_generation(
             if self.slow:
                 slow_entered.set()
                 await release_slow.wait()
-
-    class ReplacementWorker:
-        state = WorkerState.DISABLED
-        lifecycle_error = None
-        _stop_requested = False
-
-        def __init__(self) -> None:
-            self._client = SimpleNamespace(_task=None)
-
-        def start(self) -> None:
-            return None
 
     slow_id = "a-slow-retirement"
     fast_id = "b-fast-retirement"
@@ -686,17 +692,18 @@ async def test_slow_retirement_does_not_block_other_account_generation(
         return cast(Any, ReplacementWorker())
 
     pool._worker_factory = build_replacement
-    slow_task = asyncio.create_task(
+    slow_wrapper = asyncio.create_task(
         pool._retire_terminal_transport(slow_id, cast(Any, slow_worker))
     )
-    fast_task = asyncio.create_task(
+    fast_wrapper = asyncio.create_task(
         pool._retire_terminal_transport(fast_id, cast(Any, fast_worker))
     )
     await slow_entered.wait()
-    await fast_task
+    await fast_wrapper
+    await asyncio.sleep(0)
 
-    assert slow_id in pool._retirement_barriers
-    assert fast_id not in pool._retirement_barriers
+    assert slow_id in pool._retirement_tasks
+    assert fast_id not in pool._retirement_tasks
     reconcile = await pool.reconcile_desired_accounts()
     assert reconcile == {"started": [fast_id], "stopped": []}
     assert built == [fast_id]
@@ -706,8 +713,209 @@ async def test_slow_retirement_does_not_block_other_account_generation(
     assert fast_worker.stop_calls == 1
 
     release_slow.set()
-    await slow_task
+    await slow_wrapper
     reconcile = await pool.reconcile_desired_accounts()
     assert reconcile == {"started": [slow_id], "stopped": []}
     assert built == [fast_id, slow_id]
     assert pool.has(slow_id) is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ensure_stopped_keeps_pool_owned_retirement_alive() -> None:
+    pool = AccountPool()
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class BlockingWorker:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+
+    account_id = "cancelled-ensure-stop"
+    worker = BlockingWorker()
+    pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, worker)})
+
+    caller = asyncio.create_task(pool.ensure_stopped(account_id))
+    await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert canonical.done() is False
+    assert pool._retirement_tasks.get(account_id) is canonical
+    assert pool.has(account_id) is False
+    assert pool.ensure_started(account_id) == "retiring"
+    assert worker.stop_calls == 1
+
+    release_stop.set()
+    await canonical
+    await asyncio.sleep(0)
+    assert account_id not in pool._retirement_tasks
+    assert worker.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_restart_caller_does_not_release_retirement_or_start_replacement() -> None:
+    pool = AccountPool()
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+    built: list[str] = []
+
+    class BlockingWorker:
+        async def stop(self) -> None:
+            stop_entered.set()
+            await release_stop.wait()
+
+    account_id = "cancelled-restart"
+    old_worker = BlockingWorker()
+    pool._workers = cast(dict[str, AccountWorker], {account_id: cast(Any, old_worker)})
+
+    def build_replacement(replacement_id: str) -> AccountWorker:
+        built.append(replacement_id)
+        return cast(Any, ReplacementWorker())
+
+    pool._worker_factory = build_replacement
+    caller = asyncio.create_task(pool.restart_worker(account_id))
+    await stop_entered.wait()
+    canonical = pool._retirement_tasks[account_id]
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert canonical.done() is False
+    assert pool._retirement_tasks.get(account_id) is canonical
+    assert pool.has(account_id) is False
+    assert built == []
+    assert pool.ensure_started(account_id) == "retiring"
+
+    release_stop.set()
+    await canonical
+    await asyncio.sleep(0)
+    assert account_id not in pool._retirement_tasks
+    assert built == []
+
+    assert pool.ensure_started(account_id) == "started"
+    assert built == [account_id]
+    assert pool.has(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_slow_retirement_does_not_block_unrelated_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AccountPool()
+    slow_entered = asyncio.Event()
+    release_slow = asyncio.Event()
+    built: list[str] = []
+
+    class SlowWorker:
+        async def stop(self) -> None:
+            slow_entered.set()
+            await release_slow.wait()
+
+    slow_id = "a-undesired-slow"
+    stable_id = "b-stable"
+    new_id = "c-new"
+    slow_worker = SlowWorker()
+    stable_worker = ReplacementWorker()
+    pool._workers = cast(
+        dict[str, AccountWorker],
+        {slow_id: cast(Any, slow_worker), stable_id: cast(Any, stable_worker)},
+    )
+
+    async def desired_accounts():
+        return [SimpleNamespace(account_id=stable_id), SimpleNamespace(account_id=new_id)]
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    def build_replacement(account_id: str) -> AccountWorker:
+        built.append(account_id)
+        return cast(Any, ReplacementWorker())
+
+    pool._worker_factory = build_replacement
+    result = await asyncio.wait_for(pool.reconcile_desired_accounts(), timeout=0.1)
+    await slow_entered.wait()
+
+    assert result == {"started": [new_id], "stopped": [slow_id]}
+    assert built == [new_id]
+    assert pool.has(stable_id) is True
+    assert pool.has(new_id) is True
+    assert pool.has(slow_id) is False
+    assert slow_id in pool._retirement_tasks
+    assert pool._retirement_tasks[slow_id].done() is False
+
+    release_slow.set()
+    await drain_retirements(pool)
+    assert slow_id not in pool._retirement_tasks
+
+
+@pytest.mark.asyncio
+async def test_reconcile_starts_multi_account_retirements_without_serial_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AccountPool()
+    slow_entered = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_completed = asyncio.Event()
+
+    class SlowWorker:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            slow_entered.set()
+            await release_slow.wait()
+
+    class FastWorker:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            fast_completed.set()
+
+    slow_id = "a-retire-slow"
+    fast_id = "b-retire-fast"
+    slow = SlowWorker()
+    fast = FastWorker()
+    pool._workers = cast(
+        dict[str, AccountWorker],
+        {slow_id: cast(Any, slow), fast_id: cast(Any, fast)},
+    )
+
+    async def desired_accounts():
+        return []
+
+    monkeypatch.setattr(
+        account_pool_mod.domain_accounts,
+        "list_desired_running_accounts",
+        desired_accounts,
+    )
+
+    result = await asyncio.wait_for(pool.reconcile_desired_accounts(), timeout=0.1)
+    await slow_entered.wait()
+    await fast_completed.wait()
+    await asyncio.sleep(0)
+
+    assert result == {"started": [], "stopped": [slow_id, fast_id]}
+    assert slow.stop_calls == 1
+    assert fast.stop_calls == 1
+    assert slow_id in pool._retirement_tasks
+    assert pool._retirement_tasks[slow_id].done() is False
+    assert fast_id not in pool._retirement_tasks
+
+    release_slow.set()
+    await drain_retirements(pool)
+    assert pool._retirement_tasks == {}
