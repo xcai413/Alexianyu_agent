@@ -294,8 +294,12 @@ async def test_normal_transport_end_in_needs_validation_stays_fail_closed(
         desired_accounts,
     )
     replacements: list[str] = []
-    pool._worker_factory = lambda replacement_id: replacements.append(replacement_id)  # type: ignore[assignment,return-value]
 
+    def unexpected_replacement(replacement_id: str) -> AccountWorker:
+        replacements.append(replacement_id)
+        raise AssertionError("NEEDS_VALIDATION must not auto-rebuild")
+
+    pool._worker_factory = unexpected_replacement
     result = await pool.reconcile_desired_accounts()
     assert result["started"] == []
     assert pool.get(account_id) is worker
