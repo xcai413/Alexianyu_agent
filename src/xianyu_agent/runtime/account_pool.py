@@ -329,9 +329,7 @@ class AccountPool:
                 *(asyncio.shield(task) for task in tasks),
                 return_exceptions=True,
             )
-            for result in results:
-                if isinstance(result, Exception):
-                    errors.append(result)
+            errors.extend(result for result in results if isinstance(result, Exception))
             # Done callbacks normally remove these entries.  Remove any done
             # leftovers synchronously so an already-complete task cannot keep a
             # drain loop alive merely because its callback has not run yet.
@@ -442,7 +440,7 @@ class AccountPool:
         # Retirement is scheduled, not awaited: account A's slow physical
         # cleanup may block only account A's next generation, never B/C.
         stopped: list[str] = []
-        for account_id, worker in sorted(list(self._workers.items())):
+        for account_id, worker in sorted(self._workers.items()):
             if account_id in desired:
                 continue
             task = self._schedule_stop_retirement(account_id, worker, reason="reconcile")
