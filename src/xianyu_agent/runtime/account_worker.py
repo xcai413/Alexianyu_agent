@@ -102,6 +102,12 @@ class _WorkerOwnedWsClient(WsClient):
     async def _emit_state(self, new_state: ConnectionState, detail: str | None = None) -> None:
         """Propagate canonical lifecycle callback failures instead of suppressing them."""
         self._state = new_state
+        if (
+            new_state is ConnectionState.DISCONNECTED
+            and detail == "stop() called"
+            and self._stop.is_set()
+        ):
+            detail = None
         event = ConnectionStateChanged(
             event_id=uuid.uuid4().hex,
             account_id=self.account_id,
@@ -497,7 +503,6 @@ class AccountWorker:
             if restored is WorkerState.NEEDS_VALIDATION:
                 await self._set_worker_state(WorkerState.NEEDS_VALIDATION)
                 return
-
             await self._set_worker_state(WorkerState.CHECKING_SESSION)
             if self._credentials is not None:
                 ready = await self._recover_credentials(CredentialRecoveryRoute.ENSURE)
@@ -697,7 +702,6 @@ class AccountWorker:
     async def drain_injected_frames(self) -> None:
         """Wait until all synthetic frames already queued for this worker are consumed."""
         await self._drain_injected_frames()
-
     async def send_text(self, text: str) -> bool:
         return await self._client.send_text(text)
 
@@ -797,7 +801,6 @@ class AccountWorker:
     async def _persist_current_worker_state(self, *, detail: str | None = None) -> None:
         async with self._state_transition_lock:
             await self._persist_worker_state(self._worker_state, detail=detail)
-
     async def _load_persisted_worker_state(self) -> WorkerState | None:
         """Normalize canonical or legacy status, using durable validation as authority."""
         try:
