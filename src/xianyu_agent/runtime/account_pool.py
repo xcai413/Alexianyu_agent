@@ -255,7 +255,9 @@ class AccountPool:
         current = set(self._workers)
         stopped: list[str] = []
         for account_id in sorted(current - desired):
-            worker = self._workers.pop(account_id)
+            worker = self._workers.pop(account_id, None)
+            if worker is None:
+                continue
             await worker.stop()
             stopped.append(account_id)
         started: list[str] = []
