@@ -93,16 +93,23 @@ class AccountPool:
             if completed.cancelled():
                 return
             error = completed.exception()
-            if error is None:
+            if error is None and worker.state is not WorkerState.ERROR:
                 self._observe_transport_task(account_id, worker)
                 return
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
-            logger.error(
-                "account worker startup failed account=%s error=%s",
-                account_id,
-                error,
-            )
+            if error is None:
+                logger.error(
+                    "account worker startup ended in terminal state account=%s state=%s",
+                    account_id,
+                    worker.state.value,
+                )
+            else:
+                logger.error(
+                    "account worker startup failed account=%s error=%s",
+                    account_id,
+                    error,
+                )
 
         task.add_done_callback(_completed)
 
@@ -122,7 +129,13 @@ class AccountPool:
             if completed.cancelled():
                 return
             error = completed.exception()
-            if isinstance(error, Exception):
+            lifecycle_error = worker.lifecycle_error
+            if isinstance(lifecycle_error, Exception):
+                cleanup = asyncio.create_task(
+                    self._retire_failed_transport(account_id, worker, lifecycle_error),
+                    name=f"worker-lifecycle-failure-{account_id}",
+                )
+            elif isinstance(error, Exception):
                 cleanup = asyncio.create_task(
                     self._retire_failed_transport(account_id, worker, error),
                     name=f"worker-lifecycle-failure-{account_id}",
@@ -250,9 +263,7 @@ class AccountPool:
             worker = self._worker_factory(account_id)
             self._workers[account_id] = worker
             try:
-                task = worker.start()
-                if task is not None:
-                    await task
+                self._start_observed(account_id, worker)
             except AccountConnectionAlreadyRunningError:
                 if self._workers.get(account_id) is worker:
                     self._workers.pop(account_id, None)
@@ -262,7 +273,6 @@ class AccountPool:
                     self._workers.pop(account_id, None)
                 logger.exception("account worker startup failed account=%s", account_id)
             else:
-                self._observe_transport_task(account_id, worker)
                 started.append(account_id)
         return {"started": started, "stopped": stopped}
 
