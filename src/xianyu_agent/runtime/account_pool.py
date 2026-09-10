@@ -34,6 +34,7 @@ class AccountPool:
         self._startup_tasks: dict[str, asyncio.Task[None]] = {}
         self._transport_tasks: dict[str, asyncio.Task[None]] = {}
         self._lifecycle_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._retirement_barriers: dict[str, asyncio.Future[None]] = {}
 
     @classmethod
     async def from_enabled_accounts(
@@ -152,13 +153,74 @@ class AccountPool:
 
         task.add_done_callback(_completed)
 
+    def _claim_worker_retirement(
+        self,
+        account_id: str,
+        worker: AccountWorker,
+    ) -> asyncio.Future[None] | None:
+        """Claim one account generation for exclusive physical cleanup."""
+        if account_id in self._retirement_barriers:
+            return None
+        if self._workers.get(account_id) is not worker:
+            return None
+        barrier = asyncio.get_running_loop().create_future()
+        self._retirement_barriers[account_id] = barrier
+        self._workers.pop(account_id, None)
+        return barrier
+
+    def _finish_worker_retirement(
+        self,
+        account_id: str,
+        barrier: asyncio.Future[None],
+    ) -> None:
+        """Release a retirement barrier only after old physical cleanup completed."""
+        if self._retirement_barriers.get(account_id) is barrier:
+            self._retirement_barriers.pop(account_id, None)
+        if not barrier.done():
+            barrier.set_result(None)
+
+    async def _await_worker_retirement(self, account_id: str) -> None:
+        """Wait until no older worker generation for this account is retiring."""
+        while True:
+            barrier = self._retirement_barriers.get(account_id)
+            if barrier is None:
+                return
+            await asyncio.shield(barrier)
+
+    async def _drain_observed_transport_tasks(self) -> None:
+        """Drain observed transports so their completion callbacks can register cleanup."""
+        while self._transport_tasks:
+            tasks = tuple(self._transport_tasks.values())
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _drain_lifecycle_cleanup_tasks(self) -> None:
+        """Drain pool-owned lifecycle cleanup tasks, including tasks created while draining."""
+        while self._lifecycle_cleanup_tasks:
+            tasks = tuple(self._lifecycle_cleanup_tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(
+                        "account worker lifecycle cleanup task failed",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+
+    async def _drain_retirement_barriers(self) -> None:
+        """Wait for retirement owners not represented by the worker map."""
+        while self._retirement_barriers:
+            barriers = tuple(self._retirement_barriers.values())
+            await asyncio.gather(*(asyncio.shield(barrier) for barrier in barriers))
+
     async def _retire_failed_transport(
         self,
         account_id: str,
         worker: AccountWorker,
         error: Exception,
     ) -> None:
-        """Route transport-task failure through AccountWorker fail-closed ownership."""
+        """Route transport-task failure through exclusive AccountPool cleanup ownership."""
+        barrier = self._claim_worker_retirement(account_id, worker)
+        if barrier is None:
+            return
         try:
             await worker._fail_closed_transport_after_lifecycle_error(error)
         except Exception:
@@ -167,20 +229,12 @@ class AccountPool:
                 account_id,
             )
         finally:
-            if self._workers.get(account_id) is worker:
-                self._workers.pop(account_id, None)
+            self._finish_worker_retirement(account_id, barrier)
             logger.error(
                 "account worker transport lifecycle failed account=%s error=%s",
                 account_id,
                 error,
             )
-
-    def _claim_worker_retirement(self, account_id: str, worker: AccountWorker) -> bool:
-        """Atomically claim cleanup ownership for the currently mapped worker instance."""
-        if self._workers.get(account_id) is not worker:
-            return False
-        self._workers.pop(account_id, None)
-        return True
 
     async def _retire_terminal_transport(
         self,
@@ -188,7 +242,8 @@ class AccountPool:
         worker: AccountWorker,
     ) -> None:
         """Retire a normally-ended transport whose owner reached terminal ERROR."""
-        if not self._claim_worker_retirement(account_id, worker):
+        barrier = self._claim_worker_retirement(account_id, worker)
+        if barrier is None:
             return
         try:
             await worker.stop()
@@ -198,6 +253,7 @@ class AccountPool:
                 account_id,
             )
         finally:
+            self._finish_worker_retirement(account_id, barrier)
             logger.error(
                 "account worker transport ended in terminal state account=%s state=%s",
                 account_id,
@@ -252,8 +308,28 @@ class AccountPool:
         return True
 
     async def stop_all(self) -> None:
-        for worker in list(self._workers.values()):
-            await worker.stop()
+        claimed: list[tuple[str, AccountWorker, asyncio.Future[None]]] = []
+        for account_id, worker in list(self._workers.items()):
+            barrier = self._claim_worker_retirement(account_id, worker)
+            if barrier is not None:
+                claimed.append((account_id, worker, barrier))
+
+        errors: list[Exception] = []
+        for account_id, worker, barrier in claimed:
+            try:
+                await worker.stop()
+            except Exception as exc:
+                errors.append(exc)
+                logger.exception("account worker stop failed account=%s", account_id)
+            finally:
+                self._finish_worker_retirement(account_id, barrier)
+
+        await self._drain_observed_transport_tasks()
+        await self._drain_lifecycle_cleanup_tasks()
+        await self._drain_retirement_barriers()
+
+        if errors:
+            raise errors[0]
 
     async def reconcile_desired_accounts(self) -> dict[str, list[str]]:
         """令内存 Worker 集合与持久化期望状态保持一致。"""
@@ -262,13 +338,21 @@ class AccountPool:
         current = set(self._workers)
         stopped: list[str] = []
         for account_id in sorted(current - desired):
-            worker = self._workers.pop(account_id, None)
+            worker = self._workers.get(account_id)
             if worker is None:
                 continue
-            await worker.stop()
+            barrier = self._claim_worker_retirement(account_id, worker)
+            if barrier is None:
+                continue
+            try:
+                await worker.stop()
+            finally:
+                self._finish_worker_retirement(account_id, barrier)
             stopped.append(account_id)
         started: list[str] = []
         for account_id in sorted(desired - current):
+            if account_id in self._retirement_barriers:
+                continue
             worker = self._worker_factory(account_id)
             self._workers[account_id] = worker
             try:
@@ -295,6 +379,8 @@ class AccountPool:
         if worker is not None:
             self._start_observed(account_id, worker)
             return "already_running"
+        if account_id in self._retirement_barriers:
+            return "retiring"
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
@@ -306,17 +392,37 @@ class AccountPool:
 
     async def ensure_stopped(self, account_id: str) -> str:
         """确保一个 Worker 已从池中停止并移除。"""
-        worker = self._workers.pop(account_id, None)
+        existing_barrier = self._retirement_barriers.get(account_id)
+        if existing_barrier is not None:
+            await asyncio.shield(existing_barrier)
+            return "already_stopped"
+        worker = self._workers.get(account_id)
         if worker is None:
             return "already_stopped"
-        await worker.stop()
+        barrier = self._claim_worker_retirement(account_id, worker)
+        if barrier is None:
+            await self._await_worker_retirement(account_id)
+            return "already_stopped"
+        try:
+            await worker.stop()
+        finally:
+            self._finish_worker_retirement(account_id, barrier)
         return "stopped"
 
     async def restart_worker(self, account_id: str) -> str:
         """重建一个账号的 Worker,避免复用已停止 client 的瞬时状态。"""
-        previous = self._workers.pop(account_id, None)
+        await self._await_worker_retirement(account_id)
+        previous = self._workers.get(account_id)
         if previous is not None:
-            await previous.stop()
+            barrier = self._claim_worker_retirement(account_id, previous)
+            if barrier is None:
+                await self._await_worker_retirement(account_id)
+            else:
+                try:
+                    await previous.stop()
+                finally:
+                    self._finish_worker_retirement(account_id, barrier)
+        await self._await_worker_retirement(account_id)
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
