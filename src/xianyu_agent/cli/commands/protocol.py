@@ -295,7 +295,6 @@ def connect(
     if not get_settings().ws_url:
         console.print("[red]未配置 XIANYU_WS_URL[/red] .env 或留空(可配合 inject 调试)。")
     counts = {"message": 0, "order": 0, "system": 0, "error": 0}
-    stop_at = time.monotonic() + seconds
 
     async def on_event(event) -> None:
         counts[
@@ -358,6 +357,7 @@ def connect(
             account_lock,
             operation="protocol-connect",
         )
+        stop_at = time.monotonic() + seconds
         stop_event = asyncio.Event()
         try:
             while not stop_event.is_set() and time.monotonic() < stop_at:
