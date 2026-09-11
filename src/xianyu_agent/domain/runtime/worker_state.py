@@ -131,6 +131,7 @@ _TRANSITIONS: dict[WorkerState, frozenset[WorkerState]] = {
             WorkerState.CHECKING_SESSION,
             WorkerState.STOPPING,
             WorkerState.DISABLED,
+            WorkerState.ERROR,
         }
     ),
     WorkerState.STOPPING: frozenset(

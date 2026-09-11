@@ -45,6 +45,7 @@ def test_worker_state_contract_contains_required_states() -> None:
         (WorkerState.SYNCING, WorkerState.ONLINE),
         (WorkerState.ONLINE, WorkerState.RECONNECTING),
         (WorkerState.RECONNECTING, WorkerState.CONNECTING),
+        (WorkerState.NEEDS_VALIDATION, WorkerState.ERROR),
         (WorkerState.ONLINE, WorkerState.STOPPING),
         (WorkerState.STOPPING, WorkerState.DISABLED),
         (WorkerState.CONNECTING, WorkerState.ERROR),
@@ -79,6 +80,7 @@ def test_credential_refresh_returns_to_session_check() -> None:
 def test_validation_gate_requires_recheck_before_online() -> None:
     assert can_transition(WorkerState.REGISTERING, WorkerState.NEEDS_VALIDATION)
     assert can_transition(WorkerState.NEEDS_VALIDATION, WorkerState.CHECKING_SESSION)
+    assert can_transition(WorkerState.NEEDS_VALIDATION, WorkerState.ERROR)
     assert not can_transition(WorkerState.NEEDS_VALIDATION, WorkerState.ONLINE)
 
 

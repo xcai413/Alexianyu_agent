@@ -9,10 +9,21 @@ from xianyu_agent.application.health.runtime_health import DaemonHealth, observe
 from xianyu_agent.db import DaemonInstance
 from xianyu_agent.domain.account import state as domain_accounts
 from xianyu_agent.domain.runtime import daemon as daemon_domain
+from xianyu_agent.domain.runtime.worker_state import WorkerState, worker_state_from_persistence
 from xianyu_agent.utils.time_utils import format_duration
 
 WORKER_STALE_AFTER_S = 90.0
-ACTIVE_WORKER_STATES = {"connected", "connecting", "reconnecting"}
+ACTIVE_WORKER_STATES = {
+    "connected",
+    "starting",
+    "checking_session",
+    "refreshing_credential",
+    "connecting",
+    "registering",
+    "syncing",
+    "online",
+    "reconnecting",
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,22 @@ class RuntimeSnapshot:
         return tuple(alerts)
 
 
+def is_worker_healthy_online(actual_state: str) -> bool:
+    """Return whether a persisted worker status proves business readiness.
+
+    Canonical ``online`` is authoritative. Legacy ``connected`` remains accepted
+    only as a compatibility status for pre-WorkerState writers; the canonical
+    mapping still treats ``connected`` as SYNCING and never promotes it to ONLINE.
+    """
+    normalized = actual_state.strip().lower()
+    if normalized == "connected":
+        return True
+    try:
+        return worker_state_from_persistence(normalized) is WorkerState.ONLINE
+    except ValueError:
+        return False
+
+
 async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnapshot:
     """从 SQLite 与 PID 读取跨进程一致的 daemon/Worker 快照。"""
     current = now or datetime.now(UTC)
@@ -92,7 +119,7 @@ async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnaps
             now=current,
         )
         if (
-            actual == "connected"
+            is_worker_healthy_online(actual)
             and heartbeat_age_s is not None
             and heartbeat_age_s > WORKER_STALE_AFTER_S
         ):
@@ -132,14 +159,34 @@ def _alignment(*, enabled: bool, desired_state: str, actual_state: str) -> tuple
         return False, "停用账号的期望状态不是 stopped"
     expects_running = enabled and desired_state == "running"
     if expects_running:
-        if actual_state == "connected":
+        if is_worker_healthy_online(actual_state):
             return True, None
         if actual_state == "stale":
             return False, "Worker 心跳过期"
         return False, f"期望 running,实际 {actual_state}"
-    if actual_state in ACTIVE_WORKER_STATES or actual_state == "stale":
+    if _is_active_worker_state(actual_state) or actual_state == "stale":
         return False, f"期望 stopped,实际 {actual_state}"
     return True, None
+
+
+def _is_active_worker_state(actual_state: str) -> bool:
+    normalized = actual_state.strip().lower()
+    if normalized in ACTIVE_WORKER_STATES:
+        return True
+    try:
+        state = worker_state_from_persistence(normalized)
+    except ValueError:
+        return False
+    return state in {
+        WorkerState.STARTING,
+        WorkerState.CHECKING_SESSION,
+        WorkerState.REFRESHING_CREDENTIAL,
+        WorkerState.CONNECTING,
+        WorkerState.REGISTERING,
+        WorkerState.SYNCING,
+        WorkerState.ONLINE,
+        WorkerState.RECONNECTING,
+    }
 
 
 def _age_seconds(value: datetime, now: datetime) -> float:

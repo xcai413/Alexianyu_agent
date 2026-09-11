@@ -15,6 +15,7 @@ from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import Message, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts
 from xianyu_agent.protocol.signer import CookieSigner
+from xianyu_agent.protocol.ws.sync import ACK_DIFF_LWP, GET_STATE_LWP
 from xianyu_agent.services.account_pool import AccountPool
 
 
@@ -28,7 +29,8 @@ class FakeServer:
         self._counter += 1
         try:
             await complete_test_registration(ws)
-            # Push one message immediately, then read until close.
+            await self._complete_subscription_ready(ws)
+            # Push one message only after the canonical subscription-ready exchange.
             await ws.send(
                 json.dumps(
                     {
@@ -50,6 +52,56 @@ class FakeServer:
             pass
         finally:
             await ws.close()
+
+    async def _complete_subscription_ready(self, ws) -> None:
+        """Drive the canonical syncExtra -> getState -> ackDiff readiness exchange."""
+        await ws.send(
+            json.dumps(
+                {
+                    "code": 0,
+                    "headers": {
+                        "mid": f"sync-extra-{self._counter}",
+                        "sid": "test-session",
+                    },
+                    "body": {"syncExtraType": {"type": 1}},
+                }
+            )
+        )
+
+        get_state = await self._recv_request(ws, GET_STATE_LWP)
+        await ws.send(
+            json.dumps(
+                {
+                    "code": 200,
+                    "headers": {
+                        "mid": get_state["headers"]["mid"],
+                        "sid": "test-session",
+                    },
+                    "body": {"topic": "sync", "pts": self._counter},
+                }
+            )
+        )
+
+        ack_diff = await self._recv_request(ws, ACK_DIFF_LWP)
+        await ws.send(
+            json.dumps(
+                {
+                    "code": 200,
+                    "headers": {
+                        "mid": ack_diff["headers"]["mid"],
+                        "sid": "test-session",
+                    },
+                }
+            )
+        )
+
+    @staticmethod
+    async def _recv_request(ws, expected_lwp: str) -> dict:
+        """Ignore protocol ACKs until the expected request arrives."""
+        while True:
+            payload = json.loads(await ws.recv())
+            if payload.get("lwp") == expected_lwp:
+                return payload
 
 
 @pytest.fixture
@@ -86,12 +138,16 @@ async def test_pool_three_accounts_online(
     started = pool.start_all()
     assert len(started) == 3
 
-    # Give workers time to connect, receive, and persist.
+    # Give workers time to connect, finish SubscriptionReady, receive, and persist.
     await asyncio.sleep(3.0)
 
     statuses = await pool.status()
-    connected = [s for s in statuses if s["db_status"] == "connected"]
-    assert len(connected) == 3, f"statuses={statuses}"
+    online = [
+        s
+        for s in statuses
+        if s["worker_state"] == "online" and s["db_status"] == "online"
+    ]
+    assert len(online) == 3, f"statuses={statuses}"
     for s in statuses:
         assert s["last_heartbeat_at"] is not None, f"no heartbeat for {s}"
 
