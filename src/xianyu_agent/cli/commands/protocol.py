@@ -67,15 +67,15 @@ def _raise_credential_preparation_failure(result: CredentialResult[object]) -> N
     """Render only policy-classified, secret-free standalone preparation failures."""
     if result.state is CredentialResultState.NEEDS_VALIDATION:
         console.print(
-            "[red]账号凭据需要 App 人工验证，未启动 WS。[/red] "
+            "[red]账号凭据需要 App 人工验证,未启动 WS。[/red] "
             "完成验证后先执行 auth refresh。"
         )
     elif result.state is CredentialResultState.RETRYABLE_FAILURE:
-        console.print("[red]凭据准备暂时失败，未启动 WS；请稍后重试。[/red]")
+        console.print("[red]凭据准备暂时失败,未启动 WS;请稍后重试。[/red]")
     else:
         console.print(
-            "[red]账号凭据不可用，未启动 WS。[/red] "
-            "请先检查 auth status，并按需执行 auth login / auth refresh。"
+            "[red]账号凭据不可用,未启动 WS。[/red] "
+            "请先检查 auth status,并按需执行 auth login / auth refresh。"
         )
     raise typer.Exit(code=2)
 
@@ -100,7 +100,7 @@ async def _start_with_prepared_credentials(
         result = await _build_credential_supervisor().ensure(account_id)
     except Exception as exc:
         account_lock.release()
-        console.print("[red]凭据准备失败，未启动 WS。[/red]")
+        console.print("[red]凭据准备失败,未启动 WS。[/red]")
         raise typer.Exit(code=2) from exc
 
     if result.state is not CredentialResultState.SUCCESS:
