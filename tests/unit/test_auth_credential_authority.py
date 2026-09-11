@@ -1,7 +1,8 @@
-"""Regression coverage for canonical CLI credential mutation authority."""
+"""Regression coverage for canonical credential mutation authority."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -17,6 +18,12 @@ from xianyu_agent.application.session import (
     CredentialResultState,
 )
 from xianyu_agent.cli.commands import auth as auth_cli
+from xianyu_agent.domain.runtime.worker_state import WorkerState
+from xianyu_agent.protocol.client import ClientConfig, WsClient
+from xianyu_agent.protocol.events import ConnectionState
+from xianyu_agent.protocol.ws_auth import WsAuthError
+from xianyu_agent.runtime.account_worker import AccountWorker
+from xianyu_agent.runtime.recovery import RecoverySupervisor
 
 ACCOUNT_ID = "cli-credential-account"
 
@@ -227,3 +234,183 @@ def test_live_worker_lock_conflict_prevents_cross_component_refresh_mutation(
 
     assert exc_info.value.exit_code == 2
     assert built is False
+
+
+class _WorkerClient:
+    def __init__(self) -> None:
+        self.state = ConnectionState.IDLE
+        self.subscription_ready = None
+        self.on_state = None
+        self.on_auth_failure = None
+        self.on_event = None
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self.state = ConnectionState.CONNECTING
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self.state = ConnectionState.DISCONNECTED
+
+    async def send_text(self, _text: str) -> bool:
+        return False
+
+
+class _ConcurrentValidationCredentials:
+    def __init__(self) -> None:
+        self.refresh_calls: list[bool] = []
+        self.refresh_entered = asyncio.Event()
+        self.allow_refresh = asyncio.Event()
+
+    async def ensure(self, account_id: str) -> CredentialResult[object]:
+        return CredentialResult(
+            state=CredentialResultState.NEEDS_VALIDATION,
+            health=CredentialHealth(
+                account_id=account_id,
+                state=CredentialHealthState.NEEDS_VALIDATION,
+            ),
+            code=CredentialFailureCode.NEEDS_VALIDATION.value,
+        )
+
+    async def refresh(
+        self,
+        account_id: str,
+        *,
+        validation_recovery: bool = False,
+    ) -> CredentialResult[object]:
+        self.refresh_calls.append(validation_recovery)
+        self.refresh_entered.set()
+        await self.allow_refresh.wait()
+        return CredentialResult(
+            state=CredentialResultState.SUCCESS,
+            health=CredentialHealth(
+                account_id=account_id,
+                state=CredentialHealthState.HEALTHY,
+            ),
+            credential=CredentialHandle("fresh-validation-token"),
+            refreshed=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recover_validation_refreshes_and_starts_exactly_once() -> None:
+    client = _WorkerClient()
+    credentials = _ConcurrentValidationCredentials()
+    worker = AccountWorker(
+        ACCOUNT_ID,
+        client=client,  # type: ignore[arg-type]
+        credential_supervisor=credentials,  # type: ignore[arg-type]
+        recovery_supervisor=RecoverySupervisor(credentials),  # type: ignore[arg-type]
+        persist_events=False,
+        automation_mode="passive",
+    )
+    startup = worker.start()
+    assert startup is not None
+    await startup
+    assert worker.state is WorkerState.NEEDS_VALIDATION
+    assert client.start_calls == 0
+
+    first = asyncio.create_task(worker.recover_validation())
+    await credentials.refresh_entered.wait()
+    second = asyncio.create_task(worker.recover_validation())
+    await asyncio.sleep(0)
+    assert credentials.refresh_calls == [True]
+
+    credentials.allow_refresh.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert (first_result, second_result) == (True, False)
+    assert credentials.refresh_calls == [True]
+    assert client.start_calls == 1
+    assert worker.state is WorkerState.CONNECTING
+
+
+class _ReconnectCredentialSource:
+    def __init__(self) -> None:
+        self.current = "stale-token"
+        self.transport_reads: list[str] = []
+        self.refresh_calls: list[bool] = []
+
+    async def get_credentials(
+        self,
+        _account_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> str:
+        assert force_refresh is False, "transport must never request credential refresh"
+        self.transport_reads.append(self.current)
+        return self.current
+
+    async def ensure(self, account_id: str) -> CredentialResult[object]:
+        return CredentialResult(
+            state=CredentialResultState.SUCCESS,
+            health=CredentialHealth(account_id=account_id, state=CredentialHealthState.HEALTHY),
+            credential=CredentialHandle(self.current),
+        )
+
+    async def refresh(
+        self,
+        account_id: str,
+        *,
+        validation_recovery: bool = False,
+    ) -> CredentialResult[object]:
+        self.refresh_calls.append(validation_recovery)
+        self.current = "fresh-token"
+        return CredentialResult(
+            state=CredentialResultState.SUCCESS,
+            health=CredentialHealth(account_id=account_id, state=CredentialHealthState.HEALTHY),
+            credential=CredentialHandle(self.current),
+            refreshed=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_refreshes_via_worker_then_transport_retry_reads_new_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _ReconnectCredentialSource()
+    client = WsClient(
+        ACCOUNT_ID,
+        config=ClientConfig(
+            ws_url="wss://unit.test/ws",
+            auth_retry_delay_s=0.0,
+            min_backoff_s=0.001,
+            max_backoff_s=0.001,
+        ),
+        token_provider=source,  # type: ignore[arg-type]
+    )
+    worker = AccountWorker(
+        ACCOUNT_ID,
+        client=client,
+        credential_supervisor=source,  # type: ignore[arg-type]
+        recovery_supervisor=RecoverySupervisor(source),  # type: ignore[arg-type]
+        persist_events=False,
+        automation_mode="passive",
+    )
+    worker._worker_state = WorkerState.CONNECTING
+    attempts = 0
+
+    async def connect_and_serve() -> None:
+        nonlocal attempts
+        attempts += 1
+        credential = await source.get_credentials(ACCOUNT_ID)
+        if attempts == 1:
+            assert credential == "stale-token"
+            raise WsAuthError("AUTH_FAILED")
+        assert credential == "fresh-token"
+        client._stop.set()
+
+    async def no_wait(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(client, "_connect_and_serve", connect_and_serve)
+    monkeypatch.setattr(client, "_sleep_or_stop", no_wait)
+
+    await client._run_forever()
+
+    assert source.refresh_calls == [False]
+    assert source.transport_reads == ["stale-token", "fresh-token"]
+    assert attempts == 2
+    assert worker.state is WorkerState.CHECKING_SESSION
