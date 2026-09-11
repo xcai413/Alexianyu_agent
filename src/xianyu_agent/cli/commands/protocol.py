@@ -301,7 +301,7 @@ def inject(
     fixture: str = typer.Option(..., "--fixture", "-f", help="JSONL 文件路径,每行一个 WsFrame。"),
     count: int = typer.Option(1, "--count", "-n", help="每个帧重复次数。"),
 ) -> None:
-    """从 fixture 注入帧(用于离线测试 parser 与入库)。"""
+    """从 fixture 注入帧(用于纯离线测试 parser 与入库)。"""
     p = Path(fixture)
     if not p.exists():
         console.print(f"[red]fixture 不存在: {p}[/red]")
@@ -316,12 +316,11 @@ def inject(
 
     async def _run() -> None:
         worker = AccountWorker(account_id)
-        worker.start()
         try:
             for _ in range(count):
                 for f in raw_frames:
                     worker.inject_frame(WsFrame.model_validate(f))
-            await asyncio.sleep(2.0)
+            await worker.drain_injected_frames()
         finally:
             await worker.stop()
 
