@@ -126,7 +126,8 @@ async def test_current_read_does_not_refresh_or_rewrite_durable_credential(ws_db
         after = (await session.execute(select(WsCredential))).scalar_one()
         after_snapshot = (after.encrypted_token, after.device_id, after.expires_at)
     assert current == prepared
-    assert provider.calls and len(provider.calls) == 1
+    assert provider.calls
+    assert len(provider.calls) == 1
     assert after_snapshot == before_snapshot
 
 
