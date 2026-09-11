@@ -13,6 +13,9 @@ from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.application.session import (
+    CredentialFailureCode,
+    CredentialHealthState,
+    CredentialResultState,
     CredentialSupervisor,
     QrLoginAccountBusyError,
     QrLoginApplication,
@@ -119,7 +122,7 @@ def status(
 def refresh(
     account_id: str = typer.Option(..., "--account", "-a"),
 ) -> None:
-    """用当前 Cookie 换取新的 IM accessToken;不会启动 WS Worker。"""
+    """通过 canonical CredentialSupervisor 刷新 IM accessToken。"""
 
     async def _run() -> None:
         account = await domain_accounts.get_account(account_id)
@@ -132,39 +135,56 @@ def refresh(
                 f"[cyan]pool stop --account {account_id}[/cyan],避免并发刷新。"
             )
             raise typer.Exit(code=2)
-        risk = await worker_risk.get(account_id)
-        if risk is not None and risk.is_cooling():
-            console.print(
-                "[yellow]账号处于 FAIL_SYS_USER_VALIDATE 验证冷却。[/yellow] "
-                f"请在 {format_local(risk.cooldown_until)} 后完成 App 人工验证,"
-                "再执行一次 auth refresh。"
-            )
-            raise typer.Exit(code=2)
-        signer = CookieSigner()
-        if await signer.fingerprint(account_id) is None:
-            console.print("[red]无 Cookie 可刷新。[/red] 请先 [cyan]auth login[/cyan]。")
-            raise typer.Exit(code=1)
-        try:
-            credentials = await WsTokenProvider(signer).get_credentials(
-                account_id, force_refresh=True
-            )
-        except WsAuthError as exc:
-            console.print(f"[red]IM Token 刷新失败:{exc}[/red]")
-            await _record_user_validate_circuit(account_id, exc)
-            if "Session过期" in str(exc):
-                console.print(
-                    f"请执行 [cyan]auth qr-login --account {account_id}[/cyan] 重新扫码。"
-                )
-            raise typer.Exit(code=2) from exc
-        cleared = await worker_risk.clear_after_refresh(account_id)
-        if cleared:
-            console.print("[green]验证熔断已解除;可在确认后启动该账号 Worker。[/green]")
-        console.print(
-            f"[green]OK[/green] 账号 [cyan]{account_id}[/cyan] IM Token 已加密缓存;"
-            f"有效期至 {format_local(credentials.expires_at)}。"
+
+        credentials = _build_credential_supervisor()
+        health = await credentials.inspect(account_id)
+        validation_recovery = health.state is CredentialHealthState.NEEDS_VALIDATION
+        result = await credentials.refresh(
+            account_id,
+            validation_recovery=validation_recovery,
         )
 
-    asyncio.run(_run())
+        if result.state is CredentialResultState.SUCCESS:
+            if validation_recovery:
+                console.print("[green]验证熔断已解除;可在确认后启动该账号 Worker。[/green]")
+            console.print(
+                f"[green]OK[/green] 账号 [cyan]{account_id}[/cyan] IM Token 已加密缓存;"
+                f"有效期至 {format_local(result.health.expires_at)}。"
+            )
+            return
+
+        if result.state is CredentialResultState.NEEDS_VALIDATION:
+            if result.health.validation_cooling:
+                console.print(
+                    "[yellow]账号仍处于 FAIL_SYS_USER_VALIDATE 验证冷却。[/yellow] "
+                    "完成 App 人工验证并等待冷却结束后,再执行一次 auth refresh。"
+                )
+            else:
+                console.print(
+                    "[yellow]账号仍需要 App 人工验证。[/yellow] "
+                    "完成验证后再执行一次 auth refresh。"
+                )
+            raise typer.Exit(code=2)
+
+        detail = result.code or result.message or "credential refresh failed"
+        if result.code == CredentialFailureCode.CREDENTIAL_MISSING.value:
+            console.print("[red]无 Cookie 可刷新。[/red] 请先 [cyan]auth login[/cyan]。")
+            raise typer.Exit(code=1)
+        console.print(f"[red]IM Token 刷新失败:{detail}[/red]")
+        if result.code == CredentialFailureCode.SESSION_EXPIRED.value:
+            console.print(
+                f"请执行 [cyan]auth qr-login --account {account_id}[/cyan] 重新扫码。"
+            )
+        raise typer.Exit(code=2)
+
+    # The same process-wide account lock used by Worker/QR/manual auth covers the
+    # entire desired-state check + credential mutation window.  This closes the
+    # check-then-act race where a Worker could start between the guard and refresh.
+    lock = _acquire_auth_lock(account_id, "token-refresh")
+    try:
+        asyncio.run(_run())
+    finally:
+        lock.release()
 
 
 @app.command("list")
@@ -368,15 +388,28 @@ def qr_login(
         lock.release()
 
 
+def _build_credential_supervisor(
+    *,
+    signer: CookieSigner | None = None,
+    token_provider: WsTokenProvider | None = None,
+) -> CredentialSupervisor:
+    """Build the canonical credential mutation boundary for CLI auth flows."""
+    signer = signer or CookieSigner()
+    return CredentialSupervisor(
+        LegacyWsCredentialBackend(signer=signer, provider=token_provider),
+        LegacyValidationGate(),
+    )
+
+
 def _build_qr_login_application(
     *,
     token_provider: WsTokenProvider | None = None,
 ) -> QrLoginApplication:
     """Wire the QR use case at the CLI composition boundary."""
     signer = CookieSigner()
-    credentials = CredentialSupervisor(
-        LegacyWsCredentialBackend(signer=signer, provider=token_provider),
-        LegacyValidationGate(),
+    credentials = _build_credential_supervisor(
+        signer=signer,
+        token_provider=token_provider,
     )
     return QrLoginApplication(
         platform=QRLoginClient(),
