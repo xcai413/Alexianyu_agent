@@ -501,6 +501,253 @@ async def test_standalone_entrypoints_preparation_failure_never_starts_transport
     assert "cookie=" not in rendered.lower()
 
 
+class _LongLivedStandaloneClient:
+    def __init__(
+        self,
+        *_args,
+        on_state=None,
+        on_error=None,
+        on_auth_failure=None,
+        **_kwargs,
+    ) -> None:
+        self.on_state = on_state
+        self.on_error = on_error
+        self.on_auth_failure = on_auth_failure
+        self.stop_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+def _healthy_standalone_backend() -> _StandaloneBackend:
+    return _StandaloneBackend(
+        CredentialBackendStatus(
+            account_id=ACCOUNT_ID,
+            cookie_available=True,
+            identity_available=True,
+            token_cached=True,
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+        )
+    )
+
+
+def test_protocol_connect_refreshes_after_auth_failure_and_allows_transport_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _healthy_standalone_backend()
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    settings = SimpleNamespace(
+        ws_url="wss://unit.test/ws",
+        account_lock_path=lambda _account_id: "unit-account.lock",
+    )
+    clients: list[_LongLivedStandaloneClient] = []
+    retry_decisions: list[bool] = []
+
+    def build_client(*args, **kwargs):
+        client = _LongLivedStandaloneClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    async def start_with_prepare(
+        account_id,
+        client,
+        _account_lock,
+        *,
+        operation,
+        supervisor,
+    ) -> None:
+        assert account_id == ACCOUNT_ID
+        assert operation == "protocol-connect"
+        result = await supervisor.ensure(account_id)
+        assert result.state is CredentialResultState.SUCCESS
+        assert client.on_auth_failure is not None
+        retry_decisions.append(await client.on_auth_failure(WsAuthError("expired")))
+
+    monotonic_values = iter([0.0, 2.0])
+    monkeypatch.setattr(protocol_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(protocol_cli, "_build_credential_supervisor", lambda: supervisor)
+    monkeypatch.setattr(protocol_cli, "AccountConnectionLock", lambda _path: object())
+    monkeypatch.setattr(protocol_cli, "WsClient", build_client)
+    monkeypatch.setattr(protocol_cli, "_start_with_prepared_credentials", start_with_prepare)
+    monkeypatch.setattr(
+        protocol_cli,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
+    )
+    monkeypatch.setattr(protocol_cli.console, "print", lambda *_args, **_kwargs: None)
+
+    protocol_cli.connect(account_id=ACCOUNT_ID, seconds=1.0, quiet=True)
+
+    assert backend.acquire_calls == [False, True]
+    assert retry_decisions == [False]
+    assert clients[0].stop_calls == 1
+
+
+def test_protocol_capture_recoverable_ws_auth_does_not_finish_before_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    backend = _healthy_standalone_backend()
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    settings = SimpleNamespace(
+        ws_url="wss://unit.test/ws",
+        data_dir=tmp_path,
+        account_lock_path=lambda _account_id: "unit-account.lock",
+    )
+    clients: list[_LongLivedStandaloneClient] = []
+    retry_decisions: list[bool] = []
+    output: list[str] = []
+
+    async def get_account(account_id: str):
+        assert account_id == ACCOUNT_ID
+        return SimpleNamespace(desired_state="stopped")
+
+    def build_client(*args, **kwargs):
+        client = _LongLivedStandaloneClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    async def start_with_prepare(
+        account_id,
+        client,
+        _account_lock,
+        *,
+        operation,
+        supervisor,
+    ) -> None:
+        assert account_id == ACCOUNT_ID
+        assert operation == "protocol-capture"
+        result = await supervisor.ensure(account_id)
+        assert result.state is CredentialResultState.SUCCESS
+        assert client.on_state is not None
+        assert client.on_error is not None
+        assert client.on_auth_failure is not None
+        await client.on_state(
+            SimpleNamespace(state=SimpleNamespace(value="connected"), detail=None)
+        )
+        await client.on_error(
+            SimpleNamespace(
+                code="ws_auth",
+                message="TOP-SECRET-STANDALONE-TOKEN cookie=session-secret",
+            )
+        )
+        retry_decisions.append(await client.on_auth_failure(WsAuthError("expired")))
+
+    monkeypatch.setattr(protocol_cli.domain_accounts, "get_account", get_account)
+    monkeypatch.setattr(protocol_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(protocol_cli, "_build_credential_supervisor", lambda: supervisor)
+    monkeypatch.setattr(protocol_cli, "AccountConnectionLock", lambda _path: object())
+    monkeypatch.setattr(protocol_cli, "WsClient", build_client)
+    monkeypatch.setattr(protocol_cli, "_start_with_prepared_credentials", start_with_prepare)
+    monkeypatch.setattr(
+        protocol_cli.console,
+        "print",
+        lambda value, **_kwargs: output.append(str(value)),
+    )
+
+    protocol_cli.capture(
+        account_id=ACCOUNT_ID,
+        seconds=0.001,
+        output=str(tmp_path / "capture.jsonl"),
+        target_messages=0,
+    )
+
+    assert backend.acquire_calls == [False, True]
+    assert retry_decisions == [False]
+    assert clients[0].stop_calls == 1
+    rendered = "\n".join(output)
+    assert "TOP-SECRET-STANDALONE-TOKEN" not in rendered
+    assert "cookie=" not in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_standalone_auth_recovery_needs_validation_stops_transport_retry() -> None:
+    backend = _healthy_standalone_backend()
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation(required=True))
+    terminal = asyncio.Event()
+
+    stop_retry = await protocol_cli._recover_standalone_auth_failure(
+        ACCOUNT_ID,
+        supervisor,
+        on_terminal=terminal.set,
+    )
+
+    assert stop_retry is True
+    assert terminal.is_set() is True
+    assert backend.acquire_calls == []
+
+
+@pytest.mark.asyncio
+async def test_standalone_auth_recovery_retryable_failure_keeps_transport_policy() -> None:
+    backend = _healthy_standalone_backend()
+    backend.error = CredentialBackendError(
+        CredentialFailureCode.NETWORK_ERROR,
+        retryable_hint=True,
+    )
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    terminal = asyncio.Event()
+
+    stop_retry = await protocol_cli._recover_standalone_auth_failure(
+        ACCOUNT_ID,
+        supervisor,
+        on_terminal=terminal.set,
+    )
+
+    assert stop_retry is False
+    assert terminal.is_set() is False
+    assert backend.acquire_calls == [True]
+
+
+class _RecoveryResultSupervisor:
+    def __init__(self, result: CredentialResult[object]) -> None:
+        self.result = result
+        self.refresh_calls: list[tuple[str, bool]] = []
+
+    async def refresh(
+        self,
+        account_id: str,
+        *,
+        validation_recovery: bool = False,
+    ) -> CredentialResult[object]:
+        self.refresh_calls.append((account_id, validation_recovery))
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_standalone_auth_recovery_terminal_failure_is_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health = _health(CredentialHealthState.HEALTHY)
+    supervisor = _RecoveryResultSupervisor(
+        CredentialResult(
+            state=CredentialResultState.TERMINAL_FAILURE,
+            health=health,
+            code=CredentialFailureCode.AUTH_FAILED.value,
+            message="TOP-SECRET-STANDALONE-TOKEN cookie=session-secret",
+        )
+    )
+    terminal = asyncio.Event()
+    output: list[str] = []
+    monkeypatch.setattr(
+        protocol_cli.console,
+        "print",
+        lambda value, **_kwargs: output.append(str(value)),
+    )
+
+    stop_retry = await protocol_cli._recover_standalone_auth_failure(  # type: ignore[arg-type]
+        ACCOUNT_ID,
+        supervisor,
+        on_terminal=terminal.set,
+    )
+
+    assert stop_retry is True
+    assert terminal.is_set() is True
+    assert supervisor.refresh_calls == [(ACCOUNT_ID, False)]
+    rendered = "\n".join(output)
+    assert "TOP-SECRET-STANDALONE-TOKEN" not in rendered
+    assert "cookie=" not in rendered.lower()
+
+
 class _ConnectTimerClient:
     def __init__(self) -> None:
         self.started = False
@@ -518,6 +765,7 @@ def _install_connect_timer_boundary(
         ws_url="wss://unit.test/ws",
         account_lock_path=lambda _account_id: "unit-account.lock",
     )
+    supervisor = object()
 
     def build_client(*_args, **_kwargs):
         client = _ConnectTimerClient()
@@ -525,6 +773,7 @@ def _install_connect_timer_boundary(
         return client
 
     monkeypatch.setattr(protocol_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(protocol_cli, "_build_credential_supervisor", lambda: supervisor)
     monkeypatch.setattr(protocol_cli, "AccountConnectionLock", lambda _path: object())
     monkeypatch.setattr(protocol_cli, "WsClient", build_client)
     monkeypatch.setattr(protocol_cli.console, "print", lambda *_args, **_kwargs: None)
@@ -539,9 +788,17 @@ def test_protocol_connect_observation_timer_starts_after_preparation(
     clients: list[_ConnectTimerClient] = []
     _install_connect_timer_boundary(monkeypatch, clients)
 
-    async def delayed_prepare(account_id, client, _account_lock, *, operation):
+    async def delayed_prepare(
+        account_id,
+        client,
+        _account_lock,
+        *,
+        operation,
+        supervisor,
+    ) -> None:
         assert account_id == ACCOUNT_ID
         assert operation == "protocol-connect"
+        assert supervisor is not None
         clock["now"] = 30.0
         client.started = True
 
@@ -576,8 +833,16 @@ def test_protocol_connect_preparation_failure_does_not_start_observation_timer(
     clients: list[_ConnectTimerClient] = []
     _install_connect_timer_boundary(monkeypatch, clients)
 
-    async def failing_prepare(_account_id, _client, _account_lock, *, operation):
+    async def failing_prepare(
+        _account_id,
+        _client,
+        _account_lock,
+        *,
+        operation,
+        supervisor,
+    ) -> None:
         assert operation == "protocol-connect"
+        assert supervisor is not None
         raise typer.Exit(code=2)
 
     def monotonic() -> float:
