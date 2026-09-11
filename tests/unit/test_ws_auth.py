@@ -68,7 +68,7 @@ async def test_token_is_encrypted_and_cached_with_stable_device(ws_db) -> None:
     )
     provider = StubTokenProvider([response], signer)
 
-    first = await provider.get_credentials("acc-ws")
+    first = await provider.get_credentials("acc-ws", force_refresh=True)
     second = await provider.get_credentials("acc-ws")
 
     assert first.access_token == "secret-access"
@@ -78,6 +78,56 @@ async def test_token_is_encrypted_and_cached_with_stable_device(ws_db) -> None:
         row = (await session.execute(select(WsCredential))).scalar_one()
     assert row.encrypted_token != "secret-access"
     assert "secret-access" not in row.encrypted_token
+
+
+@pytest.mark.asyncio
+async def test_default_get_requires_prepared_current_credential_without_network(ws_db) -> None:
+    signer = CookieSigner()
+    await signer.save_cookie("acc-ws", "unb=user-1; _m_h5_tk=seed_x; cookie2=c2")
+    provider = StubTokenProvider(
+        [
+            httpx.Response(
+                200,
+                json={"ret": ["SUCCESS::调用成功"], "data": {"accessToken": "unused"}},
+            )
+        ],
+        signer,
+    )
+
+    with pytest.raises(WsAuthError, match="已准备"):
+        await provider.get_credentials("acc-ws")
+
+    assert provider.calls == []
+    status = await provider.status("acc-ws")
+    assert status.token_cached is False
+
+
+@pytest.mark.asyncio
+async def test_current_read_does_not_refresh_or_rewrite_durable_credential(ws_db) -> None:
+    signer = CookieSigner()
+    await signer.save_cookie("acc-ws", "unb=user-1; _m_h5_tk=seed_x; cookie2=c2")
+    provider = StubTokenProvider(
+        [
+            httpx.Response(
+                200,
+                json={"ret": ["SUCCESS::调用成功"], "data": {"accessToken": "prepared"}},
+            )
+        ],
+        signer,
+    )
+    prepared = await provider.get_credentials("acc-ws", force_refresh=True)
+    async with get_async_session() as session:
+        before = (await session.execute(select(WsCredential))).scalar_one()
+        before_snapshot = (before.encrypted_token, before.device_id, before.expires_at)
+
+    current = await provider.get_credentials("acc-ws")
+
+    async with get_async_session() as session:
+        after = (await session.execute(select(WsCredential))).scalar_one()
+        after_snapshot = (after.encrypted_token, after.device_id, after.expires_at)
+    assert current == prepared
+    assert provider.calls and len(provider.calls) == 1
+    assert after_snapshot == before_snapshot
 
 
 @pytest.mark.asyncio
@@ -99,7 +149,7 @@ async def test_missing_mtop_token_retries_after_set_cookie_bootstrap(ws_db) -> N
         signer,
     )
 
-    credentials = await provider.get_credentials("acc-ws")
+    credentials = await provider.get_credentials("acc-ws", force_refresh=True)
 
     assert credentials.access_token == "access-2"
     assert len(provider.calls) == 2
@@ -118,7 +168,7 @@ async def test_device_id_survives_failed_token_request(ws_db) -> None:
     )
     first_provider = StubTokenProvider([failure()], signer)
     with pytest.raises(WsAuthError, match="Session过期"):
-        await first_provider.get_credentials("acc-ws")
+        await first_provider.get_credentials("acc-ws", force_refresh=True)
     second_provider = StubTokenProvider([failure()], signer)
     with pytest.raises(WsAuthError, match="Session过期"):
         await second_provider.get_credentials("acc-ws", force_refresh=True)
@@ -138,7 +188,7 @@ async def test_new_cookie_invalidates_token_but_preserves_device(ws_db) -> None:
         ],
         signer,
     )
-    await provider.get_credentials("acc-ws")
+    await provider.get_credentials("acc-ws", force_refresh=True)
     before = await provider.status("acc-ws")
     assert before.valid is True
 
