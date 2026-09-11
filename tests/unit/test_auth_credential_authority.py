@@ -23,9 +23,7 @@ from xianyu_agent.application.session.ports import (
     CredentialBackendStatus,
     ValidationStatus,
 )
-from xianyu_agent.cli.commands import auth as auth_cli
-from xianyu_agent.cli.commands import order as order_cli
-from xianyu_agent.cli.commands import protocol as protocol_cli
+from xianyu_agent.cli.commands import auth as auth_cli, order as order_cli, protocol as protocol_cli
 from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState
