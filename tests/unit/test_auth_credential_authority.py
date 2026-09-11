@@ -501,6 +501,102 @@ async def test_standalone_entrypoints_preparation_failure_never_starts_transport
     assert "cookie=" not in rendered.lower()
 
 
+class _ConnectTimerClient:
+    def __init__(self) -> None:
+        self.started = False
+        self.stop_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+def _install_connect_timer_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    clients: list[_ConnectTimerClient],
+) -> None:
+    settings = SimpleNamespace(
+        ws_url="wss://unit.test/ws",
+        account_lock_path=lambda _account_id: "unit-account.lock",
+    )
+
+    def build_client(*_args, **_kwargs):
+        client = _ConnectTimerClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(protocol_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(protocol_cli, "AccountConnectionLock", lambda _path: object())
+    monkeypatch.setattr(protocol_cli, "WsClient", build_client)
+    monkeypatch.setattr(protocol_cli.console, "print", lambda *_args, **_kwargs: None)
+
+
+def test_protocol_connect_observation_timer_starts_after_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 0.0}
+    monotonic_calls: list[float] = []
+    wait_calls: list[float] = []
+    clients: list[_ConnectTimerClient] = []
+    _install_connect_timer_boundary(monkeypatch, clients)
+
+    async def delayed_prepare(account_id, client, _account_lock, *, operation):
+        assert account_id == ACCOUNT_ID
+        assert operation == "protocol-connect"
+        clock["now"] = 30.0
+        client.started = True
+
+    def monotonic() -> float:
+        assert clients
+        assert clients[0].started is True
+        monotonic_calls.append(clock["now"])
+        return clock["now"]
+
+    async def wait_for(awaitable, *, timeout: float):
+        awaitable.close()
+        wait_calls.append(timeout)
+        clock["now"] = 40.0
+        raise TimeoutError
+
+    monkeypatch.setattr(protocol_cli, "_start_with_prepared_credentials", delayed_prepare)
+    monkeypatch.setattr(protocol_cli, "time", SimpleNamespace(monotonic=monotonic))
+    monkeypatch.setattr(protocol_cli.asyncio, "wait_for", wait_for)
+
+    protocol_cli.connect(account_id=ACCOUNT_ID, seconds=10.0, quiet=True)
+
+    assert monotonic_calls == [30.0, 30.0, 40.0]
+    assert wait_calls == [0.5]
+    assert clients[0].stop_calls == 1
+
+
+def test_protocol_connect_preparation_failure_does_not_start_observation_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic_calls = 0
+    clients: list[_ConnectTimerClient] = []
+    _install_connect_timer_boundary(monkeypatch, clients)
+
+    async def failing_prepare(_account_id, _client, _account_lock, *, operation):
+        assert operation == "protocol-connect"
+        raise typer.Exit(code=2)
+
+    def monotonic() -> float:
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        return 0.0
+
+    monkeypatch.setattr(protocol_cli, "_start_with_prepared_credentials", failing_prepare)
+    monkeypatch.setattr(protocol_cli, "time", SimpleNamespace(monotonic=monotonic))
+
+    with pytest.raises(typer.Exit) as exc_info:
+        protocol_cli.connect(account_id=ACCOUNT_ID, seconds=10.0, quiet=True)
+
+    assert exc_info.value.exit_code == 2
+    assert monotonic_calls == 0
+    assert clients
+    assert clients[0].started is False
+    assert clients[0].stop_calls == 0
+
+
 def test_account_connection_lock_handoff_has_no_prepare_start_release_gap(tmp_path) -> None:
     path = tmp_path / "account.lock"
     owner = AccountConnectionLock(path)
