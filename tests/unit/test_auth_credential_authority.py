@@ -551,8 +551,9 @@ def test_protocol_connect_observation_timer_starts_after_preparation(
         monotonic_calls.append(clock["now"])
         return clock["now"]
 
-    async def wait_for(awaitable, *, timeout: float):
+    async def wait_for(awaitable, **kwargs):
         awaitable.close()
+        timeout = kwargs["timeout"]
         wait_calls.append(timeout)
         clock["now"] = 40.0
         raise TimeoutError
