@@ -16,12 +16,24 @@ from xianyu_agent.application.session import (
     CredentialHealthState,
     CredentialResult,
     CredentialResultState,
+    CredentialSupervisor,
+)
+from xianyu_agent.application.session.ports import (
+    CredentialBackendError,
+    CredentialBackendStatus,
+    ValidationStatus,
 )
 from xianyu_agent.cli.commands import auth as auth_cli
+from xianyu_agent.cli.commands import order as order_cli
+from xianyu_agent.cli.commands import protocol as protocol_cli
 from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState
 from xianyu_agent.protocol.ws_auth import WsAuthError
+from xianyu_agent.runtime.account_lock import (
+    AccountConnectionAlreadyRunningError,
+    AccountConnectionLock,
+)
 from xianyu_agent.runtime.account_worker import AccountWorker
 from xianyu_agent.runtime.recovery import RecoverySupervisor
 
@@ -234,6 +246,279 @@ def test_live_worker_lock_conflict_prevents_cross_component_refresh_mutation(
 
     assert exc_info.value.exit_code == 2
     assert built is False
+
+
+class _StandaloneBackend:
+    def __init__(
+        self,
+        status: CredentialBackendStatus,
+        *,
+        error: CredentialBackendError | None = None,
+    ) -> None:
+        self.status = status
+        self.error = error
+        self.acquire_calls: list[bool] = []
+
+    async def inspect(self, account_id: str) -> CredentialBackendStatus:
+        assert account_id == ACCOUNT_ID
+        return self.status
+
+    async def acquire(self, account_id: str, *, force_refresh: bool = False) -> str:
+        assert account_id == ACCOUNT_ID
+        self.acquire_calls.append(force_refresh)
+        if self.error is not None:
+            raise self.error
+        return "TOP-SECRET-STANDALONE-TOKEN"
+
+
+class _StandaloneValidation:
+    def __init__(self, *, required: bool = False) -> None:
+        self.required = required
+        self.mark_calls = 0
+
+    async def inspect(self, account_id: str) -> ValidationStatus:
+        assert account_id == ACCOUNT_ID
+        return ValidationStatus(
+            account_id=account_id,
+            required=self.required,
+            code=CredentialFailureCode.NEEDS_VALIDATION.value if self.required else None,
+        )
+
+    async def mark_needs_validation(self, account_id: str) -> None:
+        assert account_id == ACCOUNT_ID
+        self.mark_calls += 1
+        self.required = True
+
+    async def clear_after_refresh(self, account_id: str) -> bool:
+        assert account_id == ACCOUNT_ID
+        self.required = False
+        return True
+
+
+class _StandaloneHandoffLock:
+    def __init__(self) -> None:
+        self.held = False
+        self.handoff_pending = False
+        self.release_calls = 0
+
+    def acquire_for_transport_handoff(self, *, owner_id: str) -> None:
+        assert owner_id.startswith("cli:")
+        assert self.held is False
+        self.held = True
+        self.handoff_pending = True
+
+    def acquire(self, *, owner_id: str) -> None:
+        assert owner_id.startswith("ws:")
+        assert self.held is True
+        assert self.handoff_pending is True
+        self.handoff_pending = False
+
+    def release(self) -> None:
+        assert self.held is True
+        self.release_calls += 1
+        self.held = False
+        self.handoff_pending = False
+
+
+class _StandaloneClient:
+    def __init__(self, lock: _StandaloneHandoffLock) -> None:
+        self._lock = lock
+        self.start_calls = 0
+
+    def start(self) -> None:
+        self._lock.acquire(owner_id=f"ws:{ACCOUNT_ID}:test")
+        self.start_calls += 1
+
+
+async def _invoke_standalone_start(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor: CredentialSupervisor[str] | object,
+    client: _StandaloneClient,
+    lock: _StandaloneHandoffLock,
+) -> None:
+    if entrypoint == "redeliver":
+        monkeypatch.setattr(order_cli, "_build_credential_supervisor", lambda: supervisor)
+        await order_cli._start_with_prepared_credentials(  # type: ignore[arg-type]
+            ACCOUNT_ID,
+            client,
+            lock,
+        )
+        return
+
+    monkeypatch.setattr(protocol_cli, "_build_credential_supervisor", lambda: supervisor)
+    await protocol_cli._start_with_prepared_credentials(  # type: ignore[arg-type]
+        ACCOUNT_ID,
+        client,
+        lock,
+        operation=f"protocol-{entrypoint}",
+    )
+
+
+@pytest.mark.parametrize("entrypoint", ["redeliver", "capture", "connect"])
+@pytest.mark.asyncio
+async def test_standalone_entrypoints_cached_valid_credential_starts_load_only(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _StandaloneBackend(
+        CredentialBackendStatus(
+            account_id=ACCOUNT_ID,
+            cookie_available=True,
+            identity_available=True,
+            token_cached=True,
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+        )
+    )
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    lock = _StandaloneHandoffLock()
+    client = _StandaloneClient(lock)
+
+    await _invoke_standalone_start(entrypoint, monkeypatch, supervisor, client, lock)
+
+    assert backend.acquire_calls == [False]
+    assert client.start_calls == 1
+    assert lock.held is True
+    assert lock.handoff_pending is False
+    assert lock.release_calls == 0
+
+
+@pytest.mark.parametrize("entrypoint", ["redeliver", "capture", "connect"])
+@pytest.mark.parametrize("credential_state", ["missing-current", "expired"])
+@pytest.mark.asyncio
+async def test_standalone_entrypoints_prepare_missing_or_expired_before_start(
+    entrypoint: str,
+    credential_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _StandaloneBackend(
+        CredentialBackendStatus(
+            account_id=ACCOUNT_ID,
+            cookie_available=True,
+            identity_available=True,
+            token_cached=credential_state == "expired",
+            expires_at=(datetime.now(UTC) - timedelta(minutes=1))
+            if credential_state == "expired"
+            else None,
+        )
+    )
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    lock = _StandaloneHandoffLock()
+    client = _StandaloneClient(lock)
+
+    await _invoke_standalone_start(entrypoint, monkeypatch, supervisor, client, lock)
+
+    assert backend.acquire_calls == [True]
+    assert client.start_calls == 1
+    assert lock.held is True
+    assert lock.handoff_pending is False
+    assert lock.release_calls == 0
+
+
+@pytest.mark.parametrize("entrypoint", ["redeliver", "capture", "connect"])
+@pytest.mark.asyncio
+async def test_standalone_entrypoints_needs_validation_fail_closed_before_start(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _StandaloneBackend(
+        CredentialBackendStatus(
+            account_id=ACCOUNT_ID,
+            cookie_available=True,
+            identity_available=True,
+            token_cached=True,
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+        )
+    )
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation(required=True))
+    lock = _StandaloneHandoffLock()
+    client = _StandaloneClient(lock)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        await _invoke_standalone_start(entrypoint, monkeypatch, supervisor, client, lock)
+
+    assert exc_info.value.exit_code == 2
+    assert backend.acquire_calls == []
+    assert client.start_calls == 0
+    assert lock.held is False
+    assert lock.release_calls == 1
+
+
+@pytest.mark.parametrize("entrypoint", ["redeliver", "capture", "connect"])
+@pytest.mark.parametrize(
+    ("error", "expected_state"),
+    [
+        (
+            CredentialBackendError(
+                CredentialFailureCode.NETWORK_ERROR,
+                retryable_hint=True,
+            ),
+            CredentialResultState.RETRYABLE_FAILURE,
+        ),
+        (
+            CredentialBackendError(CredentialFailureCode.AUTH_FAILED),
+            CredentialResultState.TERMINAL_FAILURE,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_standalone_entrypoints_preparation_failure_never_starts_transport(
+    entrypoint: str,
+    error: CredentialBackendError,
+    expected_state: CredentialResultState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _StandaloneBackend(
+        CredentialBackendStatus(
+            account_id=ACCOUNT_ID,
+            cookie_available=True,
+            identity_available=True,
+            token_cached=False,
+            expires_at=None,
+        ),
+        error=error,
+    )
+    supervisor = CredentialSupervisor(backend, _StandaloneValidation())
+    lock = _StandaloneHandoffLock()
+    client = _StandaloneClient(lock)
+    output: list[str] = []
+    module = order_cli if entrypoint == "redeliver" else protocol_cli
+    monkeypatch.setattr(
+        module.console,
+        "print",
+        lambda value, **_kwargs: output.append(str(value)),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        await _invoke_standalone_start(entrypoint, monkeypatch, supervisor, client, lock)
+
+    assert exc_info.value.exit_code == 2
+    assert backend.acquire_calls == [True]
+    assert client.start_calls == 0
+    assert lock.held is False
+    assert lock.release_calls == 1
+    rendered = "\n".join(output)
+    assert expected_state.value.split("_")[0].lower() not in rendered.lower()
+    assert "TOP-SECRET-STANDALONE-TOKEN" not in rendered
+    assert "cookie=" not in rendered.lower()
+
+
+def test_account_connection_lock_handoff_has_no_prepare_start_release_gap(tmp_path) -> None:
+    path = tmp_path / "account.lock"
+    owner = AccountConnectionLock(path)
+    competitor = AccountConnectionLock(path)
+
+    owner.acquire_for_transport_handoff(owner_id="cli:test-preparation")
+    with pytest.raises(AccountConnectionAlreadyRunningError):
+        competitor.acquire(owner_id="ws:competitor-before-start")
+
+    owner.acquire(owner_id="ws:transport-owner")
+    with pytest.raises(AccountConnectionAlreadyRunningError):
+        competitor.acquire(owner_id="ws:competitor-after-handoff")
+
+    owner.release()
+    competitor.acquire(owner_id="ws:competitor-after-stop")
+    competitor.release()
 
 
 class _WorkerClient:
