@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -80,12 +81,50 @@ def _raise_credential_preparation_failure(result: CredentialResult[object]) -> N
     raise typer.Exit(code=2)
 
 
+async def _recover_standalone_auth_failure(
+    account_id: str,
+    supervisor: CredentialSupervisor,
+    *,
+    on_terminal: Callable[[], None] | None = None,
+) -> bool:
+    """Refresh through canonical authority and tell transport whether retry must stop."""
+    try:
+        result = await supervisor.refresh(account_id, validation_recovery=False)
+    except Exception:
+        console.print("[red]凭据恢复失败,停止 WS 重试。[/red]")
+        if on_terminal is not None:
+            on_terminal()
+        return True
+
+    if result.state is CredentialResultState.SUCCESS:
+        console.print("[yellow]凭据已刷新,等待 WS 按既有策略重试。[/yellow]")
+        return False
+    if result.state is CredentialResultState.RETRYABLE_FAILURE:
+        console.print("[yellow]凭据恢复暂时失败,等待 WS 按既有策略重试。[/yellow]")
+        return False
+
+    if result.state is CredentialResultState.NEEDS_VALIDATION:
+        console.print(
+            "[red]账号凭据需要 App 人工验证,停止 WS 重试。[/red] "
+            "完成验证后执行 auth refresh。"
+        )
+    else:
+        console.print(
+            "[red]账号凭据恢复失败,停止 WS 重试。[/red] "
+            "请先检查 auth status。"
+        )
+    if on_terminal is not None:
+        on_terminal()
+    return True
+
+
 async def _start_with_prepared_credentials(
     account_id: str,
     client: WsClient,
     account_lock: AccountConnectionLock,
     *,
     operation: str,
+    supervisor: CredentialSupervisor | None = None,
 ) -> None:
     """Atomically prepare canonical credentials and hand the same lock to transport."""
     try:
@@ -96,8 +135,9 @@ async def _start_with_prepared_credentials(
         console.print(f"[red]账号连接已被占用:{exc}[/red]")
         raise typer.Exit(code=2) from exc
 
+    credential_supervisor = supervisor or _build_credential_supervisor()
     try:
-        result = await _build_credential_supervisor().ensure(account_id)
+        result = await credential_supervisor.ensure(account_id)
     except Exception as exc:
         account_lock.release()
         console.print("[red]凭据准备失败,未启动 WS。[/red]")
@@ -155,6 +195,7 @@ def capture(  # noqa: PLR0915
             )
             raise typer.Exit(code=2)
         settings = get_settings()
+        supervisor = _build_credential_supervisor()
         path = (
             Path(output)
             if output
@@ -216,10 +257,25 @@ def capture(  # noqa: PLR0915
             nonlocal terminal_error
             await recorder.record_error(error)
             counts["error"] += 1
-            if error.code in {"duplicate_connection", "ws_auth"}:
+            if error.code == "duplicate_connection":
                 terminal_error = True
                 finished.set()
-            console.print(f"[red]ERROR {error.code}:{error.message}[/red]")
+            if error.code == "ws_auth":
+                console.print("[red]ERROR ws_auth: 认证失败,正在执行凭据恢复。[/red]")
+            else:
+                console.print(f"[red]ERROR {error.code}:{error.message}[/red]")
+
+        def finish_auth_recovery() -> None:
+            nonlocal terminal_error
+            terminal_error = True
+            finished.set()
+
+        async def on_auth_failure(_error) -> bool:
+            return await _recover_standalone_auth_failure(
+                account_id,
+                supervisor,
+                on_terminal=finish_auth_recovery,
+            )
 
         account_lock = AccountConnectionLock(settings.account_lock_path(account_id))
         client = WsClient(
@@ -228,6 +284,7 @@ def capture(  # noqa: PLR0915
             on_frame=recorder.record_frame,
             on_state=on_state,
             on_error=on_error,
+            on_auth_failure=on_auth_failure,
             account_lock=account_lock,
         )
         console.print(
@@ -238,6 +295,7 @@ def capture(  # noqa: PLR0915
             client,
             account_lock,
             operation="protocol-capture",
+            supervisor=supervisor,
         )
         try:
             with contextlib.suppress(TimeoutError):
@@ -339,16 +397,30 @@ def connect(
 
     async def on_error(error) -> None:
         counts["error"] += 1
-        console.print(f"[red]ERROR {error.code}: {error.message}[/red]")
+        if error.code == "ws_auth":
+            console.print("[red]ERROR ws_auth: 认证失败,正在执行凭据恢复。[/red]")
+        else:
+            console.print(f"[red]ERROR {error.code}: {error.message}[/red]")
 
     async def _run() -> None:
         settings = get_settings()
+        supervisor = _build_credential_supervisor()
+        terminal_auth = asyncio.Event()
+
+        async def on_auth_failure(_error) -> bool:
+            return await _recover_standalone_auth_failure(
+                account_id,
+                supervisor,
+                on_terminal=terminal_auth.set,
+            )
+
         account_lock = AccountConnectionLock(settings.account_lock_path(account_id))
         client = WsClient(
             account_id,
             on_event=on_event,
             on_state=on_state,
             on_error=on_error,
+            on_auth_failure=on_auth_failure,
             account_lock=account_lock,
         )
         await _start_with_prepared_credentials(
@@ -356,17 +428,18 @@ def connect(
             client,
             account_lock,
             operation="protocol-connect",
+            supervisor=supervisor,
         )
         stop_at = time.monotonic() + seconds
-        stop_event = asyncio.Event()
         try:
-            while not stop_event.is_set() and time.monotonic() < stop_at:
+            while not terminal_auth.is_set() and time.monotonic() < stop_at:
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                    await asyncio.wait_for(terminal_auth.wait(), timeout=0.5)
         finally:
-            stop_event.set()
             await client.stop()
         console.print(f"\n[bold]汇总:[/bold] {counts}")
+        if terminal_auth.is_set():
+            raise typer.Exit(code=2)
 
     asyncio.run(_run())
 
