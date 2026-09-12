@@ -216,6 +216,7 @@ class AccountWorker:
         self._worker_state = WorkerState.DISABLED
         self._state_history: list[WorkerState] = [WorkerState.DISABLED]
         self._state_transition_lock = asyncio.Lock()
+        self._validation_recovery_lock = asyncio.Lock()
         self._restored_state: WorkerState | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._readiness_task: asyncio.Task[None] | None = None
@@ -627,36 +628,43 @@ class AccountWorker:
         await self._set_worker_state(target, detail=decision.code)
 
     async def recover_validation(self) -> bool:
-        """Explicit operator-triggered validation recovery; never called automatically."""
-        if self._worker_state is not WorkerState.NEEDS_VALIDATION or self._credentials is None:
-            return False
-        outcome = await self._recovery.recover_credential(
-            self.account_id,
-            route=CredentialRecoveryRoute.VALIDATION_REFRESH,
-        )
-        decision = outcome.decision
-        if decision.retry:
-            await self._set_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
-            return False
-        if decision.worker_state is not WorkerState.CHECKING_SESSION:
-            await self._apply_recovery_decision(decision)
-            return False
-
-        if self._connection_lock is not None:
-            self._connection_lock.acquire(
-                owner_id=f"worker-validation:{self.account_id}:{uuid.uuid4().hex}"
+        """Serialize one explicit operator validation recovery for this worker."""
+        async with self._validation_recovery_lock:
+            # Re-check under operation ownership. A concurrent caller that arrives
+            # after the first success sees CHECKING_SESSION/CONNECTING and becomes
+            # a no-op instead of issuing a second forced credential refresh.
+            if (
+                self._worker_state is not WorkerState.NEEDS_VALIDATION
+                or self._credentials is None
+            ):
+                return False
+            outcome = await self._recovery.recover_credential(
+                self.account_id,
+                route=CredentialRecoveryRoute.VALIDATION_REFRESH,
             )
-        try:
-            await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
-            await self._set_worker_state(WorkerState.CONNECTING)
-            self._stop_requested = False
-            self.started_at = self.started_at or datetime.now(UTC)
-            self._client.start()
-        except Exception:
+            decision = outcome.decision
+            if decision.retry:
+                await self._set_worker_state(WorkerState.NEEDS_VALIDATION, detail=decision.code)
+                return False
+            if decision.worker_state is not WorkerState.CHECKING_SESSION:
+                await self._apply_recovery_decision(decision)
+                return False
+
             if self._connection_lock is not None:
-                self._connection_lock.release()
-            raise
-        return True
+                self._connection_lock.acquire(
+                    owner_id=f"worker-validation:{self.account_id}:{uuid.uuid4().hex}"
+                )
+            try:
+                await self._set_worker_state(WorkerState.CHECKING_SESSION, detail=decision.code)
+                await self._set_worker_state(WorkerState.CONNECTING)
+                self._stop_requested = False
+                self.started_at = self.started_at or datetime.now(UTC)
+                self._client.start()
+            except Exception:
+                if self._connection_lock is not None:
+                    self._connection_lock.release()
+                raise
+            return True
 
     def inject_frame(self, frame: Any) -> None:
         """Replay synthetic frames serially without depending on live credential startup."""
