@@ -89,7 +89,13 @@ build_sync_frame = ws_sync.build_sync_frame
 
 
 class WsTokenProvider:
-    """用已加密保存的 Cookie 换取并缓存闲鱼 IM Access Token。"""
+    """低层 WS credential backend。
+
+    Normal ``get_credentials`` calls are read-only and consume only a currently
+    prepared durable credential.  Network refresh, Cookie mutation, token-cache
+    writes and device-id creation require the explicit ``force_refresh=True``
+    mutation intent supplied by the application CredentialSupervisor boundary.
+    """
 
     def __init__(
         self,
@@ -105,10 +111,19 @@ class WsTokenProvider:
     async def get_credentials(
         self, account_id: str, *, force_refresh: bool = False
     ) -> WsCredentials:
+        """Load current credentials unless explicit application refresh is requested.
+
+        With ``force_refresh=False`` this method performs no network request and
+        no durable mutation.  This is the transport-facing contract used by
+        WsClient.  ``force_refresh=True`` is the low-level mutation operation
+        consumed by LegacyWsCredentialBackend behind CredentialSupervisor.
+        """
         if not force_refresh:
-            cached = await self._load_cached(account_id)
-            if cached is not None:
-                return cached
+            cached = await self._load_current(account_id)
+            if cached is None:
+                msg = f"账号 {account_id} 无可用的已准备 WS Token"
+                raise WsAuthError(msg)
+            return cached
 
         cookie = await self._signer.load_cookie_value(account_id)
         if not cookie:
@@ -220,7 +235,8 @@ class WsTokenProvider:
             ).scalar_one_or_none()
             return row.device_id if row is not None else None
 
-    async def _load_cached(self, account_id: str) -> WsCredentials | None:
+    async def _load_current(self, account_id: str) -> WsCredentials | None:
+        """Read one prepared durable credential with zero mutation side effects."""
         async with get_async_session() as session:
             row = (
                 await session.execute(
@@ -230,7 +246,7 @@ class WsTokenProvider:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            if row is None or _as_utc(row.expires_at) <= datetime.now(UTC) + timedelta(minutes=5):
+            if row is None or _as_utc(row.expires_at) <= datetime.now(UTC):
                 return None
             try:
                 token = self._signer.fernet.decrypt(
@@ -239,6 +255,8 @@ class WsTokenProvider:
             except Exception as exc:
                 msg = f"账号 {account_id} WS Token 解密失败"
                 raise WsAuthError(msg) from exc
+            if not token or not row.device_id:
+                return None
             cookie = await self._signer.load_cookie_value(account_id)
             user_id = extract_cookie_field(cookie or "", "unb") or extract_cookie_field(
                 cookie or "", "munb"
