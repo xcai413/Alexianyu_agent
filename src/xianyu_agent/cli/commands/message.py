@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from xianyu_agent.application.message import SendAttemptStatus
 from xianyu_agent.domain.message import messages as domain_messages
 from xianyu_agent.protocol.events import MessageContentType, MessageSent
 from xianyu_agent.services.account_worker import AccountWorker
@@ -117,34 +118,54 @@ def _parse_since(s: str) -> datetime | None:
 def send_message(
     account_id: str = typer.Option(..., "--account", "-a"),
     chat_id: str = typer.Option(..., "--chat-id", "-c", help="会话 ID。"),
+    receiver_id: str = typer.Option(..., "--receiver-id", "-r", help="买家闲鱼用户 ID。"),
     text: str = typer.Option(..., "--text", "-t", help="消息内容。"),
 ) -> None:
-    """手动发送一条消息(需要 Worker 在线;离线会如实失败)。"""
+    """通过统一 SendMessageService 手动发送一条文字消息。"""
 
     async def _run() -> None:
         worker = AccountWorker(account_id)
-        worker.start()
+        startup = worker.start()
         try:
-            ok = await worker.send_text(text)
+            if startup is not None:
+                await startup
+            result = await worker.send_message(
+                chat_id=chat_id,
+                receiver_id=receiver_id,
+                text=text,
+            )
         finally:
             await worker.stop()
-        if not ok:
+
+        if result.status is SendAttemptStatus.SUCCESS:
+            await domain_messages.record_outbound(
+                MessageSent(
+                    event_id=result.client_message_id or "manual",
+                    account_id=account_id,
+                    received_at=datetime.now(UTC),
+                    chat_id=chat_id,
+                    receiver_id=receiver_id,
+                    content_type=MessageContentType.TEXT,
+                    content=text,
+                )
+            )
+            console.print(f"[green]OK[/green] 已发送到 chat={chat_id}: {text[:40]}")
+            return
+
+        if result.status is SendAttemptStatus.UNCERTAIN:
             console.print(
-                "[red]发送失败:账号未连接(离线)。[/red] 先确认 XIANYU_WS_URL 已配置且 "
-            "daemon run 和对应账号的 pool start 已执行。"
+                "[yellow]发送结果不确定。[/yellow] 请求可能已到达闲鱼，禁止直接重试；"
+                "请先通过消息历史做 reconciliation。"
             )
-            raise typer.Exit(code=1)
-        await domain_messages.record_outbound(
-            MessageSent(
-                event_id="manual",
-                account_id=account_id,
-                received_at=datetime.now(UTC),
-                chat_id=chat_id,
-                receiver_id="",
-                content_type=MessageContentType.TEXT,
-                content=text,
+        elif result.status is SendAttemptStatus.RECONCILIATION_REQUIRED:
+            console.print(
+                "[yellow]平台发送已成功，但本地结果审计未完整落盘。[/yellow] "
+                "禁止重复发送，请执行 reconciliation。"
             )
-        )
-        console.print(f"[green]OK[/green] 已发送到 chat={chat_id}: {text[:40]}")
+        elif result.status is SendAttemptStatus.FAILED_RETRYABLE:
+            console.print(f"[red]发送前失败，可在恢复连接后重试：[/red] {result.detail or '-'}")
+        else:
+            console.print(f"[red]发送被拒绝/最终失败：[/red] {result.detail or '-'}")
+        raise typer.Exit(code=1)
 
     asyncio.run(_run())
