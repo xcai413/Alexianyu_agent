@@ -1,4 +1,4 @@
-"""RED contracts for the Phase 3 outbound text-message closure."""
+"""Contracts for the Phase 3 outbound text-message closure."""
 
 from __future__ import annotations
 
@@ -170,16 +170,27 @@ async def test_proven_pre_write_failure_is_retryable_without_claiming_platform_s
 
 
 @pytest.mark.asyncio
-async def test_send_service_preserves_receiver_and_does_not_blind_retry_uncertain_attempt() -> None:
+async def test_send_service_audits_attempt_before_write_and_does_not_blind_retry_uncertain() -> None:
     send_service = _application_module()
+    order: list[str] = []
     calls: list[dict[str, str]] = []
+    results: list[Any] = []
+
+    class Recorder:
+        async def record_attempt(self, **_kwargs: Any) -> None:
+            order.append("attempt")
+
+        async def record_result(self, **kwargs: Any) -> None:
+            order.append("result")
+            results.append(kwargs)
 
     class Protocol:
         async def send_text_message(self, **kwargs: str):
+            order.append("protocol")
             calls.append(kwargs)
             raise send_service.SendMessageUncertain("response lost after write")
 
-    service = send_service.SendMessageService(Protocol())
+    service = send_service.SendMessageService(Protocol(), Recorder())
     result = await service.send_text(
         account_id="account-1",
         chat_id="chat-9",
@@ -189,9 +200,49 @@ async def test_send_service_preserves_receiver_and_does_not_blind_retry_uncertai
 
     assert result.status is send_service.SendAttemptStatus.UNCERTAIN
     assert result.retry_allowed is False
+    assert order == ["attempt", "protocol", "result"]
     assert len(calls) == 1
     assert calls[0] == {
         "chat_id": "chat-9",
         "receiver_id": "buyer-2",
         "text": "hello",
     }
+    assert results[0]["status"] is send_service.SendAttemptStatus.UNCERTAIN
+
+
+@pytest.mark.asyncio
+async def test_platform_success_plus_result_audit_failure_requires_reconciliation() -> None:
+    send_service = _application_module()
+    protocol_calls = 0
+
+    class Receipt:
+        request_id = "mid-ok"
+        client_message_id = "uuid-ok"
+        response = {"code": 200}
+
+    class Recorder:
+        async def record_attempt(self, **_kwargs: Any) -> None:
+            return None
+
+        async def record_result(self, **_kwargs: Any) -> None:
+            raise RuntimeError("audit database unavailable")
+
+    class Protocol:
+        async def send_text_message(self, **_kwargs: str):
+            nonlocal protocol_calls
+            protocol_calls += 1
+            return Receipt()
+
+    service = send_service.SendMessageService(Protocol(), Recorder())
+    result = await service.send_text(
+        account_id="account-1",
+        chat_id="chat-9",
+        receiver_id="buyer-2",
+        text="hello",
+    )
+
+    assert protocol_calls == 1
+    assert result.status is send_service.SendAttemptStatus.RECONCILIATION_REQUIRED
+    assert result.retry_allowed is False
+    assert result.request_id == "mid-ok"
+    assert result.client_message_id == "uuid-ok"
