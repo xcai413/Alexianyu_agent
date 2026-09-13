@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+import msgpack
 from pydantic import BaseModel
 
 from xianyu_agent.protocol.events import (
@@ -21,6 +23,7 @@ from xianyu_agent.protocol.events import (
     WsFrame,
 )
 from xianyu_agent.protocol.parser import unpack_sync_payloads
+from xianyu_agent.protocol.ws.normalizer import decode_body
 
 _SAFE_PROTOCOL_VALUES = {
     "sync",
@@ -89,6 +92,73 @@ _MESSAGE_REQUIRED_FIELDS = {
 }
 
 
+def _count_mapping_key_types(value: Any, counts: dict[str, int]) -> None:
+    if isinstance(value, dict):
+        for name, item in value.items():
+            if isinstance(name, int) and not isinstance(name, bool):
+                counts["integer_keys"] += 1
+            elif isinstance(name, str):
+                counts["string_keys"] += 1
+            else:
+                counts["other_keys"] += 1
+            _count_mapping_key_types(item, counts)
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            _count_mapping_key_types(item, counts)
+
+
+def raw_sync_key_types(frame: WsFrame) -> dict[str, int]:
+    """Return aggregate raw sync mapping-key types without retaining payload values."""
+    counts = {
+        "integer_keys": 0,
+        "string_keys": 0,
+        "other_keys": 0,
+    }
+    body = decode_body(frame.body)
+    if not isinstance(body, dict):
+        return counts
+
+    package = body.get("syncPushPackage")
+    if not isinstance(package, dict):
+        return counts
+    entries = package.get("data")
+    if not isinstance(entries, list):
+        return counts
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("data")
+        if not isinstance(encoded, str):
+            continue
+
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (TypeError, ValueError):
+            continue
+
+        decoded: Any
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            try:
+                decoded = msgpack.unpackb(raw, raw=False, strict_map_key=False)
+            except (
+                ValueError,
+                TypeError,
+                msgpack.ExtraData,
+                msgpack.FormatError,
+                msgpack.StackError,
+            ):
+                continue
+
+        _count_mapping_key_types(decoded, counts)
+
+    return counts
+
+
 class CalibrationRecorder:
     """Append structural frame/event evidence without storing original string values."""
 
@@ -109,6 +179,7 @@ class CalibrationRecorder:
                 "payload": redact_structure(
                     frame.model_dump(mode="json", by_alias=True), salt=self._salt
                 ),
+                "raw_sync_key_types": raw_sync_key_types(frame),
                 "decoded_sync": (
                     redact_structure(decoded_sync, salt=self._salt) if decoded_sync else None
                 ),
