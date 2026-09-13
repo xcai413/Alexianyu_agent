@@ -40,12 +40,7 @@ class SendMessageResult:
 
 
 class MessageProtocol(Protocol):
-    """Business-facing protocol capability required by the send service.
-
-    ``ConnectionError`` is reserved for failures detected before any platform
-    write. Once a write is attempted, adapters must use the message-send error
-    vocabulary so an ambiguous side effect cannot be mistaken for retryable.
-    """
+    """Business-facing protocol capability required by the send service."""
 
     async def send_text_message(
         self,
@@ -80,26 +75,52 @@ class MessageAttemptRecorder(Protocol):
     ) -> None: ...
 
 
-class SendMessageService:
-    """Route every outbound text message through one no-blind-retry boundary."""
+class MessageStore(Protocol):
+    """Canonical conversation lookup and confirmed-outbound persistence port."""
 
-    def __init__(self, protocol: MessageProtocol, recorder: MessageAttemptRecorder) -> None:
-        self._protocol = protocol
-        self._recorder = recorder
+    async def resolve_receiver(self, *, account_id: str, chat_id: str) -> str | None: ...
 
-    async def send_text(
+    async def record_outbound(
         self,
         *,
         account_id: str,
         chat_id: str,
         receiver_id: str,
         text: str,
+        client_message_id: str | None,
+        response: Any,
+    ) -> None: ...
+
+
+class SendMessageService:
+    """Route outbound text through one correlated, no-blind-retry boundary."""
+
+    def __init__(
+        self,
+        protocol: MessageProtocol,
+        recorder: MessageAttemptRecorder,
+        message_store: MessageStore | None = None,
+    ) -> None:
+        self._protocol = protocol
+        self._recorder = recorder
+        self._message_store = message_store
+
+    async def send_text(
+        self,
+        *,
+        account_id: str,
+        chat_id: str,
+        text: str,
+        receiver_id: str | None = None,
     ) -> SendMessageResult:
-        """Persist evidence, perform exactly one protocol attempt, then classify it."""
+        """Resolve routing, persist evidence, write once, and classify the outcome."""
         account = _required(account_id, "account_id")
         conversation = _required(chat_id, "chat_id")
-        receiver = _required(receiver_id, "receiver_id")
         content = _required(text, "text", strip=False)
+        receiver_result = await self._receiver(account, conversation, receiver_id)
+        if isinstance(receiver_result, SendMessageResult):
+            return receiver_result
+        receiver = receiver_result
         attempt_id = uuid.uuid4().hex
 
         try:
@@ -163,8 +184,6 @@ class SendMessageService:
                 exc=exc,
             )
         except Exception as exc:
-            # An unknown adapter failure cannot prove the platform side effect did
-            # not happen. Fail closed rather than introducing an implicit retry.
             result = SendMessageResult(
                 account_id=account,
                 chat_id=conversation,
@@ -184,8 +203,91 @@ class SendMessageService:
                 client_message_id=getattr(receipt, "client_message_id", None),
                 response=getattr(receipt, "response", receipt),
             )
+            result = await self._persist_confirmed_outbound(result, content)
 
         return await self._record_terminal(attempt_id, result)
+
+    async def _receiver(
+        self,
+        account: str,
+        conversation: str,
+        receiver_id: str | None,
+    ) -> str | SendMessageResult:
+        if receiver_id is not None and receiver_id.strip():
+            return receiver_id.strip()
+        if self._message_store is None:
+            return self._preflight_failure(
+                account,
+                conversation,
+                status=SendAttemptStatus.FAILED_FINAL,
+                retry_allowed=False,
+                detail="receiver_id missing and no canonical message store configured",
+            )
+        try:
+            receiver = await self._message_store.resolve_receiver(
+                account_id=account,
+                chat_id=conversation,
+            )
+        except Exception as exc:
+            return self._preflight_failure(
+                account,
+                conversation,
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                detail=f"receiver lookup failed before send: {type(exc).__name__}: {exc}",
+            )
+        if receiver is None or not receiver.strip():
+            return self._preflight_failure(
+                account,
+                conversation,
+                status=SendAttemptStatus.FAILED_FINAL,
+                retry_allowed=False,
+                detail="no receiver found for conversation",
+            )
+        return receiver.strip()
+
+    def _preflight_failure(
+        self,
+        account: str,
+        conversation: str,
+        *,
+        status: SendAttemptStatus,
+        retry_allowed: bool,
+        detail: str,
+    ) -> SendMessageResult:
+        return SendMessageResult(
+            account_id=account,
+            chat_id=conversation,
+            receiver_id="",
+            status=status,
+            retry_allowed=retry_allowed,
+            detail=detail,
+        )
+
+    async def _persist_confirmed_outbound(
+        self,
+        result: SendMessageResult,
+        content: str,
+    ) -> SendMessageResult:
+        if self._message_store is None:
+            return result
+        try:
+            await self._message_store.record_outbound(
+                account_id=result.account_id,
+                chat_id=result.chat_id,
+                receiver_id=result.receiver_id,
+                text=content,
+                client_message_id=result.client_message_id,
+                response=result.response,
+            )
+        except Exception as exc:
+            return replace(
+                result,
+                status=SendAttemptStatus.RECONCILIATION_REQUIRED,
+                retry_allowed=False,
+                detail=f"outbound persistence failed after platform success: {type(exc).__name__}: {exc}",
+            )
+        return result
 
     def _failure_result(
         self,
