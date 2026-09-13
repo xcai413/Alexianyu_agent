@@ -11,9 +11,8 @@ from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.application.message import SendAttemptStatus, SendMessageService
-from xianyu_agent.domain.events import MessageContentType, MessageSent
 from xianyu_agent.domain.message import messages as domain_messages
-from xianyu_agent.infrastructure.message import AuditLogMessageAttemptRecorder
+from xianyu_agent.infrastructure.message import AuditLogMessageAttemptRecorder, DomainMessageStore
 from xianyu_agent.protocol.ws.message_adapter import WsClientMessageProtocol
 from xianyu_agent.services.account_worker import AccountWorker
 from xianyu_agent.utils.time_utils import format_local, to_local
@@ -96,7 +95,11 @@ def send_message(
     receiver_id: str = typer.Option("", "--receiver-id", "-r"),
 ) -> None:
     async def _run() -> None:
-        receiver = receiver_id.strip() or await _receiver_for_chat(account_id, chat_id)
+        store = DomainMessageStore()
+        receiver = receiver_id.strip() or await store.resolve_receiver(
+            account_id=account_id,
+            chat_id=chat_id,
+        )
         if receiver is None:
             console.print("[red]发送失败:账号未连接或当前会话无法解析接收方。[/red]")
             raise typer.Exit(code=1)
@@ -109,6 +112,7 @@ def send_message(
             service = SendMessageService(
                 WsClientMessageProtocol(worker._client),
                 AuditLogMessageAttemptRecorder(),
+                store,
             )
             result = await service.send_text(
                 account_id=account_id,
@@ -120,17 +124,6 @@ def send_message(
             await worker.stop()
 
         if result.status is SendAttemptStatus.SUCCESS:
-            await domain_messages.record_outbound(
-                MessageSent(
-                    event_id=result.client_message_id or "manual",
-                    account_id=account_id,
-                    received_at=datetime.now(UTC),
-                    chat_id=chat_id,
-                    receiver_id=receiver,
-                    content_type=MessageContentType.TEXT,
-                    content=text,
-                )
-            )
             console.print(f"[green]OK[/green] 已发送到 chat={chat_id}: {text[:40]}")
             return
         if result.status is SendAttemptStatus.UNCERTAIN:
@@ -144,18 +137,6 @@ def send_message(
         raise typer.Exit(code=1)
 
     asyncio.run(_run())
-
-
-async def _receiver_for_chat(account_id: str, chat_id: str) -> str | None:
-    rows = await domain_messages.list_recent(
-        account_id=account_id,
-        chat_id=chat_id,
-        direction="inbound",
-        limit=1,
-    )
-    if rows and rows[0].sender_id and rows[0].sender_id.strip():
-        return rows[0].sender_id.strip()
-    return None
 
 
 def _parse_since(value: str) -> datetime | None:
