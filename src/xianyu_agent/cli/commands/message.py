@@ -154,18 +154,18 @@ def send_message(
 
         if result.status is SendAttemptStatus.UNCERTAIN:
             console.print(
-                "[yellow]发送结果不确定。[/yellow] 请求可能已到达闲鱼，禁止直接重试；"
+                "[yellow]发送结果不确定。[/yellow] 请求可能已到达闲鱼, 禁止直接重试; "
                 "请先通过消息历史做 reconciliation。"
             )
         elif result.status is SendAttemptStatus.RECONCILIATION_REQUIRED:
             console.print(
-                "[yellow]平台发送已成功，但本地结果审计未完整落盘。[/yellow] "
-                "禁止重复发送，请执行 reconciliation。"
+                "[yellow]平台发送已成功, 但本地结果审计未完整落盘。[/yellow] "
+                "禁止重复发送, 请执行 reconciliation。"
             )
         elif result.status is SendAttemptStatus.FAILED_RETRYABLE:
-            console.print(f"[red]发送前失败，可在恢复连接后重试：[/red] {result.detail or '-'}")
+            console.print(f"[red]发送前失败, 可在恢复连接后重试:[/red] {result.detail or '-'}")
         else:
-            console.print(f"[red]发送被拒绝/最终失败：[/red] {result.detail or '-'}")
+            console.print(f"[red]发送被拒绝/最终失败:[/red] {result.detail or '-'}")
         raise typer.Exit(code=1)
 
     asyncio.run(_run())
