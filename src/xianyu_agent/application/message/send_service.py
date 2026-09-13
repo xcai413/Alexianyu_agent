@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -50,11 +51,36 @@ class MessageProtocol(Protocol):
     ) -> Any: ...
 
 
+class MessageAttemptRecorder(Protocol):
+    """Append-only persistence port for external send attempt evidence."""
+
+    async def record_attempt(
+        self,
+        *,
+        attempt_id: str,
+        account_id: str,
+        chat_id: str,
+        receiver_id: str,
+        text: str,
+    ) -> None: ...
+
+    async def record_result(
+        self,
+        *,
+        attempt_id: str,
+        status: SendAttemptStatus,
+        request_id: str | None,
+        client_message_id: str | None,
+        detail: str | None,
+    ) -> None: ...
+
+
 class SendMessageService:
     """Route every outbound text message through one no-blind-retry boundary."""
 
-    def __init__(self, protocol: MessageProtocol) -> None:
+    def __init__(self, protocol: MessageProtocol, recorder: MessageAttemptRecorder) -> None:
         self._protocol = protocol
+        self._recorder = recorder
 
     async def send_text(
         self,
@@ -64,11 +90,30 @@ class SendMessageService:
         receiver_id: str,
         text: str,
     ) -> SendMessageResult:
-        """Perform exactly one protocol attempt and classify its outcome."""
+        """Persist evidence, perform exactly one protocol attempt, then classify it."""
         account = _required(account_id, "account_id")
         conversation = _required(chat_id, "chat_id")
         receiver = _required(receiver_id, "receiver_id")
         content = _required(text, "text", strip=False)
+        attempt_id = uuid.uuid4().hex
+
+        try:
+            await self._recorder.record_attempt(
+                attempt_id=attempt_id,
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                text=content,
+            )
+        except Exception as exc:
+            return SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.FAILED_FINAL,
+                retry_allowed=False,
+                detail=f"attempt audit failed before send: {type(exc).__name__}: {exc}",
+            )
 
         try:
             receipt = await self._protocol.send_text_message(
@@ -77,36 +122,34 @@ class SendMessageService:
                 text=content,
             )
         except SendMessageNotSent as exc:
-            return SendMessageResult(
-                account_id=account,
-                chat_id=conversation,
-                receiver_id=receiver,
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
                 status=SendAttemptStatus.FAILED_RETRYABLE,
                 retry_allowed=True,
-                detail=str(exc),
+                exc=exc,
             )
         except SendMessageRejected as exc:
-            return SendMessageResult(
-                account_id=account,
-                chat_id=conversation,
-                receiver_id=receiver,
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
                 status=SendAttemptStatus.FAILED_FINAL,
                 retry_allowed=False,
-                detail=str(exc),
+                exc=exc,
             )
         except SendMessageUncertain as exc:
-            return SendMessageResult(
-                account_id=account,
-                chat_id=conversation,
-                receiver_id=receiver,
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
                 status=SendAttemptStatus.UNCERTAIN,
                 retry_allowed=False,
-                detail=str(exc),
+                exc=exc,
             )
         except Exception as exc:
-            # An unknown adapter failure cannot prove the platform side effect did
-            # not happen. Fail closed rather than introducing an implicit retry.
-            return SendMessageResult(
+            result = SendMessageResult(
                 account_id=account,
                 chat_id=conversation,
                 receiver_id=receiver,
@@ -114,17 +157,66 @@ class SendMessageService:
                 retry_allowed=False,
                 detail=f"{type(exc).__name__}: {exc}",
             )
+        else:
+            result = SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.SUCCESS,
+                retry_allowed=False,
+                request_id=getattr(receipt, "request_id", None),
+                client_message_id=getattr(receipt, "client_message_id", None),
+                response=getattr(receipt, "response", receipt),
+            )
 
+        return await self._record_terminal(attempt_id, result)
+
+    def _failure_result(
+        self,
+        *,
+        account: str,
+        conversation: str,
+        receiver: str,
+        status: SendAttemptStatus,
+        retry_allowed: bool,
+        exc: Exception,
+    ) -> SendMessageResult:
         return SendMessageResult(
             account_id=account,
             chat_id=conversation,
             receiver_id=receiver,
-            status=SendAttemptStatus.SUCCESS,
-            retry_allowed=False,
-            request_id=getattr(receipt, "request_id", None),
-            client_message_id=getattr(receipt, "client_message_id", None),
-            response=getattr(receipt, "response", receipt),
+            status=status,
+            retry_allowed=retry_allowed,
+            request_id=getattr(exc, "request_id", None),
+            client_message_id=getattr(exc, "client_message_id", None),
+            detail=str(exc),
         )
+
+    async def _record_terminal(
+        self,
+        attempt_id: str,
+        result: SendMessageResult,
+    ) -> SendMessageResult:
+        try:
+            await self._recorder.record_result(
+                attempt_id=attempt_id,
+                status=result.status,
+                request_id=result.request_id,
+                client_message_id=result.client_message_id,
+                detail=result.detail,
+            )
+        except Exception as exc:
+            audit_detail = f"result audit failed: {type(exc).__name__}: {exc}"
+            detail = f"{result.detail}; {audit_detail}" if result.detail else audit_detail
+            if result.status is SendAttemptStatus.SUCCESS:
+                return replace(
+                    result,
+                    status=SendAttemptStatus.RECONCILIATION_REQUIRED,
+                    retry_allowed=False,
+                    detail=detail,
+                )
+            return replace(result, detail=detail)
+        return result
 
 
 def _required(value: str, field: str, *, strip: bool = True) -> str:
