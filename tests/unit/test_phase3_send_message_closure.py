@@ -1,0 +1,197 @@
+"""RED contracts for the Phase 3 outbound text-message closure."""
+
+from __future__ import annotations
+
+import base64
+import importlib
+import json
+from typing import Any
+
+import pytest
+
+from xianyu_agent.protocol.events import WsFrame
+from xianyu_agent.protocol.ws.request_router import RequestRouter
+
+
+def _protocol_module():
+    return importlib.import_module("xianyu_agent.protocol.ws.message_send")
+
+
+def _application_module():
+    return importlib.import_module("xianyu_agent.application.message.send_service")
+
+
+def test_text_send_frame_matches_calibrated_wire_contract() -> None:
+    message_send = _protocol_module()
+
+    frame = message_send.build_text_message_request(
+        account_user_id="seller-1",
+        chat_id="chat-9",
+        receiver_id="buyer-2",
+        text="hello",
+        mid_factory=lambda: "mid-1",
+        uuid_factory=lambda: "uuid-1",
+    )
+
+    assert frame["lwp"] == "/r/MessageSend/sendByReceiverScope"
+    assert frame["headers"] == {"mid": "mid-1"}
+    assert frame["body"][0] == {
+        "uuid": "uuid-1",
+        "cid": "chat-9@goofish",
+        "conversationType": 1,
+        "content": {
+            "contentType": 101,
+            "custom": {
+                "type": 1,
+                "data": frame["body"][0]["content"]["custom"]["data"],
+            },
+        },
+        "redPointPolicy": 0,
+        "extension": {"extJson": "{}"},
+        "ctx": {"appVersion": "1.0", "platform": "web"},
+        "mtags": {},
+        "msgReadStatusSetting": 1,
+    }
+    assert frame["body"][1] == {
+        "actualReceivers": ["buyer-2@goofish", "seller-1@goofish"]
+    }
+
+    encoded = frame["body"][0]["content"]["custom"]["data"]
+    decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    assert decoded == {"contentType": 1, "text": {"text": "hello"}}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_user_id", " "),
+        ("chat_id", " "),
+        ("receiver_id", " "),
+        ("text", ""),
+    ],
+)
+def test_text_send_frame_rejects_missing_routing_or_content(field: str, value: str) -> None:
+    message_send = _protocol_module()
+    kwargs = {
+        "account_user_id": "seller-1",
+        "chat_id": "chat-9",
+        "receiver_id": "buyer-2",
+        "text": "hello",
+        "mid_factory": lambda: "mid-1",
+        "uuid_factory": lambda: "uuid-1",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValueError):
+        message_send.build_text_message_request(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_text_send_registers_before_write_and_correlates_ack() -> None:
+    message_send = _protocol_module()
+    router = RequestRouter()
+
+    async def send_request(frame: dict[str, Any]) -> bool:
+        assert router.pending_count == 1
+        response = {"code": 200, "body": {"messageId": "platform-msg-1"}}
+        matched = router.match_frame(
+            WsFrame(headers={"mid": frame["headers"]["mid"]}),
+            response,
+        )
+        assert matched is True
+        return True
+
+    receipt = await message_send.request_text_message(
+        router,
+        send_request,
+        account_user_id="seller-1",
+        chat_id="chat-9",
+        receiver_id="buyer-2",
+        text="hello",
+        timeout_s=0.1,
+        mid_factory=lambda: "mid-1",
+        uuid_factory=lambda: "uuid-1",
+    )
+
+    assert receipt.response == {"code": 200, "body": {"messageId": "platform-msg-1"}}
+    assert receipt.request_id == "mid-1"
+    assert receipt.client_message_id == "uuid-1"
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_successful_write_is_uncertain_and_never_rewritten_as_retryable() -> None:
+    message_send = _protocol_module()
+    router = RequestRouter()
+    writes: list[dict[str, Any]] = []
+
+    async def send_request(frame: dict[str, Any]) -> bool:
+        writes.append(frame)
+        return True
+
+    with pytest.raises(message_send.MessageSendUncertain):
+        await message_send.request_text_message(
+            router,
+            send_request,
+            account_user_id="seller-1",
+            chat_id="chat-9",
+            receiver_id="buyer-2",
+            text="hello",
+            timeout_s=0.01,
+            mid_factory=lambda: "mid-timeout",
+            uuid_factory=lambda: "uuid-timeout",
+        )
+
+    assert len(writes) == 1
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_proven_pre_write_failure_is_retryable_without_claiming_platform_side_effect() -> None:
+    message_send = _protocol_module()
+    router = RequestRouter()
+
+    async def send_request(_frame: dict[str, Any]) -> bool:
+        return False
+
+    with pytest.raises(message_send.MessageSendNotSent):
+        await message_send.request_text_message(
+            router,
+            send_request,
+            account_user_id="seller-1",
+            chat_id="chat-9",
+            receiver_id="buyer-2",
+            text="hello",
+            mid_factory=lambda: "mid-false",
+            uuid_factory=lambda: "uuid-false",
+        )
+
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_send_service_preserves_receiver_and_does_not_blind_retry_uncertain_attempt() -> None:
+    send_service = _application_module()
+    calls: list[dict[str, str]] = []
+
+    class Protocol:
+        async def send_text_message(self, **kwargs: str):
+            calls.append(kwargs)
+            raise send_service.SendMessageUncertain("response lost after write")
+
+    service = send_service.SendMessageService(Protocol())
+    result = await service.send_text(
+        account_id="account-1",
+        account_user_id="seller-1",
+        chat_id="chat-9",
+        receiver_id="buyer-2",
+        text="hello",
+    )
+
+    assert result.status is send_service.SendAttemptStatus.UNCERTAIN
+    assert result.retry_allowed is False
+    assert len(calls) == 1
+    assert calls[0]["account_user_id"] == "seller-1"
+    assert calls[0]["chat_id"] == "chat-9"
+    assert calls[0]["receiver_id"] == "buyer-2"
+    assert calls[0]["text"] == "hello"
