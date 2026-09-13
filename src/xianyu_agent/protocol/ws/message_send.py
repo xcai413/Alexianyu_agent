@@ -23,7 +23,18 @@ DEFAULT_TIMEOUT_S = 30.0
 
 
 class MessageSendError(RuntimeError):
-    """Base error for one outbound message attempt."""
+    """Base error for one outbound message attempt with correlation evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str | None = None,
+        client_message_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.client_message_id = client_message_id
 
 
 class MessageSendNotSent(MessageSendError):
@@ -158,22 +169,42 @@ async def request_text_message(
     except Exception as exc:
         router.cancel(request_id)
         msg = f"message write outcome uncertain: {type(exc).__name__}: {exc}"
-        raise MessageSendUncertain(msg) from exc
+        raise MessageSendUncertain(
+            msg,
+            request_id=request_id,
+            client_message_id=client_message_id,
+        ) from exc
 
     if sent is False:
         router.cancel(request_id)
-        raise MessageSendNotSent("message request was not written")
+        raise MessageSendNotSent(
+            "message request was not written",
+            request_id=request_id,
+            client_message_id=client_message_id,
+        )
 
     try:
         response = await router.wait(pending, timeout_s=timeout_s)
     except TimeoutError as exc:
-        raise MessageSendUncertain("message response timed out after write") from exc
+        raise MessageSendUncertain(
+            "message response timed out after write",
+            request_id=request_id,
+            client_message_id=client_message_id,
+        ) from exc
 
     code = _response_code(response)
     if code is None:
-        raise MessageSendUncertain("correlated message response has no explicit status code")
+        raise MessageSendUncertain(
+            "correlated message response has no explicit status code",
+            request_id=request_id,
+            client_message_id=client_message_id,
+        )
     if code != 200:
-        raise MessageSendRejected(f"message request rejected with code={code}")
+        raise MessageSendRejected(
+            f"message request rejected with code={code}",
+            request_id=request_id,
+            client_message_id=client_message_id,
+        )
 
     return MessageSendReceipt(
         request_id=request_id,
