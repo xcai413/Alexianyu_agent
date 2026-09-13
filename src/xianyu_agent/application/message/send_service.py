@@ -40,7 +40,12 @@ class SendMessageResult:
 
 
 class MessageProtocol(Protocol):
-    """Business-facing protocol capability required by the send service."""
+    """Business-facing protocol capability required by the send service.
+
+    ``ConnectionError`` is reserved for failures detected before any platform
+    write. Once a write is attempted, adapters must use the message-send error
+    vocabulary so an ambiguous side effect cannot be mistaken for retryable.
+    """
 
     async def send_text_message(
         self,
@@ -130,6 +135,15 @@ class SendMessageService:
                 retry_allowed=True,
                 exc=exc,
             )
+        except ConnectionError as exc:
+            result = SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                detail=str(exc),
+            )
         except SendMessageRejected as exc:
             result = self._failure_result(
                 account=account,
@@ -149,6 +163,8 @@ class SendMessageService:
                 exc=exc,
             )
         except Exception as exc:
+            # An unknown adapter failure cannot prove the platform side effect did
+            # not happen. Fail closed rather than introducing an implicit retry.
             result = SendMessageResult(
                 account_id=account,
                 chat_id=conversation,
