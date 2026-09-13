@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -218,7 +218,7 @@ async def test_platform_success_plus_result_audit_failure_requires_reconciliatio
     class Receipt:
         request_id = "mid-ok"
         client_message_id = "uuid-ok"
-        response = {"code": 200}
+        response: ClassVar[dict[str, int]] = {"code": 200}
 
     class Recorder:
         async def record_attempt(self, **_kwargs: Any) -> None:
