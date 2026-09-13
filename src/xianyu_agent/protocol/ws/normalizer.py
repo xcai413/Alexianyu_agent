@@ -32,19 +32,59 @@ def decode_body(body):
     return None
 
 
-def decode_sync_data(value: str) -> dict | None:
+def _canonicalize_sync_keys(value):
+    """Recursively canonicalize integer protocol map keys to strings."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            canonical_key = (
+                str(key)
+                if isinstance(key, int) and not isinstance(key, bool)
+                else key
+            )
+            if canonical_key in result:
+                raise ValueError(
+                    f"sync map key collision after canonicalization: {canonical_key!r}"
+                )
+            result[canonical_key] = _canonicalize_sync_keys(item)
+        return result
+
+    if isinstance(value, list):
+        return [_canonicalize_sync_keys(item) for item in value]
+
+    return value
+
+
+def decode_sync_data(value: str) -> dict | None:  # noqa: PLR0911
     """Decode one Base64 sync payload as JSON first, then MessagePack."""
     try:
         raw = base64.b64decode(value, validate=True)
     except ValueError:
         return None
+
     try:
         decoded = json.loads(raw.decode("utf-8"))
-        return decoded if isinstance(decoded, dict) else None
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        if not isinstance(decoded, dict):
+            return None
+        return _canonicalize_sync_keys(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         pass
+
     try:
         decoded = msgpack.unpackb(raw, raw=False, strict_map_key=False)
-    except (ValueError, TypeError, msgpack.ExtraData, msgpack.FormatError, msgpack.StackError):
+    except (
+        ValueError,
+        TypeError,
+        msgpack.ExtraData,
+        msgpack.FormatError,
+        msgpack.StackError,
+    ):
         return None
-    return decoded if isinstance(decoded, dict) else None
+
+    if not isinstance(decoded, dict):
+        return None
+
+    try:
+        return _canonicalize_sync_keys(decoded)
+    except ValueError:
+        return None
