@@ -182,7 +182,6 @@ async def test_send_service_preserves_receiver_and_does_not_blind_retry_uncertai
     service = send_service.SendMessageService(Protocol())
     result = await service.send_text(
         account_id="account-1",
-        account_user_id="seller-1",
         chat_id="chat-9",
         receiver_id="buyer-2",
         text="hello",
@@ -191,7 +190,8 @@ async def test_send_service_preserves_receiver_and_does_not_blind_retry_uncertai
     assert result.status is send_service.SendAttemptStatus.UNCERTAIN
     assert result.retry_allowed is False
     assert len(calls) == 1
-    assert calls[0]["account_user_id"] == "seller-1"
-    assert calls[0]["chat_id"] == "chat-9"
-    assert calls[0]["receiver_id"] == "buyer-2"
-    assert calls[0]["text"] == "hello"
+    assert calls[0] == {
+        "chat_id": "chat-9",
+        "receiver_id": "buyer-2",
+        "text": "hello",
+    }
