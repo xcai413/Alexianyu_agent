@@ -20,6 +20,7 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
+from xianyu_agent.application.message.runtime_sender import send_worker_text
 from xianyu_agent.application.session.supervisor import CredentialSupervisor
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, WorkerStatus, get_async_session
@@ -462,8 +463,13 @@ class AccountWorker:
             )
             await session.commit()
 
-    async def _send_reply(self, _account_id: str, _chat_id: str, text: str) -> bool:
-        return await self._client.send_text(text)
+    async def _send_reply(self, account_id: str, chat_id: str, text: str) -> bool:
+        return await send_worker_text(
+            self._client,
+            account_id=account_id,
+            chat_id=chat_id,
+            text=text,
+        )
 
     def start(self) -> asyncio.Task[None] | None:
         """Schedule startup and return the task that owns its durable outcome."""
