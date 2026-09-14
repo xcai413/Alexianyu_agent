@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
 import json
@@ -143,6 +144,66 @@ async def test_timeout_after_successful_write_is_uncertain_and_never_rewritten_a
         )
 
     assert len(writes) == 1
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_router_close_after_successful_write_is_uncertain() -> None:
+    message_send = _protocol_module()
+    router = RequestRouter()
+
+    async def send_request(_frame: dict[str, Any]) -> bool:
+        router.close()
+        return True
+
+    with pytest.raises(message_send.MessageSendUncertain) as caught:
+        await message_send.request_text_message(
+            router,
+            send_request,
+            account_user_id="seller-1",
+            chat_id="chat-9",
+            receiver_id="buyer-2",
+            text="hello",
+            timeout_s=0.1,
+            mid_factory=lambda: "mid-close",
+            uuid_factory=lambda: "uuid-close",
+        )
+
+    assert "cancelled after write" in str(caught.value)
+    assert caught.value.request_id == "mid-close"
+    assert caught.value.client_message_id == "uuid-close"
+    assert router.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_still_propagates() -> None:
+    message_send = _protocol_module()
+    router = RequestRouter()
+    written = asyncio.Event()
+
+    async def send_request(_frame: dict[str, Any]) -> bool:
+        written.set()
+        return True
+
+    task = asyncio.create_task(
+        message_send.request_text_message(
+            router,
+            send_request,
+            account_user_id="seller-1",
+            chat_id="chat-9",
+            receiver_id="buyer-2",
+            text="hello",
+            timeout_s=None,
+            mid_factory=lambda: "mid-cancel",
+            uuid_factory=lambda: "uuid-cancel",
+        )
+    )
+    await written.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert router.pending_count == 0
 
 
