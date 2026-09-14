@@ -611,8 +611,8 @@ class WsClient:
                     await self._deferred_sync_slots.acquire()
                     sync_slot_owned = True
                 try:
-                    await ws_ack.send_ack(ws, frame)
                     matched = router.match_frame(frame, decoded)
+                    await ws_ack.send_ack(ws, frame)
                     if sync_slot_owned and not matched:
                         deferred = self._handle_or_defer_sync_frame(ws, router, frame)
                         if not deferred:
