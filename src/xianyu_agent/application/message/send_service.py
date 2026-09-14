@@ -285,7 +285,10 @@ class SendMessageService:
                 result,
                 status=SendAttemptStatus.RECONCILIATION_REQUIRED,
                 retry_allowed=False,
-                detail=f"outbound persistence failed after platform success: {type(exc).__name__}: {exc}",
+                detail=(
+                    "outbound persistence failed after platform success: "
+                    f"{type(exc).__name__}"
+                ),
             )
         return result
 
