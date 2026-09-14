@@ -12,6 +12,7 @@ from rich.table import Table
 
 from xianyu_agent.application.message import SendAttemptStatus, SendMessageService
 from xianyu_agent.domain.message import messages as domain_messages
+from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.infrastructure.message import AuditLogMessageAttemptRecorder, DomainMessageStore
 from xianyu_agent.protocol.events import ConnectionState
 from xianyu_agent.protocol.ws.message_adapter import WsClientMessageProtocol
@@ -23,6 +24,10 @@ app = typer.Typer(help="查询消息历史。")
 console = Console()
 SEND_CONNECT_TIMEOUT_S = 15.0
 SEND_CONNECT_POLL_S = 0.05
+
+
+class _SendWorkerUnavailable(RuntimeError):
+    """The one-shot worker reached a definite pre-send terminal condition."""
 
 
 @app.command("list")
@@ -131,6 +136,9 @@ def send_message(
                     raise typer.Exit(code=1) from exc
             try:
                 await _wait_for_protocol_ready(worker)
+            except _SendWorkerUnavailable as exc:
+                console.print(f"[red]发送前失败,消息未写出:[/red] {exc}")
+                raise typer.Exit(code=1) from exc
             except TimeoutError as exc:
                 console.print(
                     "[red]发送前失败,可安全重试:[/red] "
@@ -173,10 +181,24 @@ async def _wait_for_protocol_ready(
     *,
     timeout_s: float = SEND_CONNECT_TIMEOUT_S,
 ) -> None:
-    """Wait until the one-shot worker owns a business-ready WS session."""
+    """Wait for a business-ready WS session or a definite pre-send terminal state."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, timeout_s)
     while True:
+        lifecycle_error = worker.lifecycle_error
+        if lifecycle_error is not None:
+            raise _SendWorkerUnavailable(
+                "Worker 生命周期失败 "
+                f"({type(lifecycle_error).__name__});请先检查账号认证状态与运行日志后再发送。"
+            )
+        if worker.state is WorkerState.NEEDS_VALIDATION:
+            raise _SendWorkerUnavailable(
+                "账号需要人工验证;请先完成验证并确认认证状态有效后再发送。"
+            )
+        if worker.state is WorkerState.ERROR:
+            raise _SendWorkerUnavailable(
+                "账号 Worker 已进入 ERROR;请先检查账号认证状态与运行日志后再发送。"
+            )
         if worker._client.state is ConnectionState.CONNECTED:
             return
         if loop.time() >= deadline:
