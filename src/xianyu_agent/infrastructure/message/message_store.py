@@ -9,6 +9,8 @@ from typing import Any
 from xianyu_agent.domain.events import MessageContentType, MessageSent
 from xianyu_agent.domain.message import messages as domain_messages
 
+_UNKNOWN_SENDER_ID = "unknown"
+
 
 class DomainMessageStore:
     """Resolve peer identity and persist confirmed outbound messages."""
@@ -23,9 +25,12 @@ class DomainMessageStore:
         if not rows:
             return None
         sender_id = rows[0].sender_id
-        if not isinstance(sender_id, str) or not sender_id.strip():
+        if not isinstance(sender_id, str):
             return None
-        return sender_id.strip()
+        receiver_id = sender_id.strip()
+        if not receiver_id or receiver_id.casefold() == _UNKNOWN_SENDER_ID:
+            return None
+        return receiver_id
 
     async def record_outbound(
         self,
