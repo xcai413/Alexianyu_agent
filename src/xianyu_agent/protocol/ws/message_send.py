@@ -145,9 +145,10 @@ async def request_text_message(
     """Write once and await the correlated platform response.
 
     ``False`` from ``send_request`` is reserved for an adapter that can prove no
-    bytes were written. Any exception during the write, or any timeout after a
-    successful write, is fail-closed as :class:`MessageSendUncertain` because
-    the platform side effect cannot safely be excluded.
+    bytes were written. Any exception during the write, or any timeout/cancelled
+    response after a successful write, is fail-closed as
+    :class:`MessageSendUncertain` because the platform side effect cannot safely
+    be excluded. Caller task cancellation still propagates unchanged.
     """
     frame = build_text_message_request(
         account_user_id=account_user_id,
@@ -185,6 +186,15 @@ async def request_text_message(
 
     try:
         correlated = await router.wait(pending, timeout_s=timeout_s)
+    except asyncio.CancelledError as exc:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
+        raise MessageSendUncertain(
+            "message response cancelled after write",
+            request_id=request_id,
+            client_message_id=client_message_id,
+        ) from exc
     except TimeoutError as exc:
         raise MessageSendUncertain(
             "message response timed out after write",
