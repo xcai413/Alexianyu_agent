@@ -145,7 +145,8 @@ async def request_text_message(
     """Write once and await the correlated platform response.
 
     ``False`` from ``send_request`` is reserved for an adapter that can prove no
-    bytes were written. Any exception during the write, or any timeout/cancelled
+    bytes were written. A failure while registering the response waiter is also
+    provably pre-write. Any exception during the write, or any timeout/cancelled
     response after a successful write, is fail-closed as
     :class:`MessageSendUncertain` because the platform side effect cannot safely
     be excluded. Caller task cancellation still propagates unchanged.
@@ -160,7 +161,15 @@ async def request_text_message(
     )
     request_id = str(frame["headers"]["mid"])
     client_message_id = str(frame["body"][0]["uuid"])
-    pending = router.register(request_id)
+    try:
+        pending = router.register(request_id)
+    except Exception as exc:
+        msg = f"message request could not be registered before write: {type(exc).__name__}: {exc}"
+        raise MessageSendNotSent(
+            msg,
+            request_id=request_id,
+            client_message_id=client_message_id,
+        ) from exc
 
     try:
         sent = await send_request(frame)
