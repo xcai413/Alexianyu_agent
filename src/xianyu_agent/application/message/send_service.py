@@ -136,9 +136,9 @@ class SendMessageService:
                 account_id=account,
                 chat_id=conversation,
                 receiver_id=receiver,
-                status=SendAttemptStatus.FAILED_FINAL,
-                retry_allowed=False,
-                detail=f"attempt audit failed before send: {type(exc).__name__}: {exc}",
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                detail=f"attempt audit failed before send: {type(exc).__name__}",
             )
 
         try:
