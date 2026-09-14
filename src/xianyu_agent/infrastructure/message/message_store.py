@@ -43,6 +43,12 @@ class DomainMessageStore:
         response: Any,
     ) -> None:
         platform_message_id = _platform_message_id(response)
+        if platform_message_id is None:
+            # A correlated 200 response proves the write succeeded, but without the
+            # platform message id there is no stable key to merge the later seller
+            # push. Defer history persistence to that push instead of creating a
+            # message_id=NULL row that would be duplicated when the push arrives.
+            return
         row_id = await domain_messages.record_outbound(
             MessageSent(
                 event_id=client_message_id or uuid.uuid4().hex,
