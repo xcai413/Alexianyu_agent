@@ -1,8 +1,8 @@
 """ReplyEngine: after an inbound message is persisted, match rules and send a reply.
 
-The sender callback is injected by the caller (AccountWorker wires it to the
-WsClient's send_text). Sending failures are recorded in reply_logs with
-success=False so they can be retried or audited.
+The sender callback is injected by the caller. AccountWorker wires it through
+the canonical runtime message-sender bridge. Sending failures are recorded in
+reply_logs with success=False so they can be retried or audited.
 """
 
 from __future__ import annotations
