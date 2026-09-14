@@ -184,7 +184,7 @@ async def request_text_message(
         )
 
     try:
-        response = await router.wait(pending, timeout_s=timeout_s)
+        correlated = await router.wait(pending, timeout_s=timeout_s)
     except TimeoutError as exc:
         raise MessageSendUncertain(
             "message response timed out after write",
@@ -192,6 +192,7 @@ async def request_text_message(
             client_message_id=client_message_id,
         ) from exc
 
+    response = _response_payload(correlated)
     code = _response_code(response)
     if code is None:
         raise MessageSendUncertain(
@@ -211,6 +212,12 @@ async def request_text_message(
         client_message_id=client_message_id,
         response=response,
     )
+
+
+def _response_payload(response: Any) -> Any:
+    """Normalize RequestRouter's live ``DecodedFrame`` response to its wire payload."""
+    payload = getattr(response, "payload", None)
+    return payload if payload is not None else response
 
 
 def _response_code(response: Any) -> int | None:
