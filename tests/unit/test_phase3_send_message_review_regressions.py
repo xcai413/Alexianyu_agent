@@ -69,6 +69,30 @@ async def test_receiver_resolution_rejects_unknown_sender_sentinel(
 
 
 @pytest.mark.asyncio
+async def test_outbound_store_defers_when_success_response_has_no_platform_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[MessageSent] = []
+
+    async def fake_record_outbound(event: MessageSent) -> int:
+        persisted.append(event)
+        return 1
+
+    monkeypatch.setattr(domain_messages, "record_outbound", fake_record_outbound)
+
+    await DomainMessageStore().record_outbound(
+        account_id="acc-1",
+        chat_id="chat-1",
+        receiver_id="buyer-1",
+        text="hello",
+        client_message_id="client-1",
+        response={"code": 200, "body": {}},
+    )
+
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_outbound_unique_conflict_requeries_existing_platform_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
