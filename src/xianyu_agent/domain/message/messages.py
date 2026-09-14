@@ -72,11 +72,24 @@ async def upsert_inbound(
 
 
 async def record_outbound(event: MessageSent) -> int | None:
-    """Persist a sent message (for audit trail)."""
+    """Persist a sent message, idempotent on the platform message id when present."""
     async with get_async_session() as session:
         account = await _get_account(session, event.account_id)
         if account is None:
             return None
+        if event.message_id:
+            existing = (
+                await session.execute(
+                    select(Message)
+                    .where(
+                        Message.account_id == account.id,
+                        Message.message_id == event.message_id,
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing.id
         msg = Message(
             account_id=account.id,
             chat_id=event.chat_id,
