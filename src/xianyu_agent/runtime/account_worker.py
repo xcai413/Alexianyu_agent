@@ -51,7 +51,6 @@ from xianyu_agent.protocol.events import (
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime.account_lock import AccountConnectionLock
-from xianyu_agent.runtime.message_sender import send_worker_text
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
     RecoveryCause,
@@ -122,6 +121,9 @@ class _WorkerOwnedWsClient(WsClient):
         try:
             await self.on_state(event)
         except Exception:
+            # Standalone WsClient keeps its compatibility suppression. An
+            # AccountWorker-owned transport must stop and surface canonical
+            # persistence/lifecycle failures instead of silently reconnecting.
             if not self._stop.is_set():
                 await self.fail_closed_after_lifecycle_error()
             raise
@@ -147,6 +149,8 @@ class _WorkerOwnedWsClient(WsClient):
                         select(WorkerStatus).where(WorkerStatus.account_id == account.id).limit(1)
                     )
                 ).scalar_one_or_none()
+                # AccountWorker persists STARTING before transport start, so a missing
+                # row means there is no canonical lifecycle row to annotate yet.
                 if row is None:
                     return
                 if state is ConnectionState.DISCONNECTED and row.risk_recovery_required:
@@ -257,6 +261,7 @@ class AccountWorker:
             await self._set_worker_state(WorkerState.ERROR, detail="credential supervisor missing")
             return True
         recovered = await self._recover_credentials(CredentialRecoveryRoute.REFRESH)
+        # WsClient owns transport retry. False lets it reconnect using refreshed material.
         return not recovered
 
     async def _on_client_state(self, event: ConnectionStateChanged) -> None:
@@ -457,13 +462,8 @@ class AccountWorker:
             )
             await session.commit()
 
-    async def _send_reply(self, account_id: str, chat_id: str, text: str) -> bool:
-        return await send_worker_text(
-            self._client,
-            account_id=account_id,
-            chat_id=chat_id,
-            text=text,
-        )
+    async def _send_reply(self, _account_id: str, _chat_id: str, text: str) -> bool:
+        return await self._client.send_text(text)
 
     def start(self) -> asyncio.Task[None] | None:
         """Schedule startup and return the task that owns its durable outcome."""
@@ -630,6 +630,9 @@ class AccountWorker:
     async def recover_validation(self) -> bool:
         """Serialize one explicit operator validation recovery for this worker."""
         async with self._validation_recovery_lock:
+            # Re-check under operation ownership. A concurrent caller that arrives
+            # after the first success sees CHECKING_SESSION/CONNECTING and becomes
+            # a no-op instead of issuing a second forced credential refresh.
             if (
                 self._worker_state is not WorkerState.NEEDS_VALIDATION
                 or self._credentials is None
