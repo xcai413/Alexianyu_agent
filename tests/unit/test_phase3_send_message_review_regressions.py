@@ -18,8 +18,7 @@ from xianyu_agent.domain.message import messages as domain_messages
 from xianyu_agent.infrastructure.database.models import Message
 from xianyu_agent.infrastructure.message.message_store import DomainMessageStore
 from xianyu_agent.protocol.events import WsFrame
-from xianyu_agent.protocol.ws import client as ws_client_module
-from xianyu_agent.protocol.ws import message_send
+from xianyu_agent.protocol.ws import client as ws_client_module, message_send
 from xianyu_agent.protocol.ws.client import WsClient
 from xianyu_agent.protocol.ws.request_router import RequestRouter
 
