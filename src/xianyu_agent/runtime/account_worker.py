@@ -51,6 +51,7 @@ from xianyu_agent.protocol.events import (
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime.account_lock import AccountConnectionLock
+from xianyu_agent.runtime.message_sender import send_worker_text
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
     RecoveryCause,
@@ -462,8 +463,13 @@ class AccountWorker:
             )
             await session.commit()
 
-    async def _send_reply(self, _account_id: str, _chat_id: str, text: str) -> bool:
-        return await self._client.send_text(text)
+    async def _send_reply(self, account_id: str, chat_id: str, text: str) -> bool:
+        return await send_worker_text(
+            self._client,
+            account_id=account_id,
+            chat_id=chat_id,
+            text=text,
+        )
 
     def start(self) -> asyncio.Task[None] | None:
         """Schedule startup and return the task that owns its durable outcome."""
