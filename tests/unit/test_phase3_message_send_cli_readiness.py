@@ -74,6 +74,6 @@ def test_message_send_reports_existing_daemon_worker_without_traceback(
         )
 
     assert caught.value.exit_code == 2
-    output = capsys.readouterr().out
+    output = " ".join(capsys.readouterr().out.split())
     assert "已有常驻 WebSocket 连接" in output
     assert "pool stop --account acc-1" in output
