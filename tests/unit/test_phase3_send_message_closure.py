@@ -307,3 +307,52 @@ async def test_platform_success_plus_result_audit_failure_requires_reconciliatio
     assert result.retry_allowed is False
     assert result.request_id == "mid-ok"
     assert result.client_message_id == "uuid-ok"
+
+
+@pytest.mark.asyncio
+async def test_platform_success_persistence_failure_redacts_message_text_from_terminal_audit() -> None:
+    send_service = _application_module()
+    secret_text = "sensitive-message-body-123"
+    recorded_results: list[dict[str, Any]] = []
+
+    class Receipt:
+        request_id = "mid-redact"
+        client_message_id = "uuid-redact"
+        response: ClassVar[dict[str, Any]] = {
+            "code": 200,
+            "body": {"messageId": "platform-redact"},
+        }
+
+    class Recorder:
+        async def record_attempt(self, **_kwargs: Any) -> None:
+            return None
+
+        async def record_result(self, **kwargs: Any) -> None:
+            recorded_results.append(kwargs)
+
+    class Protocol:
+        async def send_text_message(self, **_kwargs: str):
+            return Receipt()
+
+    class MessageStore:
+        async def resolve_receiver(self, **_kwargs: str) -> str | None:
+            return "buyer-2"
+
+        async def record_outbound(self, **_kwargs: Any) -> None:
+            raise RuntimeError(f"database params contain {secret_text}")
+
+    service = send_service.SendMessageService(Protocol(), Recorder(), MessageStore())
+    result = await service.send_text(
+        account_id="account-1",
+        chat_id="chat-9",
+        receiver_id="buyer-2",
+        text=secret_text,
+    )
+
+    assert result.status is send_service.SendAttemptStatus.RECONCILIATION_REQUIRED
+    assert result.retry_allowed is False
+    assert result.detail == "outbound persistence failed after platform success: RuntimeError"
+    assert secret_text not in (result.detail or "")
+    assert len(recorded_results) == 1
+    assert recorded_results[0]["detail"] == result.detail
+    assert secret_text not in str(recorded_results[0])
