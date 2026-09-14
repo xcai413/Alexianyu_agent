@@ -68,15 +68,20 @@ class ReplyServer:
                 ):
                     continue
 
+                reply_text: str | None = None
                 content = body[0].get("content")
                 custom = content.get("custom") if isinstance(content, dict) else None
                 encoded = custom.get("data") if isinstance(custom, dict) else None
                 if isinstance(encoded, str):
                     decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
-                    reply_text = decoded.get("text", {}).get("text")
-                    if isinstance(reply_text, str):
-                        self.replies.append(reply_text)
+                    candidate = decoded.get("text", {}).get("text")
+                    if isinstance(candidate, str):
+                        reply_text = candidate
+                        self.replies.append(candidate)
 
+                # Deliberately omit body.messageId from the correlated success response.
+                # The later seller push is the only stable platform-id source and must
+                # converge to one outbound history row rather than duplicate a NULL-id row.
                 await ws.send(
                     json.dumps(
                         {
@@ -86,6 +91,23 @@ class ReplyServer:
                         }
                     )
                 )
+                if reply_text is not None:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "code": 0,
+                                "body": {
+                                    "bizType": "text",
+                                    "1": reply_text,
+                                    "2": "acc-r",
+                                    "3": "buyer-r",
+                                    "4": "text",
+                                    "6": {"mid": "R-OUT-1"},
+                                    "10": "chat-r",
+                                },
+                            }
+                        )
+                    )
         except Exception:
             pass
         finally:
@@ -151,6 +173,7 @@ async def test_auto_reply_roundtrip(
     assert len(outbound) == 1
     assert inbound[0].content == "你好,在吗?"
     assert outbound[0].content == "在的,亲,请问需要什么?"
+    assert outbound[0].message_id == "R-OUT-1"
     assert len(logs) == 1
     assert logs[0].success is True
     assert logs[0].sent_text == "在的,亲,请问需要什么?"
