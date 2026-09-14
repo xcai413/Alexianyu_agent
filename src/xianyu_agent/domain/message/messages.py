@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from xianyu_agent.db import Account, Message, get_async_session
 from xianyu_agent.domain.events import (
@@ -72,13 +73,25 @@ async def upsert_inbound(
 
 
 async def record_outbound(event: MessageSent) -> int | None:
-    """Persist a sent message (for audit trail)."""
+    """Persist a sent message, atomically converging on a platform message id."""
     async with get_async_session() as session:
         account = await _get_account(session, event.account_id)
         if account is None:
             return None
+        account_pk = account.id
+        if event.message_id:
+            existing = await _find_message_by_platform_id(
+                session,
+                account_id=account_pk,
+                message_id=event.message_id,
+            )
+            if existing is not None:
+                if _merge_outbound_metadata(existing, event):
+                    await session.commit()
+                return existing.id
+
         msg = Message(
-            account_id=account.id,
+            account_id=account_pk,
             chat_id=event.chat_id,
             message_id=event.message_id,
             item_id=event.item_id,
@@ -93,7 +106,22 @@ async def record_outbound(event: MessageSent) -> int | None:
             sent_at=event.sent_at,
         )
         session.add(msg)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            if not event.message_id:
+                raise
+            existing = await _find_message_by_platform_id(
+                session,
+                account_id=account_pk,
+                message_id=event.message_id,
+            )
+            if existing is None:
+                raise
+            if _merge_outbound_metadata(existing, event):
+                await session.commit()
+            return existing.id
         await session.refresh(msg)
         return msg.id
 
@@ -127,6 +155,31 @@ async def get_by_id(message_id: int) -> Message | None:
         return (
             await session.execute(select(Message).where(Message.id == message_id).limit(1))
         ).scalar_one_or_none()
+
+
+async def _find_message_by_platform_id(session, *, account_id: int, message_id: str) -> Message | None:
+    return (
+        await session.execute(
+            select(Message)
+            .where(Message.account_id == account_id, Message.message_id == message_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _merge_outbound_metadata(existing: Message, event: MessageSent) -> bool:
+    """Enrich an ACK-created row with later push metadata without duplicating it."""
+    changed = False
+    if existing.item_id is None and event.item_id is not None:
+        existing.item_id = event.item_id
+        changed = True
+    if existing.sent_at is None and event.sent_at is not None:
+        existing.sent_at = event.sent_at
+        changed = True
+    if existing.content is None and event.content:
+        existing.content = event.content
+        changed = True
+    return changed
 
 
 async def _get_account(session, account_id: str) -> Account | None:
