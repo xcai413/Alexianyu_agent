@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from xianyu_agent.db import Account, Conversation, Message, get_async_session
@@ -73,7 +73,11 @@ async def upsert_inbound(
             sent_at=event.sent_at,
         )
         session.add(msg)
-        conversation.unread_count += 1
+        await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation.id)
+            .values(unread_count=Conversation.unread_count + 1)
+        )
         try:
             await session.commit()
         except IntegrityError:
@@ -106,7 +110,15 @@ async def record_outbound(event: MessageSent) -> int | None:
                 message_id=event.message_id,
             )
             if existing is not None:
-                if _merge_outbound_metadata(existing, event):
+                metadata_changed = _merge_outbound_metadata(existing, event)
+                conversation_changed = await _merge_existing_conversation(
+                    session,
+                    conversation_id=existing.conversation_id,
+                    buyer_id=event.receiver_id,
+                    item_id=event.item_id,
+                    observed_at=event.sent_at or event.received_at,
+                )
+                if metadata_changed or conversation_changed:
                     await session.commit()
                 return existing.id
 
@@ -149,7 +161,15 @@ async def record_outbound(event: MessageSent) -> int | None:
             )
             if existing is None:
                 raise
-            if _merge_outbound_metadata(existing, event):
+            metadata_changed = _merge_outbound_metadata(existing, event)
+            conversation_changed = await _merge_existing_conversation(
+                session,
+                conversation_id=existing.conversation_id,
+                buyer_id=event.receiver_id,
+                item_id=event.item_id,
+                observed_at=event.sent_at or event.received_at,
+            )
+            if metadata_changed or conversation_changed:
                 await session.commit()
             return existing.id
         await session.refresh(msg)
@@ -248,7 +268,7 @@ async def _get_or_create_conversation(
                 conversation = Conversation(
                     account_id=account_id,
                     external_conversation_id=chat_id,
-                    buyer_id=buyer_id,
+                    buyer_id=_normalized_buyer_id(buyer_id),
                     item_id=item_id,
                     last_message_at=observed_at,
                 )
@@ -266,12 +286,12 @@ async def _get_or_create_conversation(
                 )
             ).scalar_one()
     assert conversation is not None
-    if conversation.buyer_id is None and buyer_id:
-        conversation.buyer_id = buyer_id
-    if conversation.item_id is None and item_id:
-        conversation.item_id = item_id
-    if _is_after(observed_at, conversation.last_message_at):
-        conversation.last_message_at = observed_at
+    _merge_conversation_metadata(
+        conversation,
+        buyer_id=buyer_id,
+        item_id=item_id,
+        observed_at=observed_at,
+    )
     return conversation
 
 
@@ -282,6 +302,57 @@ def _is_after(candidate: datetime, current: datetime | None) -> bool:
     normalized_candidate = candidate.replace(tzinfo=UTC) if candidate.tzinfo is None else candidate
     normalized_current = current.replace(tzinfo=UTC) if current.tzinfo is None else current
     return normalized_candidate > normalized_current
+
+
+async def _merge_existing_conversation(
+    session,
+    *,
+    conversation_id: int | None,
+    buyer_id: str | None,
+    item_id: str | None,
+    observed_at: datetime,
+) -> bool:
+    if conversation_id is None:
+        return False
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        return False
+    return _merge_conversation_metadata(
+        conversation,
+        buyer_id=buyer_id,
+        item_id=item_id,
+        observed_at=observed_at,
+    )
+
+
+def _merge_conversation_metadata(
+    conversation: Conversation,
+    *,
+    buyer_id: str | None,
+    item_id: str | None,
+    observed_at: datetime,
+) -> bool:
+    changed = False
+    normalized_buyer_id = _normalized_buyer_id(buyer_id)
+    if _normalized_buyer_id(conversation.buyer_id) is None and normalized_buyer_id is not None:
+        conversation.buyer_id = normalized_buyer_id
+        changed = True
+    if conversation.item_id is None and item_id:
+        conversation.item_id = item_id
+        changed = True
+    if _is_after(observed_at, conversation.last_message_at):
+        conversation.last_message_at = observed_at
+        changed = True
+    return changed
+
+
+def _normalized_buyer_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate or candidate.casefold() == "unknown":
+        return None
+    return candidate
 
 
 def _merge_outbound_metadata(existing: Message, event: MessageSent) -> bool:

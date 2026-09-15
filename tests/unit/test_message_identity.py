@@ -74,3 +74,16 @@ async def test_same_upstream_id_is_valid_for_two_accounts(message_db) -> None:
     assert count == 2
     assert len(conversations) == 2
     assert {row.account_id for row in conversations} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_distinct_inbound_messages_increment_conversation_unread_count(message_db) -> None:
+    first = _event("acc-a").model_copy(update={"message_id": "message-1"})
+    second = _event("acc-a").model_copy(update={"message_id": "message-2"})
+
+    await domain_messages.upsert_inbound(first)
+    await domain_messages.upsert_inbound(second)
+
+    async with get_async_session() as session:
+        conversation = (await session.execute(select(Conversation))).scalar_one()
+    assert conversation.unread_count == 2
