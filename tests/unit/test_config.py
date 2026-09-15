@@ -53,7 +53,7 @@ def test_account_lock_path_is_collision_resistant(tmp_path: Path) -> None:
 
 
 def test_default_database_url_remains_sqlite(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, database_url="", db_path=None)
     assert settings.database_backend == "sqlite"
     assert settings.db_url == f"sqlite+aiosqlite:///{(tmp_path / 'xianyu.db').as_posix()}"
     assert settings.sync_db_url == f"sqlite:///{(tmp_path / 'xianyu.db').as_posix()}"
