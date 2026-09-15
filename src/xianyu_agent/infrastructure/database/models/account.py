@@ -12,6 +12,7 @@ from .base import Base
 from .enums import AccountStatus, WorkerDesiredState
 
 if TYPE_CHECKING:
+    from .conversation import Conversation
     from .inventory import Card
     from .message import Message
     from .order import Order
@@ -56,6 +57,9 @@ class Account(Base):
         back_populates="account", cascade="all, delete-orphan", uselist=False
     )
     messages: Mapped[list[Message]] = relationship(back_populates="account")
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
     orders: Mapped[list[Order]] = relationship(back_populates="account")
     cards: Mapped[list[Card]] = relationship(back_populates="account")
     rules: Mapped[list[ReplyRule]] = relationship(back_populates="account")

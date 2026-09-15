@@ -8,6 +8,7 @@ EXPECTED_TABLES = {
     "card_consumptions",
     "cards",
     "consumer_inbox",
+    "conversations",
     "cookies",
     "daemon_instances",
     "items",
@@ -28,8 +29,14 @@ EXPECTED_TABLES = {
 def test_legacy_model_module_reexports_canonical_classes() -> None:
     """Existing staged callers resolve to canonical split ORM definitions."""
     assert legacy_models.Account.__module__ == "xianyu_agent.infrastructure.database.models.account"
-    assert legacy_models.WorkerStatus.__module__ == "xianyu_agent.infrastructure.database.models.runtime"
+    assert (
+        legacy_models.WorkerStatus.__module__
+        == "xianyu_agent.infrastructure.database.models.runtime"
+    )
     assert legacy_models.Message.__module__ == "xianyu_agent.infrastructure.database.models.message"
+    assert legacy_models.Conversation.__module__ == (
+        "xianyu_agent.infrastructure.database.models.conversation"
+    )
     assert legacy_models.Item.__module__ == "xianyu_agent.infrastructure.database.models.item"
     assert legacy_models.Order.__module__ == "xianyu_agent.infrastructure.database.models.order"
     assert legacy_models.Card.__module__ == "xianyu_agent.infrastructure.database.models.inventory"
