@@ -116,7 +116,7 @@ async def record_outbound(event: MessageSent) -> int | None:
                     conversation_id=existing.conversation_id,
                     buyer_id=event.receiver_id,
                     item_id=event.item_id,
-                    observed_at=event.sent_at or event.received_at,
+                    observed_at=existing.sent_at or existing.received_at,
                 )
                 if metadata_changed or conversation_changed:
                     await session.commit()
@@ -167,7 +167,7 @@ async def record_outbound(event: MessageSent) -> int | None:
                 conversation_id=existing.conversation_id,
                 buyer_id=event.receiver_id,
                 item_id=event.item_id,
-                observed_at=event.sent_at or event.received_at,
+                observed_at=existing.sent_at or existing.received_at,
             )
             if metadata_changed or conversation_changed:
                 await session.commit()

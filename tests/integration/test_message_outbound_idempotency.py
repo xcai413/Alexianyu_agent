@@ -61,6 +61,43 @@ async def test_record_outbound_merges_same_platform_message_id(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_outbound_event_does_not_advance_conversation_time(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "outbound-replay-time.db"
+    monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XIANYU_DB_PATH", str(db))
+    reset_settings_cache()
+    db_mod.reset_engine()
+    await db_mod.init_db()
+    await domain_accounts.create_account("acc-replay", enabled=True)
+
+    original_time = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_time = datetime(2026, 1, 2, tzinfo=UTC)
+    acknowledged = MessageSent(
+        event_id="event-ack",
+        account_id="acc-replay",
+        received_at=original_time,
+        chat_id="chat-replay",
+        message_id="platform-message-replay",
+        receiver_id="buyer-replay",
+        content_type=MessageContentType.TEXT,
+        content="hello",
+    )
+    replayed = acknowledged.model_copy(update={"received_at": replay_time})
+
+    await domain_messages.record_outbound(acknowledged)
+    await domain_messages.record_outbound(replayed)
+
+    async with get_async_session() as session:
+        conversation = (await session.execute(select(Conversation))).scalar_one()
+    assert conversation.last_message_at == original_time.replace(tzinfo=None)
+
+    await db_mod.async_engine.dispose()
+    reset_settings_cache()
+
+
+@pytest.mark.asyncio
 async def test_outbound_conversation_backfills_unknown_buyer_and_item(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
