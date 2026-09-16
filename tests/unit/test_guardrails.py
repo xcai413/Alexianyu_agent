@@ -61,7 +61,7 @@ def test_quiet_hours_window() -> None:
 
 @pytest.mark.asyncio
 async def test_message_rate_gate(clean_db) -> None:
-    g = Guardrails(max_msg_per_hour=2)
+    g = Guardrails(max_msg_per_hour=2, quiet_hours="")
     # one message -> allowed
     decision = await g.check_message("acc-g", "在吗")
     assert decision.allowed is True
