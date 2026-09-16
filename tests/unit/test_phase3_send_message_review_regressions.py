@@ -126,6 +126,7 @@ async def test_outbound_unique_conflict_requeries_existing_platform_message(
         id=99,
         account_id=7,
         chat_id="chat-1",
+        external_message_id="platform-1",
         message_id="platform-1",
         sender_id="acc-1",
         direction="outbound",
@@ -147,12 +148,20 @@ async def test_outbound_unique_conflict_requeries_existing_platform_message(
         assert message_id == "platform-1"
         return None if lookups == 1 else existing
 
+    async def fake_get_or_create_conversation(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(id=12)
+
     monkeypatch.setattr(domain_messages, "get_async_session", fake_get_async_session)
     monkeypatch.setattr(domain_messages, "_get_account", fake_get_account)
     monkeypatch.setattr(
         domain_messages,
         "_find_message_by_platform_id",
         fake_find_message_by_platform_id,
+    )
+    monkeypatch.setattr(
+        domain_messages,
+        "_get_or_create_conversation",
+        fake_get_or_create_conversation,
     )
 
     event = MessageSent(

@@ -24,6 +24,7 @@ from .enums import MessageContentType, MessageDirection
 
 if TYPE_CHECKING:
     from .account import Account
+    from .conversation import Conversation
 
 
 class Message(Base):
@@ -35,7 +36,11 @@ class Message(Base):
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     sender_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -56,9 +61,13 @@ class Message(Base):
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     account: Mapped[Account] = relationship(back_populates="messages")
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
     __table_args__ = (
         Index("ix_messages_account_received", "account_id", "received_at"),
         Index("ix_messages_chat_received", "chat_id", "received_at"),
+        UniqueConstraint(
+            "account_id", "external_message_id", name="uq_messages_account_external_message"
+        ),
         UniqueConstraint("account_id", "message_id", name="uq_messages_account_message"),
     )

@@ -8,6 +8,7 @@ from .account import Account, Cookie, WsCredential
 from .audit import AuditLog
 from .automation import TaskLog
 from .base import Base
+from .conversation import Conversation
 from .enums import (
     AccountStatus,
     AuditActor,
@@ -44,6 +45,7 @@ __all__ = [
     "CardType",
     "ConsumerInbox",
     "ConsumptionStatus",
+    "Conversation",
     "Cookie",
     "DaemonInstance",
     "Item",

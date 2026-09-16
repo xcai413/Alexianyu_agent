@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import func, select
 
 from xianyu_agent.config import reset_settings_cache
-from xianyu_agent.db import Message, database as db_mod, get_async_session
+from xianyu_agent.db import Conversation, Message, database as db_mod, get_async_session
 from xianyu_agent.domain import accounts as domain_accounts, messages as domain_messages
 from xianyu_agent.protocol.events import MessageReceived
 
@@ -52,6 +52,13 @@ async def test_duplicate_replay_is_idempotent_per_account(message_db) -> None:
     assert count == 1
     assert row.content == "hello"
     assert row.item_id == "item-1"
+    assert row.external_message_id == "same-upstream-id"
+    async with get_async_session() as session:
+        conversation = (await session.execute(select(Conversation))).scalar_one()
+    assert row.conversation_id == conversation.id
+    assert conversation.buyer_id == "buyer-1"
+    assert conversation.external_conversation_id == "chat-1"
+    assert conversation.unread_count == 1
 
 
 @pytest.mark.asyncio
@@ -63,4 +70,20 @@ async def test_same_upstream_id_is_valid_for_two_accounts(message_db) -> None:
     assert first != second
     async with get_async_session() as session:
         count = await session.scalar(select(func.count()).select_from(Message))
+        conversations = list((await session.execute(select(Conversation))).scalars())
     assert count == 2
+    assert len(conversations) == 2
+    assert {row.account_id for row in conversations} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_distinct_inbound_messages_increment_conversation_unread_count(message_db) -> None:
+    first = _event("acc-a").model_copy(update={"message_id": "message-1"})
+    second = _event("acc-a").model_copy(update={"message_id": "message-2"})
+
+    await domain_messages.upsert_inbound(first)
+    await domain_messages.upsert_inbound(second)
+
+    async with get_async_session() as session:
+        conversation = (await session.execute(select(Conversation))).scalar_one()
+    assert conversation.unread_count == 2

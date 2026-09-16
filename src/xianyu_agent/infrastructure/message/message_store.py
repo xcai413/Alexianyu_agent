@@ -16,6 +16,12 @@ class DomainMessageStore:
     """Resolve peer identity and persist confirmed outbound messages."""
 
     async def resolve_receiver(self, *, account_id: str, chat_id: str) -> str | None:
+        conversation = await domain_messages.get_conversation(
+            account_id=account_id,
+            chat_id=chat_id,
+        )
+        if conversation is not None and _is_known_party(conversation.buyer_id):
+            return conversation.buyer_id.strip()
         rows = await domain_messages.list_recent(
             account_id=account_id,
             chat_id=chat_id,
@@ -25,12 +31,7 @@ class DomainMessageStore:
         if not rows:
             return None
         sender_id = rows[0].sender_id
-        if not isinstance(sender_id, str):
-            return None
-        receiver_id = sender_id.strip()
-        if not receiver_id or receiver_id.casefold() == _UNKNOWN_SENDER_ID:
-            return None
-        return receiver_id
+        return sender_id.strip() if _is_known_party(sender_id) else None
 
     async def record_outbound(
         self,
@@ -76,3 +77,11 @@ def _platform_message_id(response: Any) -> str | None:
         return None
     message_id = str(value).strip()
     return message_id or None
+
+
+def _is_known_party(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and value.strip().casefold() != _UNKNOWN_SENDER_ID
+    )
