@@ -21,8 +21,8 @@ xianyu-agent 是一套**为 AI Agent 而设计**的闲鱼(Goofish / 闲鱼)账�
 
 ## 当前状态与开发优先级
 
-扫码登录和正式在售商品只读同步已经过真实账号验证。WS 现由无时限 daemon 持有,
-`pool` 命令可跨进程控制账号 Worker;Windows 任务计划与 Watchdog 已通过真实强杀恢复测试。
+扫码登录和商品只读同步可在受保护的本地环境中验证。WS 由无时限 daemon 持有，
+`pool` 命令可跨进程控制账号 Worker；Windows 任务计划与 Watchdog 的验收状态以开发计划为准。
 Windows 重启恢复、断网恢复和 24 小时长稳仍未验收。
 
 WS 已补齐 IM token、`/reg`、`ackDiff`、推送 ACK 和 `syncPushPackage` 解包;但当前真实
@@ -49,26 +49,26 @@ uv run xianyu-agent service stop
 uv run xianyu-agent service start
 uv run xianyu-agent doctor
 uv run xianyu-agent doctor --output json
-uv run xianyu-agent soak start --account account-live --hours 24
+uv run xianyu-agent soak start --account demo --hours 24
 uv run xianyu-agent soak status
 ```
 
 daemon 运行后,可在其他终端跨进程控制单个账号:
 
 ```powershell
-uv run xianyu-agent pool stop --account account-live
-uv run xianyu-agent pool start --account account-live
-uv run xianyu-agent pool restart --account account-live
+uv run xianyu-agent pool stop --account demo
+uv run xianyu-agent pool start --account demo
+uv run xianyu-agent pool restart --account demo
 uv run xianyu-agent pool status
 ```
 
 真实入站校准使用安全观察模式:
 
 ```powershell
-uv run xianyu-agent pool stop --account account-live
-uv run xianyu-agent auth qr-login --account account-live
-uv run xianyu-agent auth status --account account-live
-uv run xianyu-agent protocol capture --account account-live --seconds 300 --target-messages 1
+uv run xianyu-agent pool stop --account demo
+uv run xianyu-agent auth qr-login --account demo
+uv run xianyu-agent auth status --account demo
+uv run xianyu-agent protocol capture --account demo --seconds 300 --target-messages 1
 ```
 
 扫码成功后会立即换取并加密缓存 IM token;若该步骤失败,命令返回非零并提示 `auth refresh`。
@@ -77,8 +77,8 @@ uv run xianyu-agent protocol capture --account account-live --seconds 300 --targ
 
 命令只有收到 daemon 的 `succeeded` 回执才显示 OK;daemon 离线或等待超时会返回非零退出码。
 `service install` 会创建 `XianyuAgent-Daemon` 与每分钟巡检的 `XianyuAgent-Watchdog` 两个
-任务。`service stop` 会写入暂停门,防止人工停机被 Watchdog 误拉起。当前真实环境已安装
-当前用户登录启动模式;强杀恢复已通过,Windows 重启恢复尚未验证。
+任务。`service stop` 会写入暂停门，防止人工停机被 Watchdog 误拉起。真实环境的部署状态
+不在仓库中记录；Windows 重启恢复需按开发计划完成验证。
 
 ## 不用做什么
 

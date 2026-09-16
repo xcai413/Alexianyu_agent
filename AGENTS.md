@@ -86,7 +86,7 @@ uv run alembic upgrade head
 `docs/开发计划.md` 的 P0-B、P0-D、P0-E。Windows `service` 与 `doctor` 均为现有命令;
 P0 尚未通过 Windows 重启、断网和 24 小时长稳,不得写成完整无人值守已验收。
 
-P0-E 正式 run `<redacted-run-id>` 正在运行,计划于 2026-08-15 03:38:18 到期。到期前不要
-停止/重启 service、断网或重启 Windows;只用 `xianyu-agent soak status` 读取进度。
-查看 `docs/architecture.md` 与本文件顶部的"仓库结构速查"对齐。
+真实 soak 运行的标识、时间和环境状态不记录在仓库中。运行期间不得停止/重启 service、
+断网或重启 Windows；只用 `xianyu-agent soak status` 读取进度。查看
+`docs/architecture.md` 与本文件顶部的“仓库结构速查”对齐。
 每个 Phase 的验证证据记录在 `docs/验证记录.md`;测试套件为最新权威证据(`uv run pytest -q`)。
