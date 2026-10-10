@@ -97,11 +97,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      XIANYU_DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/xianyu-ci-sqlite.db
       TEST_DATABASE_BACKEND: sqlite
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Use a temporary SQLite contract database
+        run: |
+          test -n "$RUNNER_TEMP"
+          printf 'XIANYU_DATABASE_URL=sqlite+aiosqlite:///%s/xianyu-ci-sqlite.db\n' \
+            "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
