@@ -92,6 +92,18 @@ def _worker(
     )
 
 
+def test_worker_wires_configured_reply_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XIANYU_AUTOMATION_MODE", "active")
+    monkeypatch.setenv("XIANYU_REPLY_MODE", "RULE_THEN_AI")
+    reset_settings_cache()
+
+    worker = AccountWorker("acc-1", client=_FakeClient())
+
+    assert worker._reply_engine is not None
+    assert worker._reply_engine.mode == "RULE_THEN_AI"
+    reset_settings_cache()
+
+
 def _assert_raw_is_separate_and_redacted(
     event: domain_events.DomainEvent,
     raw_payload: dict[str, Any] | None,
@@ -150,10 +162,14 @@ async def test_inbound_maps_once_then_routes_canonical_event_and_separate_raw(
 async def test_outbound_audit_consumer_receives_canonical_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: list[domain_events.MessageSent] = []
+    captured: list[tuple[domain_events.MessageSent, dict[str, Any] | None]] = []
 
-    async def persist(event: domain_events.MessageSent) -> int:
-        captured.append(event)
+    async def persist(
+        event: domain_events.MessageSent,
+        *,
+        raw_payload: dict[str, Any] | None = None,
+    ) -> int:
+        captured.append((event, raw_payload))
         return 7
 
     monkeypatch.setattr(account_worker_module.domain_messages, "record_outbound", persist)
@@ -171,9 +187,10 @@ async def test_outbound_audit_consumer_receives_canonical_message(
     await _worker()._on_event(event)
 
     assert len(captured) == 1
-    assert type(captured[0]) is domain_events.MessageSent
-    assert captured[0].content == "sent text"
-    assert "raw" not in captured[0].model_dump()
+    canonical, raw_payload = captured[0]
+    assert type(canonical) is domain_events.MessageSent
+    assert canonical.content == "sent text"
+    _assert_raw_is_separate_and_redacted(canonical, raw_payload)
 
 
 @pytest.mark.asyncio
@@ -230,7 +247,9 @@ async def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_canonical_message_and_order_persistence_accept_separate_raw_metadata(clean_db) -> None:
+async def test_canonical_message_and_order_persistence_accept_separate_raw_metadata(
+    clean_db,
+) -> None:
     await domain_accounts.create_account("acc-1", enabled=True)
     raw_metadata = {"transport": "redacted-metadata"}
 

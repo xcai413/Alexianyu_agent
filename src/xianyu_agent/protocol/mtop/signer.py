@@ -8,6 +8,7 @@ legacy module remains a compatibility facade.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -17,7 +18,8 @@ from typing import Any
 from sqlalchemy import select
 
 from xianyu_agent.config import get_settings
-from xianyu_agent.db import Account, Cookie, WsCredential, get_async_session
+from xianyu_agent.db import Account, AuditLog, Cookie, WsCredential, get_async_session
+from xianyu_agent.protocol.mtop.cookies import BrowserCookie
 
 logger = logging.getLogger(__name__)
 APP_KEY = "34839810"
@@ -62,9 +64,7 @@ def extract_mtop_token(cookie: str) -> str | None:
     The platform has used both ``_m_h5_tk`` and ``m_h5_tk`` in different
     flows. Callers receive only the value in memory and must never log it.
     """
-    return extract_cookie_field(cookie, "_m_h5_tk") or extract_cookie_field(
-        cookie, "m_h5_tk"
-    )
+    return extract_cookie_field(cookie, "_m_h5_tk") or extract_cookie_field(cookie, "m_h5_tk")
 
 
 def extract_cookie_field(cookie: str, name: str, *, prefix_only: bool = False) -> str | None:
@@ -115,14 +115,18 @@ class CookieSigner:
             if row is None:
                 return None
             try:
-                return self.fernet.decrypt(row.encrypted_value.encode("utf-8")).decode(
-                    "utf-8"
-                )
+                return self.fernet.decrypt(row.encrypted_value.encode("utf-8")).decode("utf-8")
             except Exception as exc:
                 logger.warning("decrypt failed for account=%s: %s", account_id, exc)
                 return None
 
-    async def save_cookie(self, account_id: str, cookie_value: str) -> bool:
+    async def save_cookie(
+        self,
+        account_id: str,
+        cookie_value: str,
+        *,
+        snapshot: list[BrowserCookie] | None = None,
+    ) -> bool:
         """Persist a fresh cookie and invalidate the old IM token.
 
         The device ID is deliberately retained so a QR refresh does not create a
@@ -139,19 +143,82 @@ class CookieSigner:
                 Cookie(
                     account_id=account.id,
                     encrypted_value=encrypted,
+                    encrypted_snapshot=(
+                        self.fernet.encrypt(
+                            json.dumps([item.as_dict() for item in snapshot]).encode()
+                        ).decode()
+                        if snapshot is not None
+                        else None
+                    ),
                 )
             )
             credential = (
                 await session.execute(
-                    select(WsCredential)
-                    .where(WsCredential.account_id == account.id)
-                    .limit(1)
+                    select(WsCredential).where(WsCredential.account_id == account.id).limit(1)
                 )
             ).scalar_one_or_none()
             if credential is not None:
                 credential.encrypted_token = self.fernet.encrypt(b"").decode("utf-8")
                 credential.expires_at = datetime.now(UTC)
             account.last_login_at = datetime.now(UTC)
+            session.add(
+                AuditLog(
+                    actor="system",
+                    action="credential_cookie_saved",
+                    target=account_id,
+                    params={
+                        "cookie_digest": _secret_digest(cookie_value),
+                        "browser_snapshot_saved": snapshot is not None,
+                        "previous_ws_token_invalidated": credential is not None,
+                    },
+                    result="ok",
+                )
+            )
+            await session.commit()
+            return True
+
+    async def load_cookie_snapshot(self, account_id: str) -> list[BrowserCookie] | None:
+        """Load an authoritative browser Cookie Jar when QR login captured one."""
+        async with get_async_session() as session:
+            row = (
+                await session.execute(
+                    select(Cookie)
+                    .join(Account, Account.id == Cookie.account_id)
+                    .where(Account.account_id == account_id)
+                    .order_by(Cookie.updated_at.desc(), Cookie.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if row is None or not row.encrypted_snapshot:
+            return None
+        try:
+            values = json.loads(self.fernet.decrypt(row.encrypted_snapshot.encode()))
+            return [BrowserCookie.from_dict(item) for item in values if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning(
+                "cookie snapshot decrypt failed for account=%s: %s",
+                account_id,
+                type(exc).__name__,
+            )
+            return None
+
+    async def save_cookie_snapshot(self, account_id: str, snapshot: list[BrowserCookie]) -> bool:
+        """Persist a refreshed browser Cookie Jar without changing flat Cookie text."""
+        async with get_async_session() as session:
+            row = (
+                await session.execute(
+                    select(Cookie)
+                    .join(Account, Account.id == Cookie.account_id)
+                    .where(Account.account_id == account_id)
+                    .order_by(Cookie.updated_at.desc(), Cookie.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.encrypted_snapshot = self.fernet.encrypt(
+                json.dumps([item.as_dict() for item in snapshot]).encode()
+            ).decode()
             await session.commit()
             return True
 
@@ -186,6 +253,7 @@ class CookieSigner:
             "has_m_h5_tk": bool(extract_mtop_token(cookie)),
             "has_cookie2": bool(_extract_field(cookie, "cookie2")),
             "m_h5_tk_digest": _secret_digest(extract_mtop_token(cookie)),
+            "cookie_digest": _secret_digest(cookie),
             "loaded_at": datetime.now(UTC).isoformat(),
         }
 

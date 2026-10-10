@@ -21,6 +21,7 @@ from xianyu_agent.application.session.health import (
     CredentialResultState,
 )
 from xianyu_agent.application.session.ports import CredentialFailureCode
+from xianyu_agent.application.session.renewal import ACTION_RENEWED, RenewalReport
 from xianyu_agent.application.session.supervisor import CredentialSupervisor
 from xianyu_agent.cli.commands import protocol as protocol_cli
 from xianyu_agent.config import get_settings, reset_settings_cache
@@ -96,6 +97,8 @@ class FakeCredentials:
         self.validation_results = list(validation_results or [])
         self.ensure_calls = 0
         self.refresh_calls: list[bool] = []
+        self.confirm_recovered_calls = 0
+        self.confirm_succeeds = True
 
     async def ensure(self, account_id: str) -> CredentialResult[str]:
         assert account_id == self.account_id
@@ -107,11 +110,26 @@ class FakeCredentials:
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[str]:
         assert account_id == self.account_id
         self.refresh_calls.append(validation_recovery)
         queue = self.validation_results if validation_recovery else self.refresh_results
         return queue.pop(0)
+
+    async def confirm_recovered(self, account_id: str, *, expected_revision=None) -> bool:
+        assert account_id == self.account_id
+        self.confirm_recovered_calls += 1
+        return self.confirm_succeeds
+
+
+class FakeRenewalService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    async def renew(self, account_id: str, *, session_expired: bool = False) -> RenewalReport:
+        self.calls.append((account_id, session_expired))
+        return RenewalReport(account_id=account_id, action=ACTION_RENEWED, success=True)
 
 
 def success(account_id: str, *, refreshed: bool = False) -> CredentialResult[str]:
@@ -155,6 +173,7 @@ def make_worker(
     *,
     client: FakeClient | None = None,
     credentials: FakeCredentials | None = None,
+    renewal_service: FakeRenewalService | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> tuple[AccountWorker, FakeClient, FakeCredentials]:
     fake_client = client or FakeClient(account_id)
@@ -175,6 +194,7 @@ def make_worker(
         readiness_poll_s=0.001,
         persist_events=False,
         automation_mode="passive",
+        renewal_service=renewal_service,  # type: ignore[arg-type]
     )
     return worker, fake_client, fake_credentials
 
@@ -289,6 +309,23 @@ async def test_auth_failure_uses_refresh_contract_and_returns_to_session_check()
 
 
 @pytest.mark.asyncio
+async def test_auth_failure_renews_cookie_before_refreshing_ws_credentials() -> None:
+    credentials = FakeCredentials(
+        "acc-1",
+        ensure_results=[success("acc-1")],
+        refresh_results=[success("acc-1", refreshed=True)],
+    )
+    renewal = FakeRenewalService()
+    worker, client, _ = make_worker(credentials=credentials, renewal_service=renewal)
+    await bring_online(worker, client)
+
+    await worker._on_auth_failure(WsAuthError("AUTH_FAILED"))
+
+    assert renewal.calls == [("acc-1", True)]
+    assert credentials.refresh_calls == [False]
+
+
+@pytest.mark.asyncio
 async def test_retryable_credential_failure_retries_same_ensure_route() -> None:
     delays: list[float] = []
 
@@ -358,8 +395,15 @@ async def test_validation_recovery_is_explicit_and_single_attempt() -> None:
 
     assert await worker.recover_validation() is True
     assert credentials.refresh_calls == [True]
+    assert credentials.confirm_recovered_calls == 0
     assert worker.state is WorkerState.CONNECTING
     assert client.start_calls == 1
+
+    await client.emit(ConnectionState.CONNECTING)
+    await client.emit(ConnectionState.CONNECTED)
+    client.subscription_ready = SubscriptionReady(sync_type=1, state_body={"pts": 1})
+    await wait_until(lambda: worker.state is WorkerState.ONLINE)
+    assert credentials.confirm_recovered_calls == 1
 
 
 @pytest.mark.asyncio
@@ -371,6 +415,73 @@ async def test_terminal_credential_failure_fails_closed_to_error() -> None:
 
     assert client.start_calls == 0
     assert credentials.ensure_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_validation_confirmation_stops_transport_without_online() -> None:
+    credentials = FakeCredentials(
+        "acc-1",
+        ensure_results=[needs_validation("acc-1")],
+        validation_results=[success("acc-1", refreshed=True)],
+    )
+    credentials.confirm_succeeds = False
+    worker, client, _ = make_worker(credentials=credentials)
+    startup = worker.start()
+    assert startup is not None
+    await startup
+    assert await worker.recover_validation()
+    client.subscription_ready = SubscriptionReady(sync_type=1, state_body={})
+    await client.emit(ConnectionState.CONNECTED)
+    assert worker.state is WorkerState.NEEDS_VALIDATION
+    assert WorkerState.ONLINE not in worker.state_history
+    assert client.stop_calls == 1
+    assert worker.lifecycle_error is not None
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_platform_flow_limit_code(monkeypatch) -> None:
+    recorded = []
+
+    async def open_circuit(account_id, *, code):
+        recorded.append((account_id, code))
+
+    monkeypatch.setattr(
+        "xianyu_agent.runtime.account_worker.worker_risk.open_user_validate", open_circuit
+    )
+    worker, client, _ = make_worker("flow-limit-regression")
+    await bring_online(worker, client)
+    assert await worker._on_auth_failure(WsAuthError("FAIL_SYS_FLOW_LIMIT"))
+    assert worker.state is WorkerState.NEEDS_VALIDATION
+    assert recorded == [("flow-limit-regression", "FAIL_SYS_FLOW_LIMIT")]
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_online_write_failure_never_clears_validation_gate(monkeypatch) -> None:
+    credentials = FakeCredentials(
+        "acc-1",
+        ensure_results=[needs_validation("acc-1")],
+        validation_results=[success("acc-1", refreshed=True)],
+    )
+    worker, client, _ = make_worker(credentials=credentials)
+    startup = worker.start()
+    assert startup is not None
+    await startup
+    assert await worker.recover_validation()
+    original = worker._persist_worker_state
+
+    async def fail_online(state, *, detail=None):
+        if state is WorkerState.ONLINE:
+            raise RuntimeError("injected ONLINE commit failure")
+        await original(state, detail=detail)
+
+    monkeypatch.setattr(worker, "_persist_worker_state", fail_online)
+    client.subscription_ready = SubscriptionReady(sync_type=1, state_body={})
+    await client.emit(ConnectionState.CONNECTED)
+    assert credentials.confirm_recovered_calls == 0
+    assert WorkerState.ONLINE not in worker.state_history
+    assert client.stop_calls == 1
+    assert worker.lifecycle_error is not None
 
 
 @pytest.mark.asyncio
@@ -427,7 +538,9 @@ async def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_restart_normalizes_legacy_status_without_promoting_connected_to_online(clean_db) -> None:
+async def test_restart_normalizes_legacy_status_without_promoting_connected_to_online(
+    clean_db,
+) -> None:
     account = await domain_accounts.create_account("acc-1", enabled=True)
     async with get_async_session() as session:
         session.add(WorkerStatus(account_id=account.id, status="connected"))
@@ -517,9 +630,7 @@ async def test_synthetic_injection_is_available_without_startup(
         observed.append(frame.packet_id)
 
     monkeypatch.setattr(worker, "_dispatch_injected_frame", capture_dispatch)
-    worker.inject_frame(
-        WsFrame(code=0, packetId="offline", headers={}, body={}, received_at=NOW)
-    )
+    worker.inject_frame(WsFrame(code=0, packetId="offline", headers={}, body={}, received_at=NOW))
     await worker.drain_injected_frames()
 
     assert worker.state is WorkerState.DISABLED
@@ -529,7 +640,9 @@ async def test_synthetic_injection_is_available_without_startup(
 
 
 @pytest.mark.asyncio
-async def test_synthetic_order_lifecycle_is_fifo_and_does_not_race_unique_constraint(clean_db) -> None:
+async def test_synthetic_order_lifecycle_is_fifo_and_does_not_race_unique_constraint(
+    clean_db,
+) -> None:
     await domain_accounts.create_account("acc-1", enabled=True)
     worker = AccountWorker("acc-1", automation_mode="passive")
     frames = [

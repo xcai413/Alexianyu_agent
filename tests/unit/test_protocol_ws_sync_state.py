@@ -305,10 +305,13 @@ async def test_ack_diff_timeout_cleans_pending_and_late_response_is_safe() -> No
     async def send_request(frame: sync.SyncFrame) -> bool:
         sent.append(frame)
         if frame["lwp"] == sync.GET_STATE_LWP:
-            assert router.match(
-                str(frame["headers"]["mid"]),
-                {"code": 200, "body": {"pts": 1}},
-            ) is True
+            assert (
+                router.match(
+                    str(frame["headers"]["mid"]),
+                    {"code": 200, "body": {"pts": 1}},
+                )
+                is True
+            )
         return True
 
     with pytest.raises(TimeoutError):

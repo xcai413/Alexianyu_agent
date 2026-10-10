@@ -58,6 +58,43 @@ async def set_remark(account_id: str, remark: str | None) -> bool:
     return await get_account_application().set_remark(account_id, remark)
 
 
+async def set_nickname(account_id: str, nickname: str | None) -> bool:
+    """更新本地镜像里的昵称(只写本地,不碰平台)。"""
+    return await get_account_application().set_nickname(account_id, nickname)
+
+
+async def set_reply_pause(
+    account_id: str,
+    *,
+    until: datetime | None,
+    reason: str | None = None,
+) -> bool:
+    """暂停/恢复账号级自动回复;until=None 表示立即恢复。"""
+    return await get_account_application().set_reply_pause(
+        account_id, until=until, reason=reason
+    )
+
+
+async def reply_pause_until(account_id: str) -> datetime | None:
+    """该账号自动回复的恢复时间;None 表示没有暂停。"""
+    record = await get_account(account_id)
+    if record is None:
+        return None
+    until = getattr(record, "reply_paused_until", None)
+    if until is None:
+        return None
+    # SQLite 存回的是无时区值,统一按 UTC 解释,否则比较会 TypeError。
+    return until.replace(tzinfo=UTC) if until.tzinfo is None else until.astimezone(UTC)
+
+
+async def is_reply_paused(account_id: str, *, now: datetime | None = None) -> bool:
+    """当前是否处于账号级暂停期内(过期即自动恢复,不需要人工清理)。"""
+    until = await reply_pause_until(account_id)
+    if until is None:
+        return False
+    return until > (now or datetime.now(UTC)).astimezone(UTC)
+
+
 async def delete_account(account_id: str) -> bool:
     """Delete an account and cascade its rows. Returns False if missing."""
     return await get_account_application().delete_account(account_id)

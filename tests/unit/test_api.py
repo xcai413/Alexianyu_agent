@@ -7,9 +7,10 @@ from pathlib import Path
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
 from fastapi_mcp import FastApiMCP
 
-from xianyu_agent.api.app import app as fastapi_app
+from xianyu_agent.api.app import app as fastapi_app, mount_web_console
 from xianyu_agent.config import reset_settings_cache
 from xianyu_agent.db import database as db_mod
 
@@ -118,10 +119,28 @@ async def test_mcp_mounts_sse_and_pool_status(client: httpx.AsyncClient) -> None
     mcp = FastApiMCP(fastapi_app, name="xianyu-agent")
     mcp.mount_sse()
 
-    paths = {route.path for route in fastapi_app.routes}
+    paths = {route.path for route in fastapi_app.routes if hasattr(route, "path")}
     assert "/sse" in paths
     assert "/sse/messages/" in paths
 
     r = await client.get("/api/v1/pool/status")
     assert r.status_code == 200
     assert isinstance(r.json()["data"], list)
+
+
+async def test_web_console_mounts_built_static_bundle(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<main>运营后台</main>", encoding="utf-8")
+    app = FastAPI()
+    mount_web_console(app, static_dir=tmp_path)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/")
+        deep_link = await client.get("/dashboard")
+        missing_asset = await client.get("/assets/missing.js")
+
+    assert response.status_code == 200
+    assert "运营后台" in response.text
+    assert deep_link.status_code == 200
+    assert "运营后台" in deep_link.text
+    assert missing_asset.status_code == 404

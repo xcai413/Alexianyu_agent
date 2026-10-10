@@ -7,14 +7,33 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from xianyu_agent.config import reset_settings_cache
-from xianyu_agent.db import Account, Cookie, WsCredential, database as db_mod, get_async_session
+from xianyu_agent.db import (
+    Account,
+    AuditLog,
+    Cookie,
+    WsCredential,
+    database as db_mod,
+    get_async_session,
+)
+from xianyu_agent.domain import worker_risk
 from xianyu_agent.protocol import signer as legacy_signer
 from xianyu_agent.protocol.mtop import signer as canonical_signer
+from xianyu_agent.protocol.mtop.cookies import BrowserCookie
+from xianyu_agent.protocol.mtop.endpoints.item_detail import XianyuItemDetailClient
+from xianyu_agent.protocol.mtop.endpoints.item_polish import XianyuItemPolishClient
+from xianyu_agent.protocol.mtop.endpoints.items import XianyuItemsClient
+from xianyu_agent.protocol.mtop.endpoints.orders import XianyuOrdersClient
+from xianyu_agent.protocol.mtop.request_gate import (
+    MtopRequestsPausedError,
+    load_request_cookie,
+    observe_mtop_response,
+)
 
 
 @pytest.fixture
@@ -63,10 +82,7 @@ def test_legacy_generic_error_helper_remains_compatible() -> None:
 def test_compute_sign_preserves_known_wire_vector() -> None:
     raw = b"seed&1700000000000&34839810&data"
     expected = hashlib.md5(raw).hexdigest()
-    assert (
-        canonical_signer.compute_sign("seed", 1700000000000, "34839810", "data")
-        == expected
-    )
+    assert canonical_signer.compute_sign("seed", 1700000000000, "34839810", "data") == expected
 
 
 def test_make_headers_preserves_wire_fields(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,6 +153,148 @@ async def test_cookie_save_is_encrypted_and_invalidates_token_without_rotating_d
         assert "old-secret" not in row.encrypted_value
         assert "new-secret" not in row.encrypted_value
     assert await signer.load_cookie_value("acc-mtop") == new_cookie
+    async with get_async_session() as session:
+        audits = list((await session.scalars(select(AuditLog).order_by(AuditLog.id))).all())
+    assert len(audits) == 2
+    assert audits[-1].action == "credential_cookie_saved"
+    assert audits[-1].params["previous_ws_token_invalidated"] is True
+    assert audits[0].params["cookie_digest"] != audits[-1].params["cookie_digest"]
+    assert "new-secret" not in json.dumps(audits[-1].params)
+    assert (await signer.fingerprint("acc-mtop"))["cookie_digest"] == audits[-1].params[
+        "cookie_digest"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_saved_browser_snapshot_round_trips_and_latest_cookie_is_authoritative(signer_db):
+    signer = canonical_signer.CookieSigner()
+    original = [BrowserCookie("cookie2", "snapshot-secret", ".goofish.com", http_only=True)]
+    assert await signer.save_cookie("acc-mtop", "cookie2=first", snapshot=original)
+    assert await signer.load_cookie_snapshot("acc-mtop") == original
+    refreshed = [BrowserCookie("cookie2", "refreshed-secret", ".goofish.com", secure=True)]
+    assert await signer.save_cookie_snapshot("acc-mtop", refreshed)
+    assert await signer.load_cookie_snapshot("acc-mtop") == refreshed
+    assert await signer.save_cookie("acc-mtop", "cookie2=second")
+    assert await signer.load_cookie_snapshot("acc-mtop") is None
+
+
+@pytest.mark.asyncio
+async def test_mtop_gate_survives_database_reopen_and_expired_cooldown(signer_db):
+    signer = canonical_signer.CookieSigner()
+    assert await signer.save_cookie("acc-mtop", "cookie2=local-test")
+    await worker_risk.open_user_validate("acc-mtop", now=datetime.now(UTC) - timedelta(days=1))
+    await db_mod.async_engine.dispose()
+    db_mod.reset_engine()
+
+    class ForbiddenSigner:
+        async def load_cookie_value(self, _account_id):
+            pytest.fail("paused requests must not load credentials")
+
+    with pytest.raises(MtopRequestsPausedError):
+        await load_request_cookie(ForbiddenSigner(), "acc-mtop")
+    assert await signer.load_cookie_value("acc-mtop") == "cookie2=local-test"
+    current = await worker_risk.get("acc-mtop")
+    assert await worker_risk.clear_after_refresh("acc-mtop", expected_revision=current.revision)
+    assert await load_request_cookie(signer, "acc-mtop") == "cookie2=local-test"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["orders", "detail", "polish"])
+async def test_paused_read_and_write_endpoints_never_open_http(signer_db, monkeypatch, operation):
+    signer = canonical_signer.CookieSigner()
+    assert await signer.save_cookie("acc-mtop", "unb=test; _m_h5_tk=test_suffix; cookie2=test")
+    await worker_risk.open_user_validate("acc-mtop", now=datetime.now(UTC) - timedelta(days=1))
+
+    def forbidden_http(*_args, **_kwargs):
+        pytest.fail("paused account must not open HTTP connections")
+
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_http)
+    if operation == "orders":
+        request = XianyuOrdersClient(signer).fetch_sold_page("acc-mtop")
+    elif operation == "detail":
+        request = XianyuItemDetailClient(signer).fetch_item_detail("acc-mtop", "123")
+    else:
+        request = XianyuItemPolishClient(signer).polish_item("acc-mtop", "123")
+    with pytest.raises(MtopRequestsPausedError):
+        await request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["items", "orders"])
+@pytest.mark.parametrize("code", ["FAIL_SYS_USER_VALIDATE", "RGV587_ERROR", "FAIL_SYS_FLOW_LIMIT"])
+async def test_risk_bootstrap_is_not_retried_and_persists_account_pause(
+    signer_db, monkeypatch, endpoint, code
+):
+    signer = canonical_signer.CookieSigner()
+    assert await signer.save_cookie("acc-mtop", "unb=local-user; cookie2=local-cookie")
+    client = XianyuItemsClient(signer) if endpoint == "items" else XianyuOrdersClient(signer)
+    calls = []
+
+    async def risk_response(*args):
+        calls.append(1)
+        return httpx.Response(
+            200,
+            json={"ret": [code]},
+            headers={"set-cookie": "_m_h5_tk=local-secret_suffix; Path=/;"},
+            request=httpx.Request("POST", "https://unit.test"),
+        )
+
+    method = "_request_list" if endpoint == "items" else "_request_sold_orders"
+    monkeypatch.setattr(client, method, risk_response)
+    fetch = client.fetch_on_sale_page if endpoint == "items" else client.fetch_sold_page
+    with pytest.raises(MtopRequestsPausedError):
+        await fetch("acc-mtop")
+    assert len(calls) == 1
+    risk = await worker_risk.get("acc-mtop")
+    assert risk is not None
+    assert risk.code == code
+    with pytest.raises(MtopRequestsPausedError):
+        await fetch("acc-mtop")
+    assert len(calls) == 1
+    assert await signer.load_cookie_value("acc-mtop") == "unb=local-user; cookie2=local-cookie"
+
+
+@pytest.mark.asyncio
+async def test_normal_mtop_business_error_and_message_text_do_not_trip_risk(signer_db):
+    response = httpx.Response(
+        200, json={"ret": ["FAIL_BIZ_ITEM_NOT_FOUND"], "data": {"text": "FAIL_SYS_USER_VALIDATE"}}
+    )
+    await observe_mtop_response("acc-mtop", response)
+    assert await worker_risk.get("acc-mtop") is None
+
+
+@pytest.mark.asyncio
+async def test_signed_write_risk_response_persists_gate_before_business_parser(
+    signer_db, monkeypatch
+):
+    signer = canonical_signer.CookieSigner()
+    assert await signer.save_cookie("acc-mtop", "unb=local-user; _m_h5_tk=local_suffix")
+    client = XianyuItemPolishClient(signer)
+    requests = []
+
+    class MockHttp:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            requests.append(1)
+            return httpx.Response(200, json={"ret": ["FAIL_SYS_FLOW_LIMIT"]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockHttp)
+    with pytest.raises(MtopRequestsPausedError):
+        await client.polish_item("acc-mtop", "123")
+    risk = await worker_risk.get("acc-mtop")
+    assert risk is not None
+    assert risk.code == "FAIL_SYS_FLOW_LIMIT"
+    with pytest.raises(MtopRequestsPausedError):
+        await client.polish_item("acc-mtop", "123")
+    assert len(requests) == 1
 
 
 @pytest.mark.asyncio

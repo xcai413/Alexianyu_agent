@@ -25,6 +25,21 @@ def redact_text(value: str) -> str:
     return redacted
 
 
+_LEVEL_PATTERN = re.compile(r"\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b")
+
+
+def summarize_log_levels(lines: list[str]) -> dict[str, int]:
+    """Count log lines per level; unmatched lines are counted as OTHER.
+
+    统计只数行,不解析内容:日志正文里可能带业务数据,统计输出必须保持无可泄漏信息。
+    """
+    counts = {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0, "OTHER": 0}
+    for line in lines:
+        match = _LEVEL_PATTERN.search(line)
+        counts[match.group(1) if match else "OTHER"] += 1
+    return counts
+
+
 class SecretRedactionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()

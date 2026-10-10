@@ -107,9 +107,7 @@ def build_task_xml(
     ET.register_namespace("", TASK_NAMESPACE)
     root = ET.Element(_tag("Task"), {"version": "1.4"})
     _add_registration(root)
-    principal_sid, logon_type, run_level = _add_trigger(
-        root, startup=startup, user_sid=user_sid
-    )
+    principal_sid, logon_type, run_level = _add_trigger(root, startup=startup, user_sid=user_sid)
     _add_principal(
         root,
         principal_sid=principal_sid,
@@ -326,9 +324,7 @@ def query_task_status(task_name: str = TASK_NAME) -> ScheduledTaskStatus:
         "last_task_result=[int64]$info.LastTaskResult;"
         "next_run_time=$next}|ConvertTo-Json -Compress"
     )
-    result = _run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
-    )
+    result = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
     try:
         data = json.loads(result.stdout.strip())
     except json.JSONDecodeError as exc:

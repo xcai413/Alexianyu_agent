@@ -30,6 +30,29 @@ async def risk_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_risk_revision_cas_rejects_stale_confirmation_and_same_timestamp_aba(risk_db):
+    now = datetime(2026, 9, 19, tzinfo=UTC)
+    old = await worker_risk.open_user_validate("risk-account", now=now)
+    new = await worker_risk.open_user_validate("risk-account", now=now)
+    assert old.revision != new.revision
+    assert (
+        await worker_risk.clear_after_refresh("risk-account", expected_revision=old.revision)
+        is False
+    )
+    assert (await worker_risk.get("risk-account")).revision == new.revision
+    assert (
+        await worker_risk.clear_after_refresh("risk-account", expected_revision=new.revision)
+        is True
+    )
+    reopened = await worker_risk.open_user_validate("risk-account", now=now)
+    assert reopened.revision != old.revision
+    assert (
+        await worker_risk.clear_after_refresh("risk-account", expected_revision=old.revision)
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_open_circuit_stops_only_risk_account_and_writes_audit(risk_db) -> None:
     _ = risk_db
     await domain_accounts.set_desired_state("risk-account", "running")
@@ -40,7 +63,7 @@ async def test_open_circuit_stops_only_risk_account_and_writes_audit(risk_db) ->
 
     assert circuit is not None
     assert circuit.code == "FAIL_SYS_USER_VALIDATE"
-    assert circuit.cooldown_until == now + timedelta(minutes=20)
+    assert circuit.cooldown_until == now + timedelta(seconds=60)
     risk_account = await domain_accounts.get_account("risk-account")
     healthy_account = await domain_accounts.get_account("healthy-account")
     assert risk_account is not None
@@ -74,7 +97,11 @@ async def test_circuit_blocks_start_until_successful_manual_refresh(risk_db) -> 
         "healthy-account"
     ]
 
-    assert await worker_risk.clear_after_refresh("risk-account") is True
+    current = await worker_risk.get("risk-account")
+    assert (
+        await worker_risk.clear_after_refresh("risk-account", expected_revision=current.revision)
+        is True
+    )
     command = await worker_commands.submit("risk-account", "start")
     assert command is not None
     status = await domain_accounts.worker_status_for("risk-account")
@@ -130,6 +157,31 @@ async def test_circuit_status_reports_expired_cooldown_but_keeps_recovery_gate(r
     circuit = await worker_risk.get("risk-account")
 
     assert circuit is not None
-    assert circuit.is_cooling(now=now + timedelta(minutes=19)) is True
-    assert circuit.is_cooling(now=now + timedelta(minutes=20)) is False
+    # 首次命中按最短档冷却,冷却结束后熔断仍在(需人工刷新才解除)。
+    assert circuit.is_cooling(now=now + timedelta(seconds=59)) is True
+    assert circuit.is_cooling(now=now + timedelta(seconds=61)) is False
     assert circuit.remaining_seconds(now=now + timedelta(minutes=25)) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recovery_probe_audit_is_secret_free(risk_db) -> None:
+    _ = risk_db
+
+    await worker_risk.record_recovery_probe(
+        "risk-account",
+        result="failed",
+        reason="会话最终状态为 needs_validation token=secret-token cookie=secret-cookie",
+    )
+
+    async with get_async_session() as session:
+        audit = (
+            await session.execute(
+                select(AuditLog).where(AuditLog.action == "ws_validation_recovery_probe")
+            )
+        ).scalar_one()
+
+    assert audit.target == "risk-account"
+    assert audit.result == "failed"
+    assert "会话最终状态为 needs_validation" in audit.error
+    assert "secret-token" not in str(audit.params)
+    assert "secret-cookie" not in audit.error

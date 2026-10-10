@@ -1,0 +1,1 @@
+"""Web administrator authentication contracts."""

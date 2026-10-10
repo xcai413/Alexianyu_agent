@@ -161,6 +161,31 @@ async def test_missing_mtop_token_retries_after_set_cookie_bootstrap(ws_db) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "risk_code", ["FAIL_SYS_USER_VALIDATE", "FAIL_SYS_FLOW_LIMIT", "RGV587_ERROR"]
+)
+async def test_risk_cookie_update_never_triggers_token_retry(ws_db, risk_code) -> None:
+    signer = CookieSigner()
+    original = "unb=user-1; cookie2=c2"
+    await signer.save_cookie("acc-ws", original)
+    provider = StubTokenProvider(
+        [
+            httpx.Response(
+                200,
+                headers={"set-cookie": "_m_h5_tk=risk_seed; Path=/"},
+                json={"ret": [risk_code]},
+            ),
+        ],
+        signer,
+    )
+    with pytest.raises(WsAuthError, match=risk_code):
+        await provider.get_credentials("acc-ws", force_refresh=True)
+    assert len(provider.calls) == 1
+    assert await signer.load_cookie_value("acc-ws") == original
+    assert not (await provider.status("acc-ws")).token_cached
+
+
+@pytest.mark.asyncio
 async def test_device_id_survives_failed_token_request(ws_db) -> None:
     signer = CookieSigner()
     await signer.save_cookie("acc-ws", "unb=user-1; _m_h5_tk=seed_x; cookie2=c2")

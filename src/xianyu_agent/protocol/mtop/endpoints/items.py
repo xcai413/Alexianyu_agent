@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from xianyu_agent.protocol.mtop.request_gate import load_request_cookie, observe_mtop_response
 from xianyu_agent.protocol.mtop.signer import (
     APP_KEY,
     CookieSigner,
@@ -103,11 +104,12 @@ class XianyuItemsClient:
             if token
             else await self._bootstrap_list_session(account_id, cookie, data)
         )
+        await observe_mtop_response(account_id, response)
         return _parse_item_page(response, account_id, page_number=page_number, page_size=page_size)
 
     async def _load_item_auth(self, account_id: str) -> tuple[str, str]:
         """Load Cookie and platform user ID without exposing either value."""
-        cookie = await self._signer.load_cookie_value(account_id)
+        cookie = await load_request_cookie(self._signer, account_id)
         if not cookie:
             msg = f"账号 {account_id} 无可用 Cookie"
             raise ItemSyncError(msg)
@@ -140,6 +142,7 @@ class XianyuItemsClient:
         Values remain in memory and are not written or logged.
         """
         bootstrap = await self._request_list(cookie, "", data)
+        await observe_mtop_response(account_id, bootstrap)
         merged_cookie = _merge_set_cookies(cookie, bootstrap)
         token = extract_mtop_token(merged_cookie)
         if token:

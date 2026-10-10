@@ -1,0 +1,72 @@
+# 单副本自托管:app + Postgres,console profile 可启动 Web/MCP。
+# 用法见 docs/容器化运行手册.md。
+# 密钥不写进本文件:XIANYU_FERNET_KEY 由宿主 .env 或环境变量提供。
+name: xianyu-agent
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-xianyu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-xianyu}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-xianyu} -d ${POSTGRES_DB:-xianyu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: ${XIANYU_IMAGE:-xianyu-agent:local}
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: &app-env-file
+      - path: .env
+        required: false
+    environment: &app-environment
+      # 容器内固定用 Postgres 与 /data;覆盖 .env 里的 SQLite 配置。
+      XIANYU_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-xianyu}:${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xianyu}
+      XIANYU_DATA_DIR: /data
+      XIANYU_FERNET_KEY: ${XIANYU_FERNET_KEY:?必须设置 XIANYU_FERNET_KEY}
+      # 容器默认 observe:没有显式设置时不会自动回复/发货。
+      XIANYU_AUTOMATION_MODE: ${XIANYU_AUTOMATION_MODE:-observe}
+      XIANYU_TAKEOVER_REQUIRE_APPROVAL: ${XIANYU_TAKEOVER_REQUIRE_APPROVAL:-false}
+      XIANYU_TAKEOVER_MAX_FAILURES: ${XIANYU_TAKEOVER_MAX_FAILURES:-3}
+      XIANYU_HEALTH_SERVER_ENABLED: "true"
+      XIANYU_HTTP_HOST: 0.0.0.0
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes: &app-volumes
+      # 宿主数据目录可用 XIANYU_HOST_DATA_DIR 覆盖(容器内固定 UID 10001,目录要可写)。
+      - ${XIANYU_HOST_DATA_DIR:-./data}:/data
+
+  web:
+    image: ${XIANYU_IMAGE:-xianyu-agent:local}
+    profiles: [console]
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    env_file: *app-env-file
+    environment:
+      <<: *app-environment
+      # app 完成迁移且健康后启动,避免同时升级共享数据库。
+      XIANYU_SKIP_MIGRATIONS: "1"
+      XIANYU_CONTAINER_SERVICE: web
+      XIANYU_MCP_PORT: "8090"
+    command: [mcp, serve, --host, 0.0.0.0, --port, "8090"]
+    volumes: *app-volumes
+    # 同一服务还承载 Agent API;默认仅供宿主本机与受控隧道访问。
+    ports:
+      - "127.0.0.1:${XIANYU_WEB_HOST_PORT:-8090}:8090"
+
+volumes:
+  pgdata:

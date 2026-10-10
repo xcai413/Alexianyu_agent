@@ -104,7 +104,12 @@ def _print_table(run: SoakRun) -> None:
         str(params.get("sample_count", 0)),
         f"{params.get('healthy_samples', 0)}/{params.get('error_samples', 0)}",
         str(params.get("max_reconnects", 0)),
-        str(params.get("daemon_instance_changes", 0)),
+        (
+            f"{params.get('daemon_instance_changes', 0)} "
+            f"(计划 {params.get('planned_daemon_restarts', 0)}/"
+            f"接管 {params.get('failover_instance_changes', 0)}/"
+            f"未知 {params.get('unexplained_instance_changes', 0)})"
+        ),
         str(params.get("duplicate_reply_groups", 0)),
         str(params.get("sensitive_log_hits", 0)),
     )

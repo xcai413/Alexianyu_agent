@@ -59,9 +59,18 @@ def test_quiet_hours_window() -> None:
     assert g3._in_quiet_hours(datetime(2026, 1, 1, 2, 0, tzinfo=UTC)) is False
 
 
+def test_quiet_hours_uses_configured_business_timezone() -> None:
+    g = Guardrails(quiet_hours="23:00-08:00")
+    morning_in_shanghai = datetime(2026, 1, 1, 0, 30, tzinfo=UTC).astimezone(g._business_timezone)
+    night_in_shanghai = datetime(2026, 1, 1, 16, 30, tzinfo=UTC).astimezone(g._business_timezone)
+
+    assert g._in_quiet_hours(morning_in_shanghai) is False
+    assert g._in_quiet_hours(night_in_shanghai) is True
+
+
 @pytest.mark.asyncio
 async def test_message_rate_gate(clean_db) -> None:
-    g = Guardrails(max_msg_per_hour=2)
+    g = Guardrails(max_msg_per_hour=2, quiet_hours="")
     # one message -> allowed
     decision = await g.check_message("acc-g", "在吗")
     assert decision.allowed is True
@@ -77,7 +86,7 @@ async def test_message_rate_gate(clean_db) -> None:
 async def test_quiet_hours_blocks_message(clean_db) -> None:
     g = Guardrails(quiet_hours="23:00-08:00")
     now = datetime.now(UTC)
-    if g._in_quiet_hours(now):
+    if g._in_quiet_hours(now.astimezone(g._business_timezone)):
         decision = await g.check_message("acc-g", "在吗")
         assert decision.allowed is False
         assert "静默" in (decision.reason or "")

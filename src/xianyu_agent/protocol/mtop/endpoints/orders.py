@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from xianyu_agent.protocol.mtop.request_gate import load_request_cookie, observe_mtop_response
 from xianyu_agent.protocol.mtop.signer import (
     APP_KEY,
     CookieSigner,
@@ -75,6 +76,9 @@ class RemoteSoldOrder:
     status: str
     placed_at: datetime | None
     raw_payload: dict[str, Any]
+    item_title: str | None = None
+    paid_at: datetime | None = None
+    delivered_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -141,12 +145,50 @@ class XianyuOrdersClient:
             if token
             else await self._bootstrap_order_session(account_id, cookie, data)
         )
+        await observe_mtop_response(account_id, response)
         return _parse_sold_order_page(
             response,
             account_id,
             page_number=page_number,
             page_size=page_size,
         )
+
+    async def fetch_order_info(self, account_id: str, order_id: str) -> dict[str, Any]:
+        """精确只读查询一笔订单;收货信息仅在内存中投影,不写镜像。"""
+        return parse_order_info(await self._fetch_order_item(account_id, order_id))
+
+    async def fetch_sold_order(self, account_id: str, order_id: str) -> RemoteSoldOrder:
+        """精确读取一笔历史订单的安全镜像,与完整列表使用相同解析。"""
+        order = _parse_sold_order_item(await self._fetch_order_item(account_id, order_id))
+        if order is None:
+            raise OrderSyncError("平台未返回有效订单")
+        return order
+
+    async def _fetch_order_item(self, account_id: str, order_id: str) -> dict[str, Any]:
+        normalized = order_id.strip()
+        if not normalized or "," in normalized:
+            raise ValueError("必须指定单个订单号")
+        cookie = await self._load_order_auth(account_id)
+        payload = _make_sold_orders_payload(page_number=1, page_size=1)
+        payload["orderIds"] = normalized
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        token = extract_mtop_token(cookie)
+        response = (
+            await self._request_sold_orders(cookie, token, data)
+            if token
+            else await self._bootstrap_order_session(account_id, cookie, data)
+        )
+        await observe_mtop_response(account_id, response)
+        # 验证成功与列表结构;精确查询的 totalCount 可为 0,只匹配实际返回的订单。
+        _parse_sold_order_page(response, account_id, page_number=1, page_size=1)
+        for item in response.json()["data"]["module"]["items"]:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("commonData"), dict)
+                and str(item["commonData"].get("orderId")) == normalized
+            ):
+                return item
+        raise OrderSyncError("平台未返回该订单")
 
     async def fetch_all_sold(
         self,
@@ -185,7 +227,7 @@ class XianyuOrdersClient:
         raise OrderSyncError(msg)
 
     async def _load_order_auth(self, account_id: str) -> str:
-        cookie = await self._signer.load_cookie_value(account_id)
+        cookie = await load_request_cookie(self._signer, account_id)
         if not cookie:
             msg = f"账号 {account_id} 无可用 Cookie"
             raise OrderSyncError(msg)
@@ -241,6 +283,7 @@ class XianyuOrdersClient:
     ) -> httpx.Response:
         """通过只读订单接口尝试补齐 mtop token; 敏感值只在内存中存在。"""
         bootstrap = await self._request_sold_orders(cookie, "", data)
+        await observe_mtop_response(account_id, bootstrap)
         merged_cookie = _merge_set_cookies(cookie, bootstrap)
         token = extract_mtop_token(merged_cookie)
         if token:
@@ -316,30 +359,107 @@ def _parse_sold_order_item(item: Any) -> RemoteSoldOrder | None:
     in_refund = str(common.get("inRefund") or "").lower() == "true"
     status = "refunded" if in_refund else _STATUS_MAP.get(raw_status, "unknown")
     item_id = str(common.get("itemId") or "") or None
+    item_vo = item.get("itemVO")
+    title = item_vo.get("title") if isinstance(item_vo, dict) else None
+    item_title = title if isinstance(title, str) and title.strip() else None
     return RemoteSoldOrder(
         order_id=order_id,
         item_id=item_id,
+        item_title=item_title,
         buyer_id=str(buyer.get("buyerId") or "") or None,
         buyer_name=str(buyer.get("userNick") or "") or None,
         amount=_parse_amount(price.get("totalPrice")),
         quantity=_parse_positive_int(price.get("buyNum")),
         status=status,
         placed_at=_parse_order_time(common.get("createTime")),
-        raw_payload=_safe_raw_payload(common=common, buyer=buyer, price=price),
+        paid_at=_parse_order_time(common.get("paySuccessTime")),
+        delivered_at=_parse_order_time(common.get("consignTime")),
+        raw_payload=_safe_raw_payload(
+            common=common, buyer=buyer, price=price, item_title=item_title
+        ),
     )
 
 
+def parse_order_info(item: dict[str, Any]) -> dict[str, Any]:
+    """运营详情白名单,保留平台原文与脱敏值,不输出原始载荷。"""
+
+    def section(key: str) -> dict[str, Any]:
+        value = item.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def scalar(source: dict[str, Any], key: str) -> Any:
+        value = source.get(key)
+        return value if isinstance(value, (str, int, float, bool)) else None
+
+    common, buyer, price, product = (
+        section(key) for key in ("commonData", "buyerInfoVO", "priceVO", "itemVO")
+    )
+    fields = {
+        "order_id": (common, "orderId"),
+        "item_id": (common, "itemId"),
+        "status_text": (common, "orderStatus"),
+        "created_at": (common, "createTime"),
+        "paid_at": (common, "paySuccessTime"),
+        "consigned_at": (common, "consignTime"),
+        "finished_at": (common, "finishTime"),
+        "seller_rate_status": (common, "sellerRateStatus"),
+        "refund_status": (common, "refundStatusDesc"),
+        "consign_tips": (common, "consignTipsText"),
+        "buyer_id": (buyer, "buyerId"),
+        "buyer_nickname": (buyer, "userNick"),
+        "buyer_avatar": (buyer, "userIcon"),
+        "receiver_name": (buyer, "name"),
+        "receiver_phone": (buyer, "phone"),
+        "receiver_address": (buyer, "address"),
+        "item_title": (product, "title"),
+        "item_image": (product, "itemPicUrl"),
+        "amount": (price, "totalPrice"),
+        "unit_price": (price, "auctionPrice"),
+        "quantity": (price, "buyNum"),
+        "post_fee": (price, "postFee"),
+        "discount_fee": (price, "discountFee"),
+        "received_fee": (price, "confirmFee"),
+        "refund_fee": (price, "refundFee"),
+    }
+    result = {name: scalar(source, key) for name, (source, key) in fields.items()}
+    for name, source, key in (
+        ("in_refund", common, "inRefund"),
+        ("address_change_requested", common, "buyerApplyModifyAddress"),
+        ("is_privacy", buyer, "isPrivacy"),
+    ):
+        value = scalar(source, key)
+        result[name] = _parse_bool(value) if value is not None else None
+    result["item_info"] = (
+        [
+            {"name": scalar(line, "key"), "value": scalar(line, "value")}
+            for line in product.get("itemInfoLines", []) or []
+            if isinstance(line, dict)
+        ]
+        if isinstance(product.get("itemInfoLines"), list)
+        else []
+    )
+    return result
+
+
 def _safe_raw_payload(
-    *, common: dict[str, Any], buyer: dict[str, Any], price: dict[str, Any]
+    *,
+    common: dict[str, Any],
+    buyer: dict[str, Any],
+    price: dict[str, Any],
+    item_title: str | None,
 ) -> dict[str, Any]:
     """只保留订单镜像所需字段, 避免把电话、收货地址等响应内容入库。"""
-    return {
-        "commonData": _pick(
-            common, "orderId", "itemId", "orderStatus", "createTime", "inRefund"
-        ),
+    payload = {
+        "commonData": _pick(common, "orderId", "itemId", "orderStatus", "createTime", "inRefund"),
         "buyerInfoVO": _pick(buyer, "buyerId", "userNick"),
         "priceVO": _pick(price, "totalPrice", "buyNum"),
     }
+    if item_title is not None:
+        payload["itemVO"] = {"title": item_title}
+    for key in ("paySuccessTime", "consignTime"):
+        if _parse_order_time(common.get(key)) is not None:
+            payload["commonData"][key] = common[key]
+    return payload
 
 
 def _pick(source: dict[str, Any], *keys: str) -> dict[str, Any]:

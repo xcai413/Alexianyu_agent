@@ -144,6 +144,45 @@ async def test_runtime_daemon_returns_restart_request(daemon_db: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_daemon_participates_in_cluster_soak_sampling(
+    daemon_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = FakePool()
+    sampled_by: list[str] = []
+
+    async def pool_factory():
+        return pool
+
+    async def fake_sample_active_soaks(*, sampler_id: str | None = None, **_kwargs):
+        assert sampler_id is not None
+        sampled_by.append(sampler_id)
+        return 0
+
+    daemon_module = __import__("xianyu_agent.runtime.daemon", fromlist=["sample_active_soaks"])
+    monkeypatch.setattr(daemon_module, "sample_active_soaks", fake_sample_active_soaks)
+    runtime = RuntimeDaemon(
+        heartbeat_interval_s=0.02,
+        reconcile_interval_s=0.02,
+        soak_interval_s=0.01,
+        pool_factory=pool_factory,
+        lock=DaemonLock(daemon_db / "runtime" / "sampler.lock"),
+        install_signal_handlers=False,
+        configure_logging=False,
+    )
+    task = asyncio.create_task(runtime.run())
+    for _ in range(100):
+        if sampled_by:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("daemon did not run soak sampler")
+
+    runtime.request_stop()
+    assert await asyncio.wait_for(task, timeout=2.0) is False
+    assert set(sampled_by) == {runtime.instance_id}
+
+
+@pytest.mark.asyncio
 async def test_runtime_daemon_reconciles_account_changes(daemon_db: Path) -> None:
     workers: dict[str, FakeWorker] = {}
 

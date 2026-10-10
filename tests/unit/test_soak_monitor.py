@@ -27,6 +27,10 @@ def _params() -> dict[str, object]:
         "max_worker_heartbeat_age_s": 0.0,
         "max_reconnects": 0,
         "daemon_instance_changes": 0,
+        "planned_daemon_restarts": 0,
+        "failover_instance_changes": 0,
+        "unexplained_instance_changes": 0,
+        "last_daemon_instance": "d1",
         "sensitive_log_hits": 0,
         "sensitive_log_files": [],
         "inbound_messages": 0,
@@ -77,6 +81,43 @@ def test_aggregate_tracks_health_and_instance_change() -> None:
     assert params["sensitive_log_hits"] == 3
 
 
+def test_aggregate_classifies_planned_restart_without_final_failure() -> None:
+    params = soak_monitor._aggregate(
+        _params(),
+        _sample(
+            daemon_instance="d2",
+            daemon_instances=[
+                {
+                    "instance_id": "d1",
+                    "status": "stopped",
+                    "observed": "stopped",
+                    "restart_requested": True,
+                },
+                {
+                    "instance_id": "d2",
+                    "status": "running",
+                    "observed": "online",
+                    "restart_requested": False,
+                },
+            ],
+        ),
+        metrics={
+            "duplicate_reply_groups": 0,
+            "inbound_messages": 0,
+            "outbound_messages": 0,
+            "successful_replies": 0,
+            "failed_replies": 0,
+        },
+        unexpected_daemon_starts=1,
+        sensitive_hits=0,
+        sensitive_files=[],
+        log_offsets={},
+    )
+    assert params["daemon_instance_changes"] == 1
+    assert params["planned_daemon_restarts"] == 1
+    assert params["unexplained_instance_changes"] == 0
+
+
 def test_final_issues_passes_complete_healthy_run() -> None:
     started = datetime.now(UTC) - timedelta(seconds=61)
     params = _params()
@@ -100,6 +141,7 @@ def test_final_issues_reports_each_failed_gate() -> None:
         error_samples=1,
         max_sample_gap_s=30.0,
         daemon_instance_changes=1,
+        unexplained_instance_changes=1,
         unexpected_daemon_starts=1,
         duplicate_reply_groups=1,
         sensitive_log_hits=1,
@@ -111,7 +153,7 @@ def test_final_issues_reports_each_failed_gate() -> None:
     assert "采样中断超过阈值" in issues
     assert "存在 daemon/账号异常样本" in issues
     assert "监测器自身发生采样错误" in issues
-    assert "daemon 实例发生变化" in issues
+    assert "daemon owner 发生无法解释的变化" in issues
     assert "检测到重复消息回复" in issues
     assert "日志检测到敏感值" in issues
 

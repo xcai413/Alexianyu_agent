@@ -56,6 +56,7 @@ class ValidationStatus:
     required: bool
     cooling: bool = False
     code: str | None = None
+    revision: str | None = None
 
 
 class CredentialBackend(Protocol[CredentialT_co]):
@@ -82,4 +83,6 @@ class ValidationGate(Protocol):
 
     async def mark_needs_validation(self, account_id: str) -> None: ...
 
-    async def clear_after_refresh(self, account_id: str) -> bool: ...
+    async def clear_after_refresh(
+        self, account_id: str, *, expected_revision: str | None = None
+    ) -> bool: ...

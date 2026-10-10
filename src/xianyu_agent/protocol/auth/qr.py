@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from xianyu_agent.protocol.mtop.cookies import BrowserCookie
+
 logger = logging.getLogger(__name__)
 
 PASSPORT_HOST = "https://passport.goofish.com"
@@ -86,6 +88,8 @@ class QRLoginSession:
     status: str = QrStatus.WAITING
     qr_content: str | None = None
     cookies: dict[str, str] = field(default_factory=dict)
+    cookie_snapshot: list[BrowserCookie] = field(default_factory=list)
+    cookie_jar: httpx.Cookies = field(default_factory=httpx.Cookies, repr=False)
     unb: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     verification_url: str | None = None
@@ -196,7 +200,7 @@ class QRLoginClient:
         return httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=True,
-            cookies=session.cookies,
+            cookies=session.cookie_jar,
         )
 
     async def _request_with_retry(
@@ -349,7 +353,28 @@ def _update_session_cookies(
     session: QRLoginSession, client: httpx.AsyncClient, response: httpx.Response
 ) -> None:
     """Carry every intermediate/redirect Cookie into the next QR-login request."""
+    session.cookie_jar.update(client.cookies)
     for item in [*response.history, response]:
         session.cookies.update(_extract_set_cookies(item))
-    for cookie in client.cookies.jar:
+    for cookie in session.cookie_jar.jar:
         session.cookies[cookie.name] = cookie.value
+        session.cookie_snapshot = [
+            item
+            for item in session.cookie_snapshot
+            if not (
+                item.name == cookie.name
+                and item.domain == cookie.domain
+                and item.path == cookie.path
+            )
+        ]
+        session.cookie_snapshot.append(
+            BrowserCookie(
+                name=cookie.name,
+                value=cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+                expires=cookie.expires,
+                http_only=bool(cookie.has_nonstandard_attr("HttpOnly")),
+                secure=bool(cookie.secure),
+            )
+        )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,6 +88,30 @@ class SqlAlchemyAccountRepository:
         await self._session.flush()
         return True
 
+    async def set_nickname(self, account_id: str, nickname: str | None) -> bool:
+        row = await self._get_model(account_id)
+        if row is None:
+            return False
+        row.nickname = nickname
+        await self._session.flush()
+        return True
+
+    async def set_reply_pause(
+        self,
+        account_id: str,
+        *,
+        until: datetime | None,
+        reason: str | None = None,
+    ) -> bool:
+        """设置或清除账号级自动回复暂停;until 为 None 表示恢复。"""
+        row = await self._get_model(account_id)
+        if row is None:
+            return False
+        row.reply_paused_until = until
+        row.reply_paused_reason = None if until is None else (reason or None)
+        await self._session.flush()
+        return True
+
     async def delete(self, account_id: str) -> bool:
         row = await self._get_model(account_id)
         if row is None:
@@ -118,6 +143,14 @@ class SqlAlchemyAccountRepository:
             status=row.status,
             last_login_at=row.last_login_at,
             last_heartbeat_at=row.last_heartbeat_at,
+            owner_instance_id=row.owner_instance_id,
+            owner_lease_until=row.owner_lease_until,
+            takeover_approved_at=row.takeover_approved_at,
+            takeover_approved_by=row.takeover_approved_by,
+            takeover_failure_count=int(row.takeover_failure_count or 0),
+            takeover_last_failure_at=row.takeover_last_failure_at,
+            reply_paused_until=row.reply_paused_until,
+            reply_paused_reason=row.reply_paused_reason,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

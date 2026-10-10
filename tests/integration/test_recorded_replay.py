@@ -41,6 +41,7 @@ async def test_recorded_replay_full_pipeline(
     db = tmp_path / "replay.db"
     monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("XIANYU_DB_PATH", str(db))
+    monkeypatch.setenv("XIANYU_GUARDRAIL_QUIET_HOURS", "")
     reset_settings_cache()
     db_mod.reset_engine()
     await db_mod.init_db()

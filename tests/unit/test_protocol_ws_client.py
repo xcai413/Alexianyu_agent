@@ -397,7 +397,9 @@ async def test_registration_timeout_does_not_cancel_or_replace_receive_owner(mon
 
 
 @pytest.mark.asyncio
-async def test_connect_binds_current_user_before_immediate_registration_backlog(monkeypatch) -> None:
+async def test_connect_binds_current_user_before_immediate_registration_backlog(
+    monkeypatch,
+) -> None:
     seller_user_id = "seller-user-42"
     registration = {"headers": {"mid": "reg-backlog"}, "lwp": "/reg"}
     initial_sync = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "initial-sync"}}
@@ -524,7 +526,9 @@ async def test_registration_backlog_business_callback_waits_for_outbound_ready(m
 
 
 @pytest.mark.asyncio
-async def test_business_callback_can_await_history_without_blocking_receive_owner(monkeypatch) -> None:
+async def test_business_callback_can_await_history_without_blocking_receive_owner(
+    monkeypatch,
+) -> None:
     seller_user_id = "seller-user-42"
     registration = {"headers": {"mid": "reg-history-callback"}, "lwp": "/reg"}
     initial_sync = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "initial-sync"}}
@@ -774,7 +778,9 @@ async def test_registration_sync_extra_waits_for_initial_ack_diff(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_registration_backlog_is_retained_when_receive_fails_before_ready(monkeypatch) -> None:
+async def test_registration_backlog_is_retained_when_receive_fails_before_ready(
+    monkeypatch,
+) -> None:
     seller_user_id = "seller-user-42"
     registration = {"headers": {"mid": "reg-backlog-error"}, "lwp": "/reg"}
     initial_sync = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "initial-sync"}}
@@ -1051,9 +1057,7 @@ async def test_history_requests_share_receive_owner_and_router() -> None:
     conversations = await conversations_task
     assert conversations.payload["body"] == {"conversations": []}
 
-    history_task = asyncio.create_task(
-        client.request_message_history("cid-1", timeout_s=0.2)
-    )
+    history_task = asyncio.create_task(client.request_message_history("cid-1", timeout_s=0.2))
     history_request = await _wait_for_lwp(socket, ws_history.MESSAGE_HISTORY_LWP)
     history_mid = str(history_request["headers"]["mid"])
     socket.push(

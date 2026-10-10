@@ -15,11 +15,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from xianyu_agent.domain.account import state as domain_accounts
+from xianyu_agent.application.session.renewal import LongLoginRenewalService
+from xianyu_agent.config import get_settings
+from xianyu_agent.domain.account import lease as account_lease, state as domain_accounts
 from xianyu_agent.domain.runtime.worker_state import WorkerState
-from xianyu_agent.protocol.events import EventEnvelope
+from xianyu_agent.protocol.events import ConnectionState, EventEnvelope
 from xianyu_agent.runtime.account_lock import AccountConnectionAlreadyRunningError
 from xianyu_agent.runtime.account_worker import AccountWorker
+from xianyu_agent.runtime.message_sender import send_worker_text
 from xianyu_agent.utils.time_utils import format_local
 
 EventHandler = Callable[[EventEnvelope], Awaitable[None]]
@@ -28,10 +31,42 @@ RetirementCleanup = Callable[[], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 
+class WorkerNotReadyError(RuntimeError):
+    """发送前不可用:账号没有在线 Worker,或它在就绪前失败/需要人工验证。
+
+    这个异常只表示「消息还没写出去」,因此调用方可以安全地按可重试处理;
+    发送调用本身抛出的异常不属于这一类,必须按结果不明处理。
+    """
+
+
 class AccountPool:
-    def __init__(self, *, worker_factory: WorkerFactory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        worker_factory: WorkerFactory | None = None,
+        instance_id: str | None = None,
+        takeover_require_approval: bool | None = None,
+        takeover_max_failures: int | None = None,
+        renewal_service: LongLoginRenewalService | None = None,
+    ) -> None:
+        settings = get_settings()
         self._workers: dict[str, AccountWorker] = {}
         self._worker_factory = worker_factory or AccountWorker
+        self._renewal_service = renewal_service
+        # 绑定副本身份后,账号启动与对账都走租约(M2);为空保持单机行为。
+        self._instance_id = instance_id
+        self._takeover_require_approval = (
+            settings.takeover_require_approval
+            if takeover_require_approval is None
+            else takeover_require_approval
+        )
+        self._takeover_max_failures = (
+            settings.takeover_max_failures
+            if takeover_max_failures is None
+            else takeover_max_failures
+        )
+        self._claimed_takeovers: dict[str, bool] = {}
+        self._takeover_result_tasks: set[asyncio.Task[object]] = set()
         self._startup_tasks: dict[str, asyncio.Task[None]] = {}
         self._transport_tasks: dict[str, asyncio.Task[None]] = {}
         # Compatibility/inspection set for lifecycle-triggered retirements.  The
@@ -39,16 +74,59 @@ class AccountPool:
         self._lifecycle_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._retirement_tasks: dict[str, asyncio.Task[None]] = {}
 
+    def bind_instance(self, instance_id: str) -> None:
+        """绑定副本身份;绑定后账号启动与对账按归属租约分片(M2)。"""
+        self._instance_id = instance_id
+
+    @property
+    def instance_id(self) -> str | None:
+        return self._instance_id
+
+    async def renew_owned_leases(self) -> int:
+        """续租本实例持有的账号;单机模式(无身份)返回 0。"""
+        if self._instance_id is None:
+            return 0
+        return await account_lease.renew_owned(self._instance_id)
+
+    async def release_lease(self, account_id: str) -> bool:
+        if self._instance_id is None:
+            return False
+        return await account_lease.release(account_id, instance_id=self._instance_id)
+
+    async def release_all_leases(self) -> int:
+        if self._instance_id is None:
+            return 0
+        return await account_lease.release_owned(self._instance_id)
+
+    async def ensure_started_owned(self, account_id: str) -> str:
+        """按归属租约启动账号;抢不到租约时明确返回,不启动 Worker。"""
+        takeover = False
+        if self._instance_id is not None:
+            claim = await account_lease.claim_for_start(
+                account_id,
+                instance_id=self._instance_id,
+                require_approval=self._takeover_require_approval,
+            )
+            if not claim.acquired:
+                return claim.reason
+            takeover = claim.takeover
+        return self.ensure_started(account_id, takeover=takeover)
+
     @classmethod
     async def from_enabled_accounts(
         cls,
         *,
         on_event: EventHandler | None = None,
+        renewal_service: LongLoginRenewalService | None = None,
     ) -> AccountPool:
         """Build a pool with one worker per enabled account."""
 
         def _build_worker(account_id: str) -> AccountWorker:
-            worker = AccountWorker(account_id, persist_events=on_event is None)
+            worker = AccountWorker(
+                account_id,
+                persist_events=on_event is None,
+                renewal_service=renewal_service,
+            )
             if on_event is not None:
                 worker._client.on_event = on_event
             return worker
@@ -64,29 +142,110 @@ class AccountPool:
         cls,
         *,
         on_event: EventHandler | None = None,
+        instance_id: str | None = None,
+        renewal_service: LongLoginRenewalService | None = None,
     ) -> AccountPool:
         """Build a pool from enabled accounts whose desired_state is running."""
 
         def _build_worker(account_id: str) -> AccountWorker:
-            worker = AccountWorker(account_id, persist_events=on_event is None)
+            worker = AccountWorker(
+                account_id,
+                persist_events=on_event is None,
+                renewal_service=renewal_service,
+            )
             if on_event is not None:
                 worker._client.on_event = on_event
             return worker
 
-        pool = cls(worker_factory=_build_worker)
+        pool = cls(worker_factory=_build_worker, instance_id=instance_id)
         accounts = await domain_accounts.list_desired_running_accounts()
         for acc in accounts:
+            takeover = False
+            if instance_id is not None:
+                claim = await account_lease.claim_for_start(
+                    acc.account_id,
+                    instance_id=instance_id,
+                    require_approval=pool._takeover_require_approval,
+                )
+                if not claim.acquired:
+                    logger.info(
+                        "account lease unavailable account=%s reason=%s",
+                        acc.account_id,
+                        claim.reason,
+                    )
+                    continue
+                takeover = claim.takeover
             pool._workers[acc.account_id] = pool._worker_factory(acc.account_id)
+            pool._claimed_takeovers[acc.account_id] = takeover
         return pool
+
+    def _schedule_takeover_result(
+        self,
+        account_id: str,
+        *,
+        succeeded: bool,
+        error_type: str = "-",
+    ) -> None:
+        """持久化接管启动结果;任务归 Pool 所有,停机时会统一排空。"""
+        if self._instance_id is None:
+            return
+
+        async def _record() -> object:
+            if succeeded:
+                return await account_lease.record_takeover_success(
+                    account_id, instance_id=self._instance_id or ""
+                )
+            return await account_lease.record_takeover_failure(
+                account_id,
+                instance_id=self._instance_id or "",
+                max_failures=self._takeover_max_failures,
+                error_type=error_type,
+            )
+
+        task = asyncio.create_task(_record(), name=f"takeover-result-{account_id}")
+        self._takeover_result_tasks.add(task)
+
+        def _completed(completed: asyncio.Task[object]) -> None:
+            self._takeover_result_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if isinstance(error, Exception):
+                logger.error(
+                    "account takeover result persistence failed account=%s",
+                    account_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(_completed)
+
+    async def _drain_takeover_result_tasks(self) -> None:
+        while self._takeover_result_tasks:
+            tasks = tuple(self._takeover_result_tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(
+                        "account takeover result persistence failed",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
     def _observe_startup(
         self,
         account_id: str,
         worker: AccountWorker,
         task: asyncio.Task[None] | None,
+        *,
+        takeover: bool = False,
     ) -> None:
         """Own a scheduled startup outcome for synchronous pool entry points."""
         if task is None:
+            if takeover:
+                self._schedule_takeover_result(
+                    account_id,
+                    succeeded=False,
+                    error_type="StartupNotScheduled",
+                )
             self._observe_transport_task(account_id, worker)
             return
         self._startup_tasks[account_id] = task
@@ -97,11 +256,26 @@ class AccountPool:
             if completed.cancelled():
                 return
             error = completed.exception()
-            if error is None and worker.state is not WorkerState.ERROR:
+            is_current = self._workers.get(account_id) is worker
+            if error is None and worker.state not in {
+                WorkerState.DISABLED,
+                WorkerState.ERROR,
+                WorkerState.NEEDS_VALIDATION,
+            }:
+                if takeover and is_current:
+                    self._schedule_takeover_result(account_id, succeeded=True)
                 self._observe_transport_task(account_id, worker)
                 return
-            if self._workers.get(account_id) is worker:
+            if is_current:
                 self._workers.pop(account_id, None)
+                if takeover:
+                    self._schedule_takeover_result(
+                        account_id,
+                        succeeded=False,
+                        error_type=type(error).__name__
+                        if error is not None
+                        else "WorkerStateError",
+                    )
             if error is None:
                 logger.error(
                     "account worker startup ended in terminal state account=%s state=%s",
@@ -365,9 +539,20 @@ class AccountPool:
         self,
         account_id: str,
         worker: AccountWorker,
+        *,
+        takeover: bool = False,
     ) -> asyncio.Task[None] | None:
-        task = worker.start()
-        self._observe_startup(account_id, worker, task)
+        try:
+            task = worker.start()
+        except Exception as exc:
+            if takeover:
+                self._schedule_takeover_result(
+                    account_id,
+                    succeeded=False,
+                    error_type=type(exc).__name__,
+                )
+            raise
+        self._observe_startup(account_id, worker, task, takeover=takeover)
         return task
 
     @property
@@ -379,6 +564,77 @@ class AccountPool:
 
     def get(self, account_id: str) -> AccountWorker | None:
         return self._workers.get(account_id)
+
+    async def send_operator_reply(
+        self,
+        account_id: str,
+        *,
+        chat_id: str,
+        text: str,
+        timeout_s: float = 15.0,
+    ) -> str:
+        """Send one operator-authored reply through the Worker that owns the account.
+
+        Reuses the canonical outbound path (SendMessageService + audit recorder), so
+        an operator reply produces the same attempt/result evidence as an automated
+        one. Never starts, restarts, or reconnects the Worker.
+        """
+        worker = await self.require_ready_worker(account_id, timeout_s=timeout_s)
+        sent = await send_worker_text(
+            worker._client,
+            account_id=account_id,
+            chat_id=chat_id,
+            text=text,
+        )
+        if not sent:
+            msg = f"账号 {account_id} 会话 {chat_id} 外发未确认成功"
+            raise ValueError(msg)
+        return "sent"
+
+    async def require_ready_worker(
+        self,
+        account_id: str,
+        *,
+        timeout_s: float = 15.0,
+    ) -> AccountWorker:
+        """Return the live Worker only when it can accept an outbound message.
+
+        Raises WorkerNotReadyError for every pre-send condition, so callers can
+        tell "nothing was written" apart from "unknown result".
+        """
+        worker = self._workers.get(account_id)
+        if worker is None:
+            msg = f"账号 {account_id} 当前没有运行中的 Worker,无法外发"
+            raise WorkerNotReadyError(msg)
+        try:
+            await self._wait_for_protocol_ready(worker, timeout_s=timeout_s)
+        except (ValueError, TimeoutError) as exc:
+            raise WorkerNotReadyError(str(exc)) from exc
+        return worker
+
+    async def _wait_for_protocol_ready(
+        self,
+        worker: AccountWorker,
+        *,
+        timeout_s: float,
+        poll_s: float = 0.05,
+    ) -> None:
+        """Wait for a business-ready session, or raise before any send happens."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_s)
+        while True:
+            if worker.state is WorkerState.NEEDS_VALIDATION:
+                msg = "账号需要人工验证,已拒绝外发"
+                raise ValueError(msg)
+            if worker.state is WorkerState.ERROR:
+                msg = "账号 Worker 处于 ERROR,已拒绝外发"
+                raise ValueError(msg)
+            if worker._client.state is ConnectionState.CONNECTED:
+                return
+            if loop.time() >= deadline:
+                msg = "等待 WebSocket 协议会话就绪超时"
+                raise TimeoutError(msg)
+            await asyncio.sleep(poll_s)
 
     def start(self, account_id: str) -> bool:
         """Start one worker. Returns False if account is unknown or retiring."""
@@ -398,8 +654,9 @@ class AccountPool:
             worker = self._workers.get(account_id)
             if worker is None:
                 continue
+            takeover = self._claimed_takeovers.pop(account_id, False)
             try:
-                self._start_observed(account_id, worker)
+                self._start_observed(account_id, worker, takeover=takeover)
             except AccountConnectionAlreadyRunningError:
                 if self._workers.get(account_id) is worker:
                     self._workers.pop(account_id, None)
@@ -428,11 +685,12 @@ class AccountPool:
         # Transport completion callbacks can register retirement work while the
         # transports are being drained; converge that final generation too.
         errors.extend(await self._drain_retirement_tasks())
+        await self._drain_takeover_result_tasks()
 
         if errors:
             raise errors[0]
 
-    async def reconcile_desired_accounts(self) -> dict[str, list[str]]:
+    async def reconcile_desired_accounts(self) -> dict[str, list[str]]:  # noqa: PLR0912
         """令内存 Worker 集合与持久化期望状态保持一致。"""
         accounts = await domain_accounts.list_desired_running_accounts()
         desired = {account.account_id for account in accounts}
@@ -441,11 +699,18 @@ class AccountPool:
         # cleanup may block only account A's next generation, never B/C.
         stopped: list[str] = []
         for account_id, worker in sorted(self._workers.items()):
-            if account_id in desired:
+            keep = account_id in desired
+            if keep and self._instance_id is not None:
+                # 手里有 Worker 的账号必须仍归我持有;租约丢了就退休,别继续占用连接。
+                keep = await account_lease.renew(account_id, instance_id=self._instance_id)
+                if not keep:
+                    logger.warning("account lease lost, retiring worker account=%s", account_id)
+            if keep:
                 continue
             task = self._schedule_stop_retirement(account_id, worker, reason="reconcile")
             if task is not None:
                 stopped.append(account_id)
+                await self.release_lease(account_id)
 
         # Re-evaluate live ownership instead of using the pre-retirement
         # snapshot.  A transport callback may have retired a desired worker;
@@ -454,10 +719,25 @@ class AccountPool:
         for account_id in sorted(desired):
             if account_id in self._workers or account_id in self._retirement_tasks:
                 continue
+            takeover = False
+            if self._instance_id is not None:
+                claim = await account_lease.claim_for_start(
+                    account_id,
+                    instance_id=self._instance_id,
+                    require_approval=self._takeover_require_approval,
+                )
+                if not claim.acquired:
+                    logger.info(
+                        "account lease unavailable account=%s reason=%s",
+                        account_id,
+                        claim.reason,
+                    )
+                    continue
+                takeover = claim.takeover
             worker = self._worker_factory(account_id)
             self._workers[account_id] = worker
             try:
-                self._start_observed(account_id, worker)
+                self._start_observed(account_id, worker, takeover=takeover)
             except AccountConnectionAlreadyRunningError:
                 if self._workers.get(account_id) is worker:
                     self._workers.pop(account_id, None)
@@ -474,18 +754,18 @@ class AccountPool:
         """兼容旧调用;P0.2 起实际按 enabled + desired_state 对账。"""
         return await self.reconcile_desired_accounts()
 
-    def ensure_started(self, account_id: str) -> str:
+    def ensure_started(self, account_id: str, *, takeover: bool = False) -> str:
         """确保一个 Worker 在池中运行。"""
         if account_id in self._retirement_tasks:
             return "retiring"
         worker = self._workers.get(account_id)
         if worker is not None:
-            self._start_observed(account_id, worker)
+            self._start_observed(account_id, worker, takeover=takeover)
             return "already_running"
         worker = self._worker_factory(account_id)
         self._workers[account_id] = worker
         try:
-            self._start_observed(account_id, worker)
+            self._start_observed(account_id, worker, takeover=takeover)
         except Exception:
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
@@ -512,7 +792,21 @@ class AccountPool:
                 self._retirement_tasks.pop(account_id, None)
         return "stopped"
 
-    async def restart_worker(self, account_id: str) -> str:
+    async def restart_worker_owned(self, account_id: str) -> str:
+        """在租约门禁内重建 Worker;非 owner 不得借 restart 建第二条连接。"""
+        takeover = False
+        if self._instance_id is not None:
+            claim = await account_lease.claim_for_start(
+                account_id,
+                instance_id=self._instance_id,
+                require_approval=self._takeover_require_approval,
+            )
+            if not claim.acquired:
+                return claim.reason
+            takeover = claim.takeover
+        return await self.restart_worker(account_id, takeover=takeover)
+
+    async def restart_worker(self, account_id: str, *, takeover: bool = False) -> str:
         """重建一个账号的 Worker,避免复用已停止 client 的瞬时状态。"""
         # Wait only for this account's existing generation.  Shielding ensures
         # cancellation of the command caller never owns/cancels physical cleanup.
@@ -534,7 +828,7 @@ class AccountPool:
         try:
             # Startup remains under the single existing Pool-observed ownership
             # mechanism; restart never awaits credential retry/backoff.
-            self._start_observed(account_id, worker)
+            self._start_observed(account_id, worker, takeover=takeover)
         except Exception:
             if self._workers.get(account_id) is worker:
                 self._workers.pop(account_id, None)
@@ -590,6 +884,13 @@ class AccountPool:
                     "risk_code": status_data.get("risk_code"),
                     "risk_cooldown_until": status_data.get("risk_cooldown_until"),
                     "risk_recovery_required": status_data.get("risk_recovery_required", False),
+                    # M2:账号归属(哪个副本持有 + 租约到期时间);单机模式恒为 None。
+                    "owner_instance_id": acc.owner_instance_id,
+                    "owner_lease_until": format_local(acc.owner_lease_until) or None,
+                    "takeover_approved_at": format_local(acc.takeover_approved_at) or None,
+                    "takeover_approved_by": acc.takeover_approved_by,
+                    "takeover_failure_count": acc.takeover_failure_count,
+                    "takeover_last_failure_at": format_local(acc.takeover_last_failure_at) or None,
                 }
             )
         return result

@@ -42,7 +42,7 @@ class _ProviderLike(Protocol):
 
 RiskGetter = Callable[[str], Awaitable[WorkerRiskCircuit | None]]
 RiskMarker = Callable[[str], Awaitable[WorkerRiskCircuit | None]]
-RiskClearer = Callable[[str], Awaitable[bool]]
+RiskClearer = Callable[..., Awaitable[bool]]
 
 
 class LegacyWsCredentialBackend:
@@ -107,13 +107,18 @@ class LegacyValidationGate:
             required=circuit.recovery_required,
             cooling=circuit.is_cooling(),
             code=CredentialFailureCode.NEEDS_VALIDATION.value,
+            revision=circuit.revision,
         )
 
     async def mark_needs_validation(self, account_id: str) -> None:
         await self._open_circuit(account_id)
 
-    async def clear_after_refresh(self, account_id: str) -> bool:
-        return await self._clear_circuit(account_id)
+    async def clear_after_refresh(
+        self, account_id: str, *, expected_revision: str | None = None
+    ) -> bool:
+        if expected_revision is None:
+            return False
+        return await self._clear_circuit(account_id, expected_revision=expected_revision)
 
 
 def _translate_auth_error(error: WsAuthError) -> CredentialBackendError:

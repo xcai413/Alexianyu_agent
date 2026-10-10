@@ -47,6 +47,8 @@ jobs:
           src/xianyu_agent/db/database.py
           src/xianyu_agent/db/models.py
           src/xianyu_agent/application/accounts.py
+          src/xianyu_agent/application/web_sessions.py
+          src/xianyu_agent/interfaces/web/auth/router.py
           src/xianyu_agent/application/health
           src/xianyu_agent/application/outbox_dispatcher.py
           src/xianyu_agent/application/ports/event_bus.py
@@ -56,6 +58,7 @@ jobs:
           src/xianyu_agent/application/ports/secret_vault.py
           src/xianyu_agent/application/ports/unit_of_work.py
           src/xianyu_agent/composition.py
+          src/xianyu_agent/domain/ai
           src/xianyu_agent/domain/account
           src/xianyu_agent/domain/inventory
           src/xianyu_agent/domain/item
@@ -94,11 +97,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      XIANYU_DATABASE_URL: sqlite+aiosqlite:///./data/ci-sqlite.db
       TEST_DATABASE_BACKEND: sqlite
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Use a temporary SQLite contract database
+        run: |
+          test -n "$RUNNER_TEMP"
+          printf 'XIANYU_DATABASE_URL=sqlite+aiosqlite:///%s/xianyu-ci-sqlite.db\n' \
+            "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -109,6 +116,8 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
+      - name: Migration schema contract
+        run: uv run pytest -q tests/integration/test_migration_schema_backend.py
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
       - name: Application / UoW contract
@@ -119,12 +128,168 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: Platform automation scheduler contract
+        run: uv run pytest -q tests/integration/test_platform_automation_backend.py
+      - name: Runtime lease contract
+        run: uv run pytest -q tests/integration/test_runtime_lease_backend.py
+      - name: Worker command claim contract
+        run: uv run pytest -q tests/integration/test_worker_command_claim_backend.py
       - name: SecretVault contract
         run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Idempotency inbox contract
         run: uv run pytest -q tests/integration/test_idempotency_backend.py
+      - name: Inventory reservation contract
+        run: uv run pytest -q tests/integration/test_inventory_reservation_backend.py
+      - name: Web session revocation contract
+        run: uv run pytest -q tests/integration/test_web_session_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
+
+  container-build:
+    name: Container / build + smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: |
+          export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+          export XIANYU_FERNET_KEY="$(openssl rand -base64 32 | tr '+/' '-_')"
+          docker compose -f compose.yml config -q
+
+      - name: Build image
+        run: docker build -t xianyu-agent:ci .
+
+      - name: Container smoke (migrate + doctor + CLI)
+        run: |
+          docker run --rm \
+            -e XIANYU_DATABASE_URL="sqlite+aiosqlite:////tmp/xianyu.db" \
+            -e XIANYU_DATA_DIR=/tmp/data \
+            -e XIANYU_FERNET_KEY="$(openssl rand -base64 32 | tr '+/' '-_')" \
+            xianyu-agent:ci --version
+
+  container-postgres:
+    name: Container / Postgres migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: xianyu
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d xianyu"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t xianyu-agent:ci .
+
+      # 容器入口会在 Postgres 上跑 alembic upgrade head + doctor;
+      # 这条覆盖了「布尔默认值等 SQLite/MySQL 能过、Postgres 拒绝」的迁移回归。
+      - name: Migrate + doctor against Postgres
+        run: |
+          docker run --rm --network host \
+            -e XIANYU_DATABASE_URL="postgresql+asyncpg://postgres@127.0.0.1:5432/xianyu" \
+            -e XIANYU_DATA_DIR=/tmp/data \
+            -e XIANYU_FERNET_KEY="$(openssl rand -base64 32 | tr '+/' '-_')" \
+            xianyu-agent:ci doctor --output json
+
+  container-console:
+    name: Container / console / ${{ matrix.backend }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - backend: sqlite
+            file: compose.sqlite.yml
+          - backend: postgres
+            file: compose.yml
+    env:
+      COMPOSE_FILE: ${{ matrix.file }}
+      COMPOSE_PROJECT_NAME: xianyu-console-ci
+      XIANYU_IMAGE: xianyu-agent:ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t xianyu-agent:ci .
+      - name: Prepare synthetic credentials and an empty data directory
+        run: |
+          umask 077
+          test ! -e .env
+          docker run --rm -i --entrypoint python xianyu-agent:ci - <<'PY' > .env
+          import secrets
+          from cryptography.fernet import Fernet
+          from xianyu_agent.interfaces.web.auth.security import hash_password
+          password = "isolated container administrator password"
+          values = {
+              "XIANYU_FERNET_KEY": Fernet.generate_key().decode(),
+              "POSTGRES_PASSWORD": secrets.token_hex(24),
+              "XIANYU_WEB_ADMIN_PASSWORD_HASH": hash_password(password),
+              "XIANYU_WEB_SESSION_SECRET": secrets.token_hex(32),
+              "XIANYU_SMOKE_ADMIN_PASSWORD": password,
+              "XIANYU_AUTOMATION_MODE": "observe",
+              "XIANYU_WEB_COOKIE_SECURE": "false",
+          }
+          for key, value in values.items():
+              print(f"{key}='{value}'")
+          PY
+          mkdir -p data
+          docker run --rm --user 0 --entrypoint chown -v "$PWD/data:/data" \
+            xianyu-agent:ci 10001:10001 /data
+      - name: Verify Web, MCP, revocation and restart
+        run: |
+          trap 'docker compose --profile console down -v --remove-orphans' EXIT
+          docker compose --profile console config -q
+          docker compose --profile console up --no-build --wait --wait-timeout 180
+          docker compose exec -T web python /app/docker/web_console_smoke.py
+          docker compose restart web
+          docker compose --profile console up --no-build --wait --wait-timeout 180
+          docker compose exec -T web python /app/docker/web_console_smoke.py
+          docker compose ps
+
+  multi-replica:
+    name: Container / two replicas
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start and verify two replicas
+        run: |
+          export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+          export XIANYU_FERNET_KEY="$(openssl rand -base64 32 | tr '+/' '-_')"
+          trap 'docker compose -f compose.multi.yml down -v --remove-orphans' EXIT
+          docker compose -f compose.multi.yml config -q
+          docker compose -f compose.multi.yml up -d --build
+          verify_replicas() {
+            for attempt in $(seq 1 30); do
+              if docker compose -f compose.multi.yml exec -T app-a \
+                python /app/docker/multi_replica_smoke.py; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+          verify_replicas
+          docker compose -f compose.multi.yml kill app-b
+          docker compose -f compose.multi.yml up -d app-b
+          verify_replicas
+          docker compose -f compose.multi.yml ps
 
   db-mysql:
     name: DB / MySQL 8.4
@@ -159,6 +324,8 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
+      - name: Migration schema contract
+        run: uv run pytest -q tests/integration/test_migration_schema_backend.py
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
       - name: Application / UoW contract
@@ -169,10 +336,20 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: Platform automation scheduler contract
+        run: uv run pytest -q tests/integration/test_platform_automation_backend.py
+      - name: Runtime lease contract
+        run: uv run pytest -q tests/integration/test_runtime_lease_backend.py
+      - name: Worker command claim contract
+        run: uv run pytest -q tests/integration/test_worker_command_claim_backend.py
       - name: SecretVault contract
         run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Idempotency inbox contract
         run: uv run pytest -q tests/integration/test_idempotency_backend.py
+      - name: Inventory reservation contract
+        run: uv run pytest -q tests/integration/test_inventory_reservation_backend.py
+      - name: Web session revocation contract
+        run: uv run pytest -q tests/integration/test_web_session_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py
 
@@ -210,6 +387,8 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Alembic upgrade head
         run: uv run alembic upgrade head
+      - name: Migration schema contract
+        run: uv run pytest -q tests/integration/test_migration_schema_backend.py
       - name: Repository contract
         run: uv run pytest -q tests/integration/test_account_repository_backend.py
       - name: Application / UoW contract
@@ -220,9 +399,19 @@ jobs:
         run: uv run pytest -q tests/integration/test_outbox_dispatcher_backend.py
       - name: Scheduler due queue contract
         run: uv run pytest -q tests/integration/test_scheduler_due_queue_backend.py
+      - name: Platform automation scheduler contract
+        run: uv run pytest -q tests/integration/test_platform_automation_backend.py
+      - name: Runtime lease contract
+        run: uv run pytest -q tests/integration/test_runtime_lease_backend.py
+      - name: Worker command claim contract
+        run: uv run pytest -q tests/integration/test_worker_command_claim_backend.py
       - name: SecretVault contract
         run: uv run pytest -q tests/integration/test_secret_vault_backend.py
       - name: Idempotency inbox contract
         run: uv run pytest -q tests/integration/test_idempotency_backend.py
+      - name: Inventory reservation contract
+        run: uv run pytest -q tests/integration/test_inventory_reservation_backend.py
+      - name: Web session revocation contract
+        run: uv run pytest -q tests/integration/test_web_session_backend.py
       - name: Database smoke
         run: uv run pytest -q tests/integration/test_database_backend_smoke.py

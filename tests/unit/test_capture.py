@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from xianyu_agent.protocol.capture import CalibrationRecorder, redact_structure, verify_capture
+from xianyu_agent.protocol.capture import (
+    CalibrationRecorder,
+    capture_output_conflict,
+    redact_structure,
+    verify_capture,
+)
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import (
     ConnectionState,
@@ -145,6 +150,20 @@ async def test_verify_capture_passes_complete_redacted_artifact(tmp_path: Path) 
     assert result.frames == 1
     assert result.events == 1
     assert result.messages == 1
+
+
+def test_capture_output_conflict_rejects_reused_fixture(tmp_path: Path) -> None:
+    """两次 capture 写进同一文件会让 capture-verify 必然失败,所以开跑前就拦住。"""
+    fresh = tmp_path / "fresh.jsonl"
+    assert capture_output_conflict(fresh) is None
+    fresh.write_text("", encoding="utf-8")
+    assert capture_output_conflict(fresh) is None
+
+    used = tmp_path / "used.jsonl"
+    used.write_text('{"kind": "summary"}\n', encoding="utf-8")
+    conflict = capture_output_conflict(used)
+    assert conflict is not None
+    assert "一个文件只对应一次捕获" in conflict
 
 
 def test_verify_capture_rejects_plaintext_and_incomplete_summary(tmp_path: Path) -> None:

@@ -17,9 +17,7 @@ class _OpaqueId:
         if not normalized:
             raise ValueError(f"{type(self).__name__} must not be empty")
         if self.max_length is not None and len(normalized) > self.max_length:
-            raise ValueError(
-                f"{type(self).__name__} must not exceed {self.max_length} characters"
-            )
+            raise ValueError(f"{type(self).__name__} must not exceed {self.max_length} characters")
         object.__setattr__(self, "value", normalized)
 
     @classmethod

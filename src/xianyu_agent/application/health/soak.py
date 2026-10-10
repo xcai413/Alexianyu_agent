@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,12 +31,15 @@ from xianyu_agent.db import (
 )
 from xianyu_agent.db.models import TaskStatus
 from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.domain.runtime import lease as runtime_lease
 from xianyu_agent.services.logging_setup import redact_text
 
 TASK_NAME = "p0-e-soak"
 DEFAULT_INTERVAL_S = 60.0
 MIN_COVERAGE = 0.9
 MAX_GAP_FACTOR = 2.5
+SAMPLER_LEASE_NAME = "soak-sampler"
+SAMPLER_LEASE_TTL = timedelta(seconds=55)
 
 
 @dataclass(frozen=True)
@@ -49,7 +54,7 @@ class SoakRun:
 
 
 async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
-    """创建一个持久化长稳运行;每分钟由 Watchdog 调用采样。"""
+    """创建一个持久化长稳运行;每分钟由各 daemon 竞争租约后采样。"""
     if hours <= 0:
         msg = "hours must be positive"
         raise ValueError(msg)
@@ -76,6 +81,14 @@ async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
 
     now = datetime.now(UTC)
     run_id = uuid.uuid4().hex
+    initial_daemon = next(
+        (
+            item.instance
+            for item in snapshot.daemon_instances
+            if item.instance.instance_id == observed.owner_instance_id
+        ),
+        snapshot.daemon,
+    )
     params = {
         "schema_version": 1,
         "run_id": run_id,
@@ -83,8 +96,8 @@ async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
         "target_duration_s": hours * 3600,
         "interval_s": DEFAULT_INTERVAL_S,
         "deadline_at": (now + timedelta(hours=hours)).isoformat(),
-        "initial_daemon_instance": snapshot.daemon.instance_id if snapshot.daemon else None,
-        "initial_daemon_pid": snapshot.daemon.pid if snapshot.daemon else None,
+        "initial_daemon_instance": initial_daemon.instance_id if initial_daemon else None,
+        "initial_daemon_pid": initial_daemon.pid if initial_daemon else None,
         "sample_count": 0,
         "healthy_samples": 0,
         "error_samples": 0,
@@ -97,6 +110,10 @@ async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
         "max_worker_heartbeat_age_s": 0.0,
         "max_reconnects": observed.reconnect_attempts,
         "daemon_instance_changes": 0,
+        "planned_daemon_restarts": 0,
+        "failover_instance_changes": 0,
+        "unexplained_instance_changes": 0,
+        "last_daemon_instance": initial_daemon.instance_id if initial_daemon else None,
         "unexpected_daemon_starts": 0,
         "duplicate_reply_groups": 0,
         "inbound_messages": 0,
@@ -128,8 +145,17 @@ async def start_soak(*, account_id: str, hours: float = 24.0) -> SoakRun:
     return result
 
 
-async def sample_active_soaks() -> int:
-    """采样全部运行中的长稳任务;单项失败会落库,不影响 Watchdog。"""
+async def sample_active_soaks(*, sampler_id: str | None = None, now: datetime | None = None) -> int:
+    """采样全部运行中的长稳任务;单项失败会落库,不影响 daemon。"""
+    owner_id = sampler_id or f"{socket.gethostname()}:{os.getpid()}"
+    if not await runtime_lease.claim(
+        SAMPLER_LEASE_NAME,
+        owner_id=owner_id,
+        ttl=SAMPLER_LEASE_TTL,
+        allow_owner_renewal=False,
+        now=now,
+    ):
+        return 0
     async with get_async_session() as session:
         ids = list(
             (
@@ -251,8 +277,18 @@ def evidence_path(run_id: str) -> Path:
 
 
 def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str, Any]:
+    owned_daemon = next(
+        (
+            observed
+            for observed in snapshot.daemon_instances
+            if observed.instance.instance_id == account.owner_instance_id
+        ),
+        None,
+    )
+    daemon_row = owned_daemon.instance if owned_daemon else snapshot.daemon
+    daemon_health = owned_daemon.health if owned_daemon else snapshot.daemon_health
     healthy = (
-        snapshot.daemon_health.healthy
+        daemon_health.healthy
         and is_worker_healthy_online(account.actual_state)
         and account.aligned
         and not account.last_error
@@ -260,10 +296,19 @@ def _build_sample(now: datetime, snapshot: RuntimeSnapshot, account) -> dict[str
     )
     return {
         "at": now.isoformat(),
-        "daemon_instance": snapshot.daemon.instance_id if snapshot.daemon else None,
-        "daemon_pid": snapshot.daemon.pid if snapshot.daemon else None,
-        "daemon": snapshot.daemon_health.observed,
-        "daemon_heartbeat_age_s": snapshot.daemon_health.heartbeat_age_s,
+        "daemon_instance": daemon_row.instance_id if daemon_row else None,
+        "daemon_pid": daemon_row.pid if daemon_row else None,
+        "daemon": daemon_health.observed,
+        "daemon_heartbeat_age_s": daemon_health.heartbeat_age_s,
+        "daemon_instances": [
+            {
+                "instance_id": observed.instance.instance_id,
+                "status": observed.instance.status,
+                "observed": observed.health.observed,
+                "restart_requested": bool(observed.instance.restart_requested),
+            }
+            for observed in snapshot.daemon_history or snapshot.daemon_instances
+        ],
         "account": account.account_id,
         "desired": account.desired_state,
         "actual": account.actual_state,
@@ -299,7 +344,11 @@ def _aggregate(
     is_stale = sample["daemon"] == "stale" or sample["actual"] == "stale"
     updated["stale_samples"] = int(updated.get("stale_samples") or 0) + int(is_stale)
     previous_at = updated.get("last_sample_at")
-    gap = 0.0 if not previous_at else (_parse_utc(str(sample["at"])) - _parse_utc(str(previous_at))).total_seconds()
+    gap = (
+        0.0
+        if not previous_at
+        else (_parse_utc(str(sample["at"])) - _parse_utc(str(previous_at))).total_seconds()
+    )
     updated["max_sample_gap_s"] = max(float(updated.get("max_sample_gap_s") or 0.0), gap)
     updated["last_sample_at"] = sample["at"]
     updated["last_daemon"] = sample["daemon"]
@@ -310,9 +359,7 @@ def _aggregate(
             outage_s = (
                 _parse_utc(str(sample["at"])) - _parse_utc(str(outage_started_at))
             ).total_seconds()
-            updated["max_outage_s"] = max(
-                float(updated.get("max_outage_s") or 0.0), outage_s
-            )
+            updated["max_outage_s"] = max(float(updated.get("max_outage_s") or 0.0), outage_s)
             updated["outage_started_at"] = None
     elif not outage_started_at:
         updated["outage_started_at"] = sample["at"]
@@ -328,12 +375,29 @@ def _aggregate(
     updated["max_reconnects"] = max(
         int(updated.get("max_reconnects") or 0), int(sample["reconnect_attempts"] or 0)
     )
-    updated["daemon_instance_changes"] = int(updated.get("daemon_instance_changes") or 0) + int(
-        sample["daemon_instance"] != updated.get("initial_daemon_instance")
-        and sample["daemon_instance"] != updated.get("last_changed_instance")
+    previous_instance = updated.get("last_daemon_instance") or updated.get(
+        "initial_daemon_instance"
     )
-    if sample["daemon_instance"] != updated.get("initial_daemon_instance"):
-        updated["last_changed_instance"] = sample["daemon_instance"]
+    current_instance = sample["daemon_instance"]
+    if current_instance != previous_instance:
+        updated["daemon_instance_changes"] = int(updated.get("daemon_instance_changes") or 0) + 1
+        rows = {
+            str(item.get("instance_id")): item
+            for item in list(sample.get("daemon_instances") or [])
+            if isinstance(item, dict)
+        }
+        previous = rows.get(str(previous_instance), {})
+        if previous.get("restart_requested") and previous.get("status") == "stopped":
+            key = "planned_daemon_restarts"
+        elif previous.get("status") == "error" or previous.get("observed") in {
+            "dead",
+            "stale",
+        }:
+            key = "failover_instance_changes"
+        else:
+            key = "unexplained_instance_changes"
+        updated[key] = int(updated.get(key) or 0) + 1
+        updated["last_daemon_instance"] = current_instance
     updated["unexpected_daemon_starts"] = unexpected_daemon_starts
     updated.update(metrics)
     updated["sensitive_log_hits"] = int(updated.get("sensitive_log_hits") or 0) + sensitive_hits
@@ -364,8 +428,8 @@ def _final_issues(params: dict[str, Any], *, started_at: datetime, now: datetime
         issues.append("存在 daemon/账号异常样本")
     if int(params.get("monitor_errors") or 0):
         issues.append("监测器自身发生采样错误")
-    if int(params["daemon_instance_changes"]) or int(params["unexpected_daemon_starts"]):
-        issues.append("daemon 实例发生变化")
+    if int(params.get("unexplained_instance_changes") or 0):
+        issues.append("daemon owner 发生无法解释的变化")
     if int(params["duplicate_reply_groups"]):
         issues.append("检测到重复消息回复")
     if int(params["sensitive_log_hits"]):

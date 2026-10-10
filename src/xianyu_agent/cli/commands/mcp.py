@@ -6,6 +6,7 @@ import typer
 import uvicorn
 from fastapi_mcp import FastApiMCP
 from rich.console import Console
+from starlette.routing import Mount
 
 from xianyu_agent.api.app import app as fastapi_app
 from xianyu_agent.config import get_settings
@@ -26,7 +27,18 @@ def serve(
         description="闲鱼运营 Agent API:账号/消息/规则/卡密/订单/池",
         describe_all_responses=False,
     )
-    mcp.mount_sse()
+    mcp.mount_sse(mount_path="/mcp")
+    # 保留API手册公布的历史入口,现有Agent连接不必随Web容器升级改地址。
+    mcp.mount_sse(mount_path="/sse")
+    # API 模块导入时已挂载 SPA。动态增加的 MCP 路由必须排在根静态挂载之前。
+    spa_routes = [
+        route
+        for route in fastapi_app.routes
+        if isinstance(route, Mount) and route.name == "web-console"
+    ]
+    for route in spa_routes:
+        fastapi_app.routes.remove(route)
+        fastapi_app.routes.append(route)
 
     settings = get_settings()
     listen_port = port or settings.mcp_port

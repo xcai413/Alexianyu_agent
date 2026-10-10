@@ -40,9 +40,7 @@ class InvalidWorkerStateTransition(ValueError):
     def __init__(self, current: WorkerState, target: WorkerState) -> None:
         self.current = current
         self.target = target
-        super().__init__(
-            f"invalid worker state transition: {current.value} -> {target.value}"
-        )
+        super().__init__(f"invalid worker state transition: {current.value} -> {target.value}")
 
 
 class UnknownWorkerStateValue(ValueError):
@@ -149,9 +147,7 @@ _TRANSITIONS: dict[WorkerState, frozenset[WorkerState]] = {
     ),
 }
 
-ALLOWED_TRANSITIONS: Mapping[WorkerState, frozenset[WorkerState]] = MappingProxyType(
-    _TRANSITIONS
-)
+ALLOWED_TRANSITIONS: Mapping[WorkerState, frozenset[WorkerState]] = MappingProxyType(_TRANSITIONS)
 
 
 def allowed_transitions_from(state: WorkerState) -> frozenset[WorkerState]:

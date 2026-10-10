@@ -133,6 +133,7 @@ async def test_auto_reply_roundtrip(
     monkeypatch.setenv("XIANYU_FERNET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("XIANYU_WS_URL", url)
     monkeypatch.setenv("XIANYU_AUTOMATION_MODE", "active")
+    monkeypatch.setenv("XIANYU_GUARDRAIL_QUIET_HOURS", "")
     reset_settings_cache()
     db_mod.reset_engine()
     await db_mod.init_db()

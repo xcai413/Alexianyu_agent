@@ -31,8 +31,13 @@ from xianyu_agent.domain import (
     messages as domain_messages,
     orders as domain_orders,
 )
+from xianyu_agent.domain.account import lease as account_lease
 from xianyu_agent.infrastructure.session import LegacyValidationGate, LegacyWsCredentialBackend
-from xianyu_agent.protocol.capture import CalibrationRecorder, verify_capture
+from xianyu_agent.protocol.capture import (
+    CalibrationRecorder,
+    capture_output_conflict,
+    verify_capture,
+)
 from xianyu_agent.protocol.client import WsClient
 from xianyu_agent.protocol.events import (
     MessageReceived,
@@ -68,8 +73,7 @@ def _raise_credential_preparation_failure(result: CredentialResult[object]) -> N
     """Render only policy-classified, secret-free standalone preparation failures."""
     if result.state is CredentialResultState.NEEDS_VALIDATION:
         console.print(
-            "[red]账号凭据需要 App 人工验证,未启动 WS。[/red] "
-            "完成验证后先执行 auth refresh。"
+            "[red]账号凭据需要 App 人工验证,未启动 WS。[/red] 完成验证后先执行 auth refresh。"
         )
     elif result.state is CredentialResultState.RETRYABLE_FAILURE:
         console.print("[red]凭据准备暂时失败,未启动 WS;请稍后重试。[/red]")
@@ -105,14 +109,10 @@ async def _recover_standalone_auth_failure(
 
     if result.state is CredentialResultState.NEEDS_VALIDATION:
         console.print(
-            "[red]账号凭据需要 App 人工验证,停止 WS 重试。[/red] "
-            "完成验证后执行 auth refresh。"
+            "[red]账号凭据需要 App 人工验证,停止 WS 重试。[/red] 完成验证后执行 auth refresh。"
         )
     else:
-        console.print(
-            "[red]账号凭据恢复失败,停止 WS 重试。[/red] "
-            "请先检查 auth status。"
-        )
+        console.print("[red]账号凭据恢复失败,停止 WS 重试。[/red] 请先检查 auth status。")
     if on_terminal is not None:
         on_terminal()
     return True
@@ -128,9 +128,7 @@ async def _start_with_prepared_credentials(
 ) -> None:
     """Atomically prepare canonical credentials and hand the same lock to transport."""
     try:
-        account_lock.acquire_for_transport_handoff(
-            owner_id=f"cli:{operation}:{uuid.uuid4().hex}"
-        )
+        account_lock.acquire_for_transport_handoff(owner_id=f"cli:{operation}:{uuid.uuid4().hex}")
     except AccountConnectionAlreadyRunningError as exc:
         console.print(f"[red]账号连接已被占用:{exc}[/red]")
         raise typer.Exit(code=2) from exc
@@ -194,6 +192,13 @@ def capture(  # noqa: PLR0915
                 f"[cyan]pool stop --account {account_id}[/cyan]。"
             )
             raise typer.Exit(code=2)
+        owner = await account_lease.live_owner(account_id)
+        if owner is not None:
+            console.print(
+                f"[red]账号当前由实例 {owner[:8]} 持有(M2 账号租约)。[/red] "
+                f"请在该实例上执行 [cyan]pool stop --account {account_id}[/cyan] 后再捕获。"
+            )
+            raise typer.Exit(code=2)
         settings = get_settings()
         supervisor = _build_credential_supervisor()
         path = (
@@ -203,6 +208,10 @@ def capture(  # noqa: PLR0915
             / "captures"
             / f"{account_id}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.jsonl"
         )
+        conflict = capture_output_conflict(path)
+        if conflict:
+            console.print(f"[red]{conflict}[/red]")
+            raise typer.Exit(code=1)
         recorder = CalibrationRecorder(path, account_id=account_id)
         counts = {"message": 0, "order": 0, "system": 0, "error": 0}
         connected = asyncio.Event()
@@ -287,9 +296,7 @@ def capture(  # noqa: PLR0915
             on_auth_failure=on_auth_failure,
             account_lock=account_lock,
         )
-        console.print(
-            f"[bold]观察模式[/bold]:{seconds:.0f} 秒;不自动回复/发货;脱敏证据:{path}"
-        )
+        console.print(f"[bold]观察模式[/bold]:{seconds:.0f} 秒;不自动回复/发货;脱敏证据:{path}")
         await _start_with_prepared_credentials(
             account_id,
             client,
@@ -327,9 +334,7 @@ def capture(  # noqa: PLR0915
         if terminal_error or not connected.is_set():
             raise typer.Exit(code=2)
         if target_messages > 0 and counts["message"] < target_messages:
-            console.print(
-                f"[red]未达到目标消息数:{counts['message']}/{target_messages}[/red]"
-            )
+            console.print(f"[red]未达到目标消息数:{counts['message']}/{target_messages}[/red]")
             raise typer.Exit(code=2)
         if missing_fields:
             raise typer.Exit(code=3)

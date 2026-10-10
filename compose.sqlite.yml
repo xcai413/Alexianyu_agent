@@ -1,0 +1,44 @@
+# 保留 SQLite 的单副本容器路径;独立使用,不叠加 compose.yml。
+name: xianyu-agent-sqlite
+
+services:
+  app:
+    image: ${XIANYU_IMAGE:-xianyu-agent:local}
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: &app-env-file
+      - path: .env
+        required: false
+    environment: &app-environment
+      XIANYU_DATABASE_URL: sqlite+aiosqlite:////data/xianyu.db
+      XIANYU_DATA_DIR: /data
+      XIANYU_FERNET_KEY: ${XIANYU_FERNET_KEY:?必须设置 XIANYU_FERNET_KEY}
+      XIANYU_AUTOMATION_MODE: ${XIANYU_AUTOMATION_MODE:-observe}
+      XIANYU_TAKEOVER_REQUIRE_APPROVAL: ${XIANYU_TAKEOVER_REQUIRE_APPROVAL:-false}
+      XIANYU_TAKEOVER_MAX_FAILURES: ${XIANYU_TAKEOVER_MAX_FAILURES:-3}
+      XIANYU_HEALTH_SERVER_ENABLED: "true"
+      XIANYU_HTTP_HOST: 0.0.0.0
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes: &app-volumes
+      - ${XIANYU_HOST_DATA_DIR:-./data}:/data
+
+  web:
+    image: ${XIANYU_IMAGE:-xianyu-agent:local}
+    profiles: [console]
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    env_file: *app-env-file
+    environment:
+      <<: *app-environment
+      XIANYU_SKIP_MIGRATIONS: "1"
+      XIANYU_CONTAINER_SERVICE: web
+      XIANYU_MCP_PORT: "8090"
+    command: [mcp, serve, --host, 0.0.0.0, --port, "8090"]
+    volumes: *app-volumes
+    ports:
+      - "127.0.0.1:${XIANYU_WEB_HOST_PORT:-8090}:8090"

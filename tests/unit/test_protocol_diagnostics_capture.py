@@ -57,7 +57,6 @@ def test_canonical_redaction_matches_legacy_and_never_leaks_secrets() -> None:
     assert canonical["bizTag"]["_encoding"] == "json"
 
 
-
 def test_capture_reports_raw_msgpack_integer_key_count() -> None:
     raw = msgpack.packb(
         {

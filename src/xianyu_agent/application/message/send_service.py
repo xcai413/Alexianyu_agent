@@ -50,6 +50,16 @@ class MessageProtocol(Protocol):
         text: str,
     ) -> Any: ...
 
+    async def send_image_message(
+        self,
+        *,
+        chat_id: str,
+        receiver_id: str,
+        image_url: str,
+        width: int = 800,
+        height: int = 600,
+    ) -> Any: ...
+
 
 class MessageAttemptRecorder(Protocol):
     """Append-only persistence port for external send attempt evidence."""
@@ -89,6 +99,7 @@ class MessageStore(Protocol):
         text: str,
         client_message_id: str | None,
         response: Any,
+        content_type: str = "text",
     ) -> None: ...
 
 
@@ -246,6 +257,118 @@ class SendMessageService:
             )
         return receiver.strip()
 
+    async def send_image(
+        self,
+        *,
+        account_id: str,
+        chat_id: str,
+        image_url: str,
+        receiver_id: str | None = None,
+        width: int = 800,
+        height: int = 600,
+    ) -> SendMessageResult:
+        """Send one chat image with exactly the same evidence and failure rules as text.
+
+        图片与文本共用信封,所以"写一次、按结果分类、失败不盲目重试"的语义完全一致;
+        唯一的差别是落库的 `content_type` 记成 image,镜像里不会把它当成文本消息。
+        """
+        account = _required(account_id, "account_id")
+        conversation = _required(chat_id, "chat_id")
+        url = _required(image_url, "image_url")
+        receiver_result = await self._receiver(account, conversation, receiver_id)
+        if isinstance(receiver_result, SendMessageResult):
+            return receiver_result
+        receiver = receiver_result
+        attempt_id = uuid.uuid4().hex
+
+        try:
+            await self._recorder.record_attempt(
+                attempt_id=attempt_id,
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                text=url,
+            )
+        except Exception as exc:
+            return SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                detail=f"attempt audit failed before send: {type(exc).__name__}",
+            )
+
+        try:
+            receipt = await self._protocol.send_image_message(
+                chat_id=conversation,
+                receiver_id=receiver,
+                image_url=url,
+                width=width,
+                height=height,
+            )
+        except SendMessageNotSent as exc:
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                exc=exc,
+            )
+        except ConnectionError as exc:
+            result = SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.FAILED_RETRYABLE,
+                retry_allowed=True,
+                detail=str(exc),
+            )
+        except SendMessageRejected as exc:
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
+                status=SendAttemptStatus.FAILED_FINAL,
+                retry_allowed=False,
+                exc=exc,
+            )
+        except SendMessageUncertain as exc:
+            result = self._failure_result(
+                account=account,
+                conversation=conversation,
+                receiver=receiver,
+                status=SendAttemptStatus.UNCERTAIN,
+                retry_allowed=False,
+                exc=exc,
+            )
+        except Exception as exc:
+            result = SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.UNCERTAIN,
+                retry_allowed=False,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            result = SendMessageResult(
+                account_id=account,
+                chat_id=conversation,
+                receiver_id=receiver,
+                status=SendAttemptStatus.SUCCESS,
+                retry_allowed=False,
+                request_id=getattr(receipt, "request_id", None),
+                client_message_id=getattr(receipt, "client_message_id", None),
+                response=getattr(receipt, "response", receipt),
+            )
+            result = await self._persist_confirmed_outbound(
+                result, url, content_type="image"
+            )
+
+        return await self._record_terminal(attempt_id, result)
+
     def _preflight_failure(
         self,
         account: str,
@@ -268,6 +391,8 @@ class SendMessageService:
         self,
         result: SendMessageResult,
         content: str,
+        *,
+        content_type: str = "text",
     ) -> SendMessageResult:
         if self._message_store is None:
             return result
@@ -279,6 +404,7 @@ class SendMessageService:
                 text=content,
                 client_message_id=result.client_message_id,
                 response=result.response,
+                content_type=content_type,
             )
         except Exception as exc:
             return replace(
@@ -286,8 +412,7 @@ class SendMessageService:
                 status=SendAttemptStatus.RECONCILIATION_REQUIRED,
                 retry_allowed=False,
                 detail=(
-                    "outbound persistence failed after platform success: "
-                    f"{type(exc).__name__}"
+                    f"outbound persistence failed after platform success: {type(exc).__name__}"
                 ),
             )
         return result

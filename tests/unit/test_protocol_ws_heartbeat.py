@@ -25,4 +25,7 @@ def test_ws_client_keeps_compatibility_aliases_and_default_builder() -> None:
     assert client.ws_heartbeat is heartbeat
     assert client._generate_mid is heartbeat.generate_mid
     assert client._default_heartbeat is heartbeat.default_heartbeat
-    assert client.ClientConfig.__dataclass_fields__["heartbeat_builder"].default is heartbeat.default_heartbeat
+    assert (
+        client.ClientConfig.__dataclass_fields__["heartbeat_builder"].default
+        is heartbeat.default_heartbeat
+    )

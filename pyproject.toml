@@ -108,6 +108,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["PLR2004", "S101", "PT011", "ARG"]
 "src/xianyu_agent/cli/**/*.py" = ["T201"]
+# 容器健康检查是给人看的脚本,允许直接 print。
+"docker/*.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["xianyu_agent"]

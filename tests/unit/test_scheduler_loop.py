@@ -69,7 +69,9 @@ async def test_wake_interrupts_idle_wait_for_immediate_pass() -> None:
         ]
     )
     loop = SchedulerLoop(
-        runner, FakeRecovery(), idle_interval=timedelta(hours=1)  # type: ignore[arg-type]
+        runner,
+        FakeRecovery(),
+        idle_interval=timedelta(hours=1),  # type: ignore[arg-type]
     )
 
     task = asyncio.create_task(loop.run())
@@ -91,7 +93,9 @@ async def test_claimed_work_drains_without_waiting_for_wake_or_poll() -> None:
         ]
     )
     loop = SchedulerLoop(
-        runner, FakeRecovery(), idle_interval=timedelta(hours=1)  # type: ignore[arg-type]
+        runner,
+        FakeRecovery(),
+        idle_interval=timedelta(hours=1),  # type: ignore[arg-type]
     )
 
     task = asyncio.create_task(loop.run())

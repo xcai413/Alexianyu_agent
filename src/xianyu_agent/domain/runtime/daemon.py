@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from xianyu_agent.db import DaemonInstance, get_async_session
 
 ACTIVE_STATUSES = ("starting", "running", "stopping")
+# 实例租约:心跳每 10 秒一次,租约 60 秒;90 秒没心跳即视为过期(M1)。
+INSTANCE_LEASE_TTL = timedelta(seconds=60)
+HEARTBEAT_STALE_AFTER = timedelta(seconds=90)
 
 
 class DaemonControl:
@@ -29,6 +32,7 @@ async def create_instance(*, instance_id: str, pid: int, version: str) -> Daemon
             version=version,
             started_at=now,
             last_heartbeat_at=now,
+            lease_until=now + INSTANCE_LEASE_TTL,
         )
         session.add(row)
         await session.commit()
@@ -45,14 +49,15 @@ async def touch_heartbeat(instance_id: str) -> DaemonControl:
     async with get_async_session() as session:
         row = (
             await session.execute(
-                select(DaemonInstance)
-                .where(DaemonInstance.instance_id == instance_id)
-                .limit(1)
+                select(DaemonInstance).where(DaemonInstance.instance_id == instance_id).limit(1)
             )
         ).scalar_one_or_none()
         if row is None:
             return DaemonControl(shutdown_requested=True, restart_requested=False)
-        row.last_heartbeat_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        row.last_heartbeat_at = now
+        # 心跳同时续租:租约没过期的实例,别的副本不得判它异常退出。
+        row.lease_until = now + INSTANCE_LEASE_TTL
         await session.commit()
         return DaemonControl(
             shutdown_requested=bool(row.shutdown_requested),
@@ -111,11 +116,7 @@ async def latest_instance() -> DaemonInstance | None:
 
 async def get_instance(instance_id: str) -> DaemonInstance | None:
     async with get_async_session() as session:
-        stmt = (
-            select(DaemonInstance)
-            .where(DaemonInstance.instance_id == instance_id)
-            .limit(1)
-        )
+        stmt = select(DaemonInstance).where(DaemonInstance.instance_id == instance_id).limit(1)
         return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -129,15 +130,49 @@ async def active_instances() -> Sequence[DaemonInstance]:
         return list((await session.execute(stmt)).scalars().all())
 
 
-async def mark_orphaned_active(*, reason: str) -> int:
-    """持有单实例锁后,将数据库中遗留的活跃记录标记为异常退出。"""
-    now = datetime.now(UTC)
+async def list_instances(*, limit: int = 100) -> Sequence[DaemonInstance]:
+    """按启动时间列出实例历史;集群状态用它解释接管与滚动重启。"""
     async with get_async_session() as session:
-        result = await session.execute(
-            update(DaemonInstance)
-            .where(DaemonInstance.status.in_(ACTIVE_STATUSES))
-            .values(status="error", stopped_at=now, last_error=reason)
+        stmt = (
+            select(DaemonInstance).order_by(DaemonInstance.started_at.desc()).limit(max(1, limit))
         )
+        return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_expired_instances(
+    *,
+    reason: str,
+    now: datetime | None = None,
+    stale_after: timedelta = HEARTBEAT_STALE_AFTER,
+    exclude_instance_id: str | None = None,
+) -> int:
+    """只把「租约已过期」的活跃记录标记为异常退出(M1)。
+
+    多副本下不能无条件清理:仍在续租的实例说明它还在跑,它的记录必须保留。M1 之前
+    这里是无条件 UPDATE,第二个副本一启动就会把第一个副本标成异常退出。
+    lease_until 为 NULL 的历史行(升级前的旧版本)只在心跳也已过期时才清理,避免
+    灰度期间误伤仍在运行的旧版本进程。
+    """
+    current = now or datetime.now(UTC)
+    stale_before = current - stale_after
+    statement = (
+        update(DaemonInstance)
+        .where(
+            DaemonInstance.status.in_(ACTIVE_STATUSES),
+            or_(
+                DaemonInstance.lease_until <= current,
+                and_(
+                    DaemonInstance.lease_until.is_(None),
+                    DaemonInstance.last_heartbeat_at <= stale_before,
+                ),
+            ),
+        )
+        .values(status="error", stopped_at=current, last_error=reason)
+    )
+    if exclude_instance_id is not None:
+        statement = statement.where(DaemonInstance.instance_id != exclude_instance_id)
+    async with get_async_session() as session:
+        result = await session.execute(statement)
         await session.commit()
         return int(result.rowcount or 0)
 
@@ -145,8 +180,6 @@ async def mark_orphaned_active(*, reason: str) -> int:
 async def _update_instance(instance_id: str, **values: object) -> None:
     async with get_async_session() as session:
         await session.execute(
-            update(DaemonInstance)
-            .where(DaemonInstance.instance_id == instance_id)
-            .values(**values)
+            update(DaemonInstance).where(DaemonInstance.instance_id == instance_id).values(**values)
         )
         await session.commit()

@@ -272,9 +272,7 @@ class WsClient:
         remaining = max(0.0, deadline - loop.time())
         if self._deferred_business_frames and remaining > 0.0:
             try:
-                await asyncio.wait_for(
-                    self._flush_deferred_business_frames(), timeout=remaining
-                )
+                await asyncio.wait_for(self._flush_deferred_business_frames(), timeout=remaining)
             except TimeoutError:
                 logger.warning(
                     "ws deferred business drain timed out account=%s remaining=%d",
@@ -316,6 +314,7 @@ class WsClient:
         ):
             return False
         return await ws_sender.send_text(self._socket, text)
+
 
     async def request_conversations(
         self,
@@ -713,9 +712,7 @@ class WsClient:
         self._dispatch_stop_when_drained = False
         if self._dispatch_task is not None and not self._dispatch_task.done():
             return
-        queue: asyncio.Queue[DispatchCallback] = asyncio.Queue(
-            maxsize=MAX_CALLBACK_QUEUE_SIZE
-        )
+        queue: asyncio.Queue[DispatchCallback] = asyncio.Queue(maxsize=MAX_CALLBACK_QUEUE_SIZE)
         self._dispatch_queue = queue
         self._dispatch_inflight = False
         self._dispatch_task = asyncio.create_task(
@@ -864,7 +861,23 @@ class WsClient:
                 return
 
     async def _touch_heartbeat(self) -> None:
-        """Persist last_heartbeat_at so other processes can observe liveness."""
+        """Persist last_heartbeat_at so other processes can observe liveness.
+
+        The write is shielded from cancellation: aiosqlite resolves an in-flight
+        call on its worker thread, so abandoning the await mid-flight lets that
+        thread finish against a closing event loop and raise there.
+        """
+        persist = asyncio.create_task(
+            self._persist_heartbeat(), name=f"ws-heartbeat-write-{self.account_id}"
+        )
+        try:
+            await asyncio.shield(persist)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await persist
+            raise
+
+    async def _persist_heartbeat(self) -> None:
         try:
             async with get_async_session() as session:
                 stmt = (

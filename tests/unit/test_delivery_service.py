@@ -218,7 +218,9 @@ async def test_retry_send_failure_reuses_reserved_code(clean_db) -> None:
     assert sent == [("acc-1", "O-R", "CODE-R")]
 
     async with db_mod.get_async_session() as session:
-        order = (await session.execute(select(Order).where(Order.id == order_id).limit(1))).scalar_one()
+        order = (
+            await session.execute(select(Order).where(Order.id == order_id).limit(1))
+        ).scalar_one()
         cons = (
             (
                 await session.execute(

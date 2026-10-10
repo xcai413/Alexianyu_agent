@@ -53,9 +53,7 @@ def test_text_send_frame_matches_calibrated_wire_contract() -> None:
         "mtags": {},
         "msgReadStatusSetting": 1,
     }
-    assert frame["body"][1] == {
-        "actualReceivers": ["buyer-2@goofish", "seller-1@goofish"]
-    }
+    assert frame["body"][1] == {"actualReceivers": ["buyer-2@goofish", "seller-1@goofish"]}
 
     encoded = frame["body"][0]["content"]["custom"]["data"]
     decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
@@ -121,7 +119,9 @@ async def test_text_send_registers_before_write_and_correlates_ack() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_after_successful_write_is_uncertain_and_never_rewritten_as_retryable() -> None:
+async def test_timeout_after_successful_write_is_uncertain_and_never_rewritten_as_retryable() -> (
+    None
+):
     message_send = _protocol_module()
     router = RequestRouter()
     writes: list[dict[str, Any]] = []
@@ -208,7 +208,9 @@ async def test_caller_cancellation_still_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_proven_pre_write_failure_is_retryable_without_claiming_platform_side_effect() -> None:
+async def test_proven_pre_write_failure_is_retryable_without_claiming_platform_side_effect() -> (
+    None
+):
     message_send = _protocol_module()
     router = RequestRouter()
 
@@ -231,7 +233,9 @@ async def test_proven_pre_write_failure_is_retryable_without_claiming_platform_s
 
 
 @pytest.mark.asyncio
-async def test_send_service_audits_attempt_before_write_and_does_not_blind_retry_uncertain() -> None:
+async def test_send_service_audits_attempt_before_write_and_does_not_blind_retry_uncertain() -> (
+    None
+):
     send_service = _application_module()
     order: list[str] = []
     calls: list[dict[str, str]] = []
@@ -310,7 +314,9 @@ async def test_platform_success_plus_result_audit_failure_requires_reconciliatio
 
 
 @pytest.mark.asyncio
-async def test_platform_success_persistence_failure_redacts_message_text_from_terminal_audit() -> None:
+async def test_platform_success_persistence_failure_redacts_message_text_from_terminal_audit() -> (
+    None
+):
     send_service = _application_module()
     secret_text = "sensitive-message-body-123"
     recorded_results: list[dict[str, Any]] = []

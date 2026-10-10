@@ -111,10 +111,5 @@ class SystemNotice(DomainEvent):
 
 
 DomainEventVariant: TypeAlias = (
-    MessageReceived
-    | MessageSent
-    | OrderCreated
-    | OrderPaid
-    | OrderDelivered
-    | SystemNotice
+    MessageReceived | MessageSent | OrderCreated | OrderPaid | OrderDelivered | SystemNotice
 )

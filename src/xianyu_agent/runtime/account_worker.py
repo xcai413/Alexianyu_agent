@@ -20,6 +20,8 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
+from xianyu_agent.application.delivery import OrderDeliveryDispatcher
+from xianyu_agent.application.session.renewal import LongLoginRenewalService
 from xianyu_agent.application.session.supervisor import CredentialSupervisor
 from xianyu_agent.config import get_settings
 from xianyu_agent.db import Account, AuditLog, WorkerStatus, get_async_session
@@ -34,6 +36,7 @@ from xianyu_agent.domain.runtime.worker_state import (
     transition_worker_state,
     worker_state_from_persistence,
 )
+from xianyu_agent.infrastructure.ai import VaultBackedProvider
 from xianyu_agent.infrastructure.session.ws_credentials import (
     LegacyValidationGate,
     LegacyWsCredentialBackend,
@@ -51,7 +54,7 @@ from xianyu_agent.protocol.events import (
 from xianyu_agent.protocol.parser import parse_frame
 from xianyu_agent.protocol.ws_auth import WsAuthError
 from xianyu_agent.runtime.account_lock import AccountConnectionLock
-from xianyu_agent.runtime.message_sender import send_worker_text
+from xianyu_agent.runtime.message_sender import send_worker_image, send_worker_text
 from xianyu_agent.runtime.recovery import (
     CredentialRecoveryRoute,
     RecoveryCause,
@@ -180,29 +183,37 @@ class AccountWorker:
         persist_events: bool = True,
         reply_engine: ReplyEngine | None = None,
         delivery_service: DeliveryService | None = None,
+        delivery_dispatcher: OrderDeliveryDispatcher | None = None,
         guardrails: Guardrails | None = None,
         automation_mode: str | None = None,
         credential_supervisor: CredentialSupervisor[Any] | None = None,
         recovery_supervisor: RecoverySupervisor[Any] | None = None,
+        renewal_service: LongLoginRenewalService | None = None,
         retry_sleep: RetrySleep = asyncio.sleep,
         readiness_poll_s: float = 0.01,
+        account_lock: AccountConnectionLock | None = None,
     ) -> None:
         self.account_id = account_id
         self.started_at: datetime | None = None
         self._reply_engine = reply_engine
         self._delivery_service = delivery_service
+        self._delivery_dispatcher = delivery_dispatcher
         self._guardrails = guardrails
+        self._renewal_service = renewal_service
         settings = get_settings()
         self._automation_mode = automation_mode or settings.automation_mode
         self._connection_lock: _WorkerConnectionLock | None = None
         self._client: WsClient
         if client is None:
-            self._connection_lock = _WorkerConnectionLock(settings.account_lock_path(account_id))
+            if account_lock is None:
+                self._connection_lock = _WorkerConnectionLock(
+                    settings.account_lock_path(account_id)
+                )
             self._client = _WorkerOwnedWsClient(
                 account_id,
                 on_event=self._on_event if persist_events else None,
                 on_auth_failure=self._on_auth_failure,
-                account_lock=self._connection_lock,
+                account_lock=account_lock or self._connection_lock,
             )
         else:
             self._client = client
@@ -218,6 +229,8 @@ class AccountWorker:
         self._state_history: list[WorkerState] = [WorkerState.DISABLED]
         self._state_transition_lock = asyncio.Lock()
         self._validation_recovery_lock = asyncio.Lock()
+        self._validation_recovery_pending = False
+        self._validation_recovery_revision: str | None = None
         self._restored_state: WorkerState | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._readiness_task: asyncio.Task[None] | None = None
@@ -229,15 +242,27 @@ class AccountWorker:
         if self._guardrails is None and self._automation_mode == "active":
             self._guardrails = Guardrails()
         if self._reply_engine is None and persist_events and self._automation_mode == "active":
-            self._reply_engine = ReplyEngine(sender=self._send_reply)
+            ai_modes = {"RULE_THEN_AI", "RULE_DEFAULT_THEN_AI", "AI_ONLY"}
+            provider = VaultBackedProvider() if settings.reply_mode in ai_modes else None
+            self._reply_engine = ReplyEngine(
+                sender=self._send_reply,
+                image_sender=self._send_reply_image,
+                provider=provider,
+                mode=settings.reply_mode,
+            )
         if (
-            self._delivery_service is None
+            self._delivery_dispatcher is None
+            and self._delivery_service is None
             and persist_events
             and self._automation_mode == "active"
         ):
-            self._delivery_service = DeliveryService(
+            # 阶段 6 引擎与旧卡密链路二选一:auto 时按"有没有启用的发货策略"决定。
+            self._delivery_dispatcher = OrderDeliveryDispatcher(
                 sender=self._send_reply,
-                guardrails=self._guardrails,
+                engine=settings.delivery_engine,
+                legacy_factory=lambda: (
+                    DeliveryService(sender=self._send_reply, guardrails=self._guardrails).deliver
+                ),
             )
 
     def _build_default_credentials(self) -> CredentialSupervisor[Any] | None:
@@ -252,10 +277,30 @@ class AccountWorker:
     async def _on_auth_failure(self, error: WsAuthError) -> bool:
         """Recover auth failures or fail closed on validation/terminal errors."""
         if worker_risk.is_user_validate_error(error):
-            await worker_risk.open_user_validate(self.account_id)
-            decision = self._recovery.decide(RecoveryCause.NEEDS_VALIDATION)
+            risk_code = worker_risk.detected_risk_code(error)
+            await worker_risk.open_user_validate(self.account_id, code=risk_code)
+            decision = self._recovery.decide(RecoveryCause.NEEDS_VALIDATION, code=risk_code)
             await self._apply_recovery_decision(decision)
             return True
+
+        if self._renewal_service is not None:
+            try:
+                renewal = await self._renewal_service.renew(
+                    self.account_id,
+                    session_expired=True,
+                )
+                logger.info(
+                    "session-expiry cookie renewal account=%s action=%s success=%s",
+                    self.account_id,
+                    renewal.action,
+                    renewal.success,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "session-expiry cookie renewal failed account=%s error=%s",
+                    self.account_id,
+                    type(exc).__name__,
+                )
 
         await self._prepare_credential_recovery(WorkerState.REFRESHING_CREDENTIAL)
         if self._credentials is None:
@@ -272,18 +317,15 @@ class AccountWorker:
                 await self._advance_to_connecting()
             elif event.state is ConnectionState.CONNECTED:
                 await self._advance_transport_connected()
-            elif (
-                event.state in {ConnectionState.RECONNECTING, ConnectionState.ERROR}
-                or (
-                    event.state is ConnectionState.DISCONNECTED
-                    and self._worker_state
-                    not in {
-                        WorkerState.DISABLED,
-                        WorkerState.STOPPING,
-                        WorkerState.NEEDS_VALIDATION,
-                        WorkerState.ERROR,
-                    }
-                )
+            elif event.state in {ConnectionState.RECONNECTING, ConnectionState.ERROR} or (
+                event.state is ConnectionState.DISCONNECTED
+                and self._worker_state
+                not in {
+                    WorkerState.DISABLED,
+                    WorkerState.STOPPING,
+                    WorkerState.NEEDS_VALIDATION,
+                    WorkerState.ERROR,
+                }
             ):
                 await self._handle_transport_failure(event.detail)
         except InvalidWorkerStateTransition as exc:
@@ -376,6 +418,33 @@ class AccountWorker:
 
     async def _promote_online_fail_closed(self) -> None:
         """Commit ONLINE or fail closed under AccountWorker lifecycle ownership."""
+        if self._validation_recovery_pending:
+            try:
+                async with self._state_transition_lock:
+                    next_state = transition_worker_state(self._worker_state, WorkerState.ONLINE)
+                    # Keep the durable validation gate closed until ONLINE persistence
+                    # succeeds. Publish in-memory readiness only after confirmation.
+                    await self._persist_worker_state(next_state)
+                    confirmed = await self._recovery.confirm_recovered(
+                        self.account_id, expected_revision=self._validation_recovery_revision
+                    )
+                    if confirmed:
+                        self._worker_state = next_state
+                        self._state_history.append(next_state)
+                        self._validation_recovery_pending = False
+            except Exception as exc:
+                await self._fail_closed_transport_after_lifecycle_error(exc)
+                return
+            if not confirmed:
+                await self._set_worker_state(
+                    WorkerState.NEEDS_VALIDATION,
+                    detail="validation recovery gate could not be confirmed",
+                )
+                await self._fail_closed_transport_after_lifecycle_error(
+                    RuntimeError("validation recovery gate could not be confirmed")
+                )
+                return
+            return
         try:
             await self._set_worker_state(WorkerState.ONLINE)
         except InvalidWorkerStateTransition:
@@ -428,16 +497,24 @@ class AccountWorker:
                         detail=decision.reason or "",
                     )
         elif isinstance(domain_event, domain_events.MessageSent):
-            await domain_messages.record_outbound(domain_event)
+            await domain_messages.record_outbound(domain_event, raw_payload=raw_payload)
         elif isinstance(
             domain_event,
             (domain_events.OrderCreated, domain_events.OrderPaid, domain_events.OrderDelivered),
         ):
             await domain_orders.upsert_from_event(domain_event, raw_payload=raw_payload)
-            if isinstance(domain_event, domain_events.OrderPaid) and self._delivery_service is not None:
-                await self._delivery_service.deliver(domain_event)
+            if isinstance(domain_event, domain_events.OrderPaid):
+                await self._deliver_paid_order(domain_event)
         elif isinstance(domain_event, domain_events.SystemNotice):
             await self._record_system_notice(domain_event)
+
+    async def _deliver_paid_order(self, event: domain_events.OrderPaid) -> None:
+        """订单付款后的发货入口:注入的旧服务优先,其次才是分发器。"""
+        if self._delivery_service is not None:
+            await self._delivery_service.deliver(event)
+            return
+        if self._delivery_dispatcher is not None:
+            await self._delivery_dispatcher.deliver(event)
 
     async def _record_system_notice(self, event: domain_events.SystemNotice) -> None:
         """系统提示单独入审计日志,永不进入买家消息自动化。"""
@@ -471,6 +548,15 @@ class AccountWorker:
             text=text,
         )
 
+    async def _send_reply_image(self, account_id: str, chat_id: str, image_url: str) -> bool:
+        """规则配图走与文本相同的权威发送边界。"""
+        return await send_worker_image(
+            self._client,
+            account_id=account_id,
+            chat_id=chat_id,
+            image_url=image_url,
+        )
+
     def start(self) -> asyncio.Task[None] | None:
         """Schedule startup and return the task that owns its durable outcome."""
         if self._worker_state is WorkerState.NEEDS_VALIDATION:
@@ -481,9 +567,7 @@ class AccountWorker:
             return None
 
         if self._connection_lock is not None:
-            self._connection_lock.acquire(
-                owner_id=f"worker:{self.account_id}:{uuid.uuid4().hex}"
-            )
+            self._connection_lock.acquire(owner_id=f"worker:{self.account_id}:{uuid.uuid4().hex}")
         try:
             self._stop_requested = False
             self._startup_task = asyncio.create_task(
@@ -639,14 +723,12 @@ class AccountWorker:
             # Re-check under operation ownership. A concurrent caller that arrives
             # after the first success sees CHECKING_SESSION/CONNECTING and becomes
             # a no-op instead of issuing a second forced credential refresh.
-            if (
-                self._worker_state is not WorkerState.NEEDS_VALIDATION
-                or self._credentials is None
-            ):
+            if self._worker_state is not WorkerState.NEEDS_VALIDATION or self._credentials is None:
                 return False
             outcome = await self._recovery.recover_credential(
                 self.account_id,
                 route=CredentialRecoveryRoute.VALIDATION_REFRESH,
+                defer_validation_clear=True,
             )
             decision = outcome.decision
             if decision.retry:
@@ -666,6 +748,12 @@ class AccountWorker:
                 self._stop_requested = False
                 self.started_at = self.started_at or datetime.now(UTC)
                 self._client.start()
+                self._validation_recovery_pending = True
+                self._validation_recovery_revision = (
+                    outcome.credential_result.validation_revision
+                    if outcome.credential_result
+                    else None
+                )
             except Exception:
                 if self._connection_lock is not None:
                     self._connection_lock.release()
@@ -841,7 +929,9 @@ class AccountWorker:
                     risk_recovery_required=bool(row.risk_recovery_required),
                 )
         except Exception as exc:
-            logger.warning("worker persisted state read failed account=%s: %s", self.account_id, exc)
+            logger.warning(
+                "worker persisted state read failed account=%s: %s", self.account_id, exc
+            )
             return None
 
     async def _persist_worker_state(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -13,6 +13,7 @@ from .enums import RuleType
 
 if TYPE_CHECKING:
     from .account import Account
+    from .item import Item
     from .message import Message
 
 
@@ -25,6 +26,9 @@ class ReplyRule(Base):
     account_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    item_pk: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("items.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     type: Mapped[str] = mapped_column(String(16), default=RuleType.KEYWORD.value, nullable=False)
     pattern: Mapped[str] = mapped_column(Text, nullable=False)
@@ -32,6 +36,9 @@ class ReplyRule(Base):
     reply_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    reply_once: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -45,10 +52,12 @@ class ReplyRule(Base):
     )
 
     account: Mapped[Account | None] = relationship(back_populates="rules")
+    item: Mapped[Item | None] = relationship()
     reply_logs: Mapped[list[ReplyLog]] = relationship(back_populates="rule")
 
     __table_args__ = (
         Index("ix_rules_account_enabled_priority", "account_id", "enabled", "priority"),
+        Index("ix_rules_item_enabled_priority", "item_pk", "enabled", "priority"),
     )
 
 

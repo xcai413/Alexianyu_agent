@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from xianyu_agent.foundation import CausationId, CorrelationId
@@ -54,6 +54,8 @@ class OutboxRecord:
     published_at: datetime | None
     attempt_count: int
     last_error: str | None
+    # 抢占租约:只由 claim_pending 填充,用于发布/失败时的 CAS 校验。
+    lease_token: str | None = None
 
 
 class OutboxRepository(Protocol):
@@ -65,6 +67,21 @@ class OutboxRepository(Protocol):
 
     async def list_pending(self, *, limit: int = 100) -> Sequence[OutboxRecord]: ...
 
-    async def mark_published(self, event_id: str, *, published_at: datetime) -> bool: ...
+    async def claim_pending(
+        self,
+        *,
+        owner: str,
+        lease_duration: timedelta,
+        limit: int = 100,
+        now: datetime,
+    ) -> Sequence[OutboxRecord]: ...
 
-    async def record_failure(self, event_id: str, *, error: str) -> bool: ...
+    async def release_claim(self, event_id: str, *, lease_token: str) -> bool: ...
+
+    async def mark_published(
+        self, event_id: str, *, published_at: datetime, lease_token: str | None = None
+    ) -> bool: ...
+
+    async def record_failure(
+        self, event_id: str, *, error: str, lease_token: str | None = None
+    ) -> bool: ...

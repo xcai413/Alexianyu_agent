@@ -65,6 +65,6 @@ Worker)。在售商品区显示账号、标题、价格、已售数量、商品 
 - 风险条一直亮:在 `audit_logs` 里看是哪个规则;夜间静默可调
   `XIANYU_GUARDRAIL_QUIET_HOURS`。
 - 显示 `FAIL_SYS_USER_VALIDATE`:不要连续扫码或刷新。先在闲鱼 App 完成实际出现的验证，等冷却
-  结束后只执行一次 `auth refresh --account <id>`；`auth status` 显示 `ws_token_valid=Y` 后再启动
-  Worker。
+  结束后只执行一次 `auth refresh --account <id>`；该命令会建立一次被动 WebSocket 会话探针，
+  只有进入 `ONLINE` 才算恢复成功。
 - `漂移` 非 0:查看账号表的“期望/实际/一致”列,并执行 `xianyu-agent doctor` 获取诊断。

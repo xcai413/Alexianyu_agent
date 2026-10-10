@@ -1,0 +1,74 @@
+# 双副本验收栈:一个迁移任务 + 两个独立运行目录的 daemon + 共享 Postgres。
+name: xianyu-agent-multi
+
+x-app-common: &app-common
+  build:
+    context: .
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-environment
+    XIANYU_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-xianyu}:${POSTGRES_PASSWORD:-xianyu}@postgres:5432/${POSTGRES_DB:-xianyu}
+    XIANYU_DATA_DIR: /data
+    XIANYU_FERNET_KEY: ${XIANYU_FERNET_KEY:?必须设置 XIANYU_FERNET_KEY}
+    XIANYU_AUTOMATION_MODE: ${XIANYU_AUTOMATION_MODE:-observe}
+    XIANYU_TAKEOVER_REQUIRE_APPROVAL: ${XIANYU_TAKEOVER_REQUIRE_APPROVAL:-false}
+    XIANYU_TAKEOVER_MAX_FAILURES: ${XIANYU_TAKEOVER_MAX_FAILURES:-3}
+    XIANYU_HEALTH_SERVER_ENABLED: "true"
+    XIANYU_HTTP_HOST: 0.0.0.0
+    XIANYU_SKIP_MIGRATIONS: "1"
+    TZ: ${TZ:-Asia/Shanghai}
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-xianyu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xianyu}
+      POSTGRES_DB: ${POSTGRES_DB:-xianyu}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-xianyu} -d ${POSTGRES_DB:-xianyu}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *app-environment
+      XIANYU_SKIP_MIGRATIONS: "0"
+      XIANYU_SKIP_DOCTOR: "1"
+    command: ["--version"]
+
+  app-a:
+    <<: *app-common
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - app_a_data:/data
+
+  app-b:
+    <<: *app-common
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - app_b_data:/data
+
+volumes:
+  pgdata:
+  app_a_data:
+  app_b_data:
