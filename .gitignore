@@ -60,6 +60,7 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/*.db.bak-*
 data/qr_logins/
 data/captures/
 data/cookies/*.json

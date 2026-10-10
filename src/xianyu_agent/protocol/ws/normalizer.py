@@ -37,11 +37,7 @@ def _canonicalize_sync_keys(value):
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
-            canonical_key = (
-                str(key)
-                if isinstance(key, int) and not isinstance(key, bool)
-                else key
-            )
+            canonical_key = str(key) if isinstance(key, int) and not isinstance(key, bool) else key
             if canonical_key in result:
                 raise ValueError(
                     f"sync map key collision after canonicalization: {canonical_key!r}"

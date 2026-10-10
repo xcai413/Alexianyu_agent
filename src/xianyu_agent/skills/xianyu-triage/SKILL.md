@@ -14,6 +14,9 @@ description: 闲鱼新买家消息分诊 — 判断买家意图(询价/砍价/�
 
 - 先执行 `xianyu-agent message list --account <id> --since 10m` 拿到会话上下文。
 - 用 `xianyu-agent message show <id>` 看单条消息原文与原始 payload。
+- 先看有没有卡住等人工的事:`xianyu-agent attention list`(结果不明、需要确认、需要重新验证)。
+- 图片消息:列表里的"图片"列就是买家发来的图片地址;发图用
+  `xianyu-agent message send-image --account <id> --chat-id <cid> --image-url <https 地址> --yes`。
 
 ## 分诊流程
 
@@ -28,6 +31,16 @@ description: 闲鱼新买家消息分诊 — 判断买家意图(询价/砍价/�
    - 命中 `xianyu-agent rule test --content "<消息>" --account <id>` 已有规则 → 让规则引擎处理
    - 未命中且属于售后/砍价 → 起草回复给用户确认
    - 无法判断 → 标记 `processed=0`,不自动回复
+
+## 接管与已读
+
+- 需要自己接手一段对话:`xianyu-agent message takeover --account <id> --chat-id <cid>`;
+  交回机器人 `xianyu-agent message release --account <id> --chat-id <cid>`。
+- 想整体停手一段时间(例如风控期间):`xianyu-agent account pause-reply --id <id> --minutes 30`,
+  它优先于会话状态,到点自动恢复;恢复用 `xianyu-agent account resume-reply --id <id>`。
+- 已读分两件事:`xianyu-agent message mark-read --account <id> --chat-id <cid>` 只清**本地**未读计数;
+  `xianyu-agent message report-read --account <id> --chat-id <cid> --yes` 才向平台上报已读。
+  两者刻意分开:平台没确认前,本地不能假装买家消息已经被平台标记为已读。
 
 ## 输出
 

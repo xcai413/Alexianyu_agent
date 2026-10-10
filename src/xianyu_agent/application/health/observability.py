@@ -41,6 +41,17 @@ class AccountObservation:
     risk_cooldown_until: datetime | None
     risk_status: str | None
     issue: str | None
+    owner_instance_id: str | None = None
+    owner_lease_until: datetime | None = None
+    owner_health: str | None = None
+
+
+@dataclass(frozen=True)
+class DaemonObservation:
+    instance: DaemonInstance
+    health: DaemonHealth
+    uptime_s: float
+    owned_accounts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,12 @@ class RuntimeSnapshot:
     daemon_health: DaemonHealth
     daemon_uptime_s: float | None
     accounts: tuple[AccountObservation, ...]
+    daemon_instances: tuple[DaemonObservation, ...] = ()
+    daemon_history: tuple[DaemonObservation, ...] = ()
+
+    @property
+    def healthy_daemons(self) -> tuple[DaemonObservation, ...]:
+        return tuple(item for item in self.daemon_instances if item.health.healthy)
 
     @property
     def drifted_accounts(self) -> tuple[AccountObservation, ...]:
@@ -60,8 +77,8 @@ class RuntimeSnapshot:
         expects_workers = any(
             account.enabled and account.desired_state == "running" for account in self.accounts
         )
-        if not self.daemon_health.healthy and expects_workers:
-            alerts.append(f"daemon {self.daemon_health.observed}")
+        if not self.healthy_daemons and not self.daemon_health.healthy and expects_workers:
+            alerts.append("没有健康 daemon 实例")
         alerts.extend(
             f"{account.account_id}: {account.issue}"
             for account in self.drifted_accounts
@@ -94,14 +111,28 @@ def is_worker_healthy_online(actual_state: str) -> bool:
 async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnapshot:
     """从 SQLite 与 PID 读取跨进程一致的 daemon/Worker 快照。"""
     current = now or datetime.now(UTC)
-    daemon = await daemon_domain.latest_instance()
-    daemon_health = observe_daemon(daemon, now=current)
+    daemon_rows = list(await daemon_domain.list_instances())
+    active_rows = [row for row in daemon_rows if row.status in daemon_domain.ACTIVE_STATUSES]
+    visible_rows = active_rows or daemon_rows[:1]
+    daemon_health_rows = [
+        (row, observe_daemon(row, now=current, check_process=False)) for row in visible_rows
+    ]
+    healthy_rows = [item for item in daemon_health_rows if item[1].healthy]
+    daemon, daemon_health = (
+        healthy_rows[0]
+        if healthy_rows
+        else daemon_health_rows[0]
+        if daemon_health_rows
+        else (None, observe_daemon(None, now=current, check_process=False))
+    )
     uptime_s = None
     if daemon is not None:
         ended_at = daemon.stopped_at if daemon.status not in daemon_domain.ACTIVE_STATUSES else None
         uptime_s = _elapsed_seconds(daemon.started_at, ended_at or current)
 
     accounts = await domain_accounts.list_accounts()
+    account_owners = {account.account_id: account.owner_instance_id for account in accounts}
+    health_by_instance = {row.instance_id: health for row, health in daemon_health_rows}
     status_rows = await domain_accounts.worker_statuses()
     by_account_id = {row.account_id: row for row in status_rows}
     observations: list[AccountObservation] = []
@@ -124,10 +155,17 @@ async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnaps
             and heartbeat_age_s > WORKER_STALE_AFTER_S
         ):
             actual = "stale"
+        owner_health = (
+            health_by_instance[account.owner_instance_id].observed
+            if account.owner_instance_id in health_by_instance
+            else None
+        )
         aligned, issue = _alignment(
             enabled=account.enabled,
             desired_state=account.desired_state,
             actual_state=actual,
+            owner_instance_id=account.owner_instance_id,
+            owner_health=owner_health,
         )
         observations.append(
             AccountObservation(
@@ -144,21 +182,63 @@ async def build_runtime_snapshot(*, now: datetime | None = None) -> RuntimeSnaps
                 risk_cooldown_until=risk_cooldown_until,
                 risk_status=risk_status,
                 issue=issue,
+                owner_instance_id=account.owner_instance_id,
+                owner_lease_until=account.owner_lease_until,
+                owner_health=owner_health,
             )
         )
+
+    def _daemon_observation(row: DaemonInstance, health: DaemonHealth) -> DaemonObservation:
+        return DaemonObservation(
+            instance=row,
+            health=health,
+            uptime_s=_elapsed_seconds(
+                row.started_at,
+                row.stopped_at if row.status not in daemon_domain.ACTIVE_STATUSES else current,
+            ),
+            owned_accounts=tuple(
+                sorted(
+                    account_id
+                    for account_id, owner in account_owners.items()
+                    if owner == row.instance_id
+                )
+            ),
+        )
+
+    daemon_observations = tuple(
+        _daemon_observation(row, health) for row, health in daemon_health_rows
+    )
+    history_observations = tuple(
+        _daemon_observation(
+            row,
+            observe_daemon(row, now=current, check_process=False),
+        )
+        for row in daemon_rows
+    )
     return RuntimeSnapshot(
         daemon=daemon,
         daemon_health=daemon_health,
         daemon_uptime_s=uptime_s,
         accounts=tuple(observations),
+        daemon_instances=daemon_observations,
+        daemon_history=history_observations,
     )
 
 
-def _alignment(*, enabled: bool, desired_state: str, actual_state: str) -> tuple[bool, str | None]:
+def _alignment(  # noqa: PLR0911
+    *,
+    enabled: bool,
+    desired_state: str,
+    actual_state: str,
+    owner_instance_id: str | None = None,
+    owner_health: str | None = None,
+) -> tuple[bool, str | None]:
     if not enabled and desired_state != "stopped":
         return False, "停用账号的期望状态不是 stopped"
     expects_running = enabled and desired_state == "running"
     if expects_running:
+        if owner_instance_id and owner_health != "online":
+            return False, f"账号 owner {owner_instance_id[:8]} 不健康({owner_health or 'missing'})"
         if is_worker_healthy_online(actual_state):
             return True, None
         if actual_state == "stale":

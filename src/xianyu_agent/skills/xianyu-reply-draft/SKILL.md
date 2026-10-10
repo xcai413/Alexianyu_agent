@@ -33,4 +33,5 @@ description: 为闲鱼买家消息起草回复 — 结合商品/订单上下文�
 
 > 草稿:在的,9.9 包邮,今天拍今天发。
 > 依据:买家 2 分钟前问"还在吗",商品标题含 9.9。
-> 发送:确认后 `xianyu-agent message send`(Phase 7 起)。
+> 发送:确认后 `xianyu-agent message send --account <id> --chat-id <cid> --text "..." --yes`。
+> (该命令会真实发给买家,所以没有 `--yes` 会被拒绝;需要该账号没有常驻 daemon Worker。)

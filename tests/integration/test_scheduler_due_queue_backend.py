@@ -39,12 +39,15 @@ async def _assert_due_and_stale_ownership(backend: str) -> None:
     assert all(work.work_id != future_id for work in first)
     assert due.payload == {"kind": "due"}
 
-    assert await queue.claim_due(
-        now=now,
-        lease_owner="worker-b",
-        lease_duration=timedelta(seconds=5),
-        limit=10,
-    ) == ()
+    assert (
+        await queue.claim_due(
+            now=now,
+            lease_owner="worker-b",
+            lease_duration=timedelta(seconds=5),
+            limit=10,
+        )
+        == ()
+    )
 
     after_expiry = now + timedelta(seconds=6)
     second = await queue.claim_due(

@@ -16,6 +16,7 @@ import httpx
 from sqlalchemy import select
 
 from xianyu_agent.db import Account, WsCredential, get_async_session
+from xianyu_agent.domain.account.risk import is_user_validate_error
 from xianyu_agent.protocol.signer import (
     APP_KEY,
     CookieSigner,
@@ -140,6 +141,8 @@ class WsTokenProvider:
 
         response, merged_cookie = await self._request_token(cookie, device_id)
         token = _extract_access_token(response)
+        if token is None and is_user_validate_error(_safe_token_error(account_id, response)):
+            raise WsAuthError(_safe_token_error(account_id, response))
         if token is None and extract_mtop_token(merged_cookie) and merged_cookie != cookie:
             response, merged_cookie = await self._request_token(merged_cookie, device_id)
             token = _extract_access_token(response)
@@ -249,9 +252,9 @@ class WsTokenProvider:
             if row is None or _as_utc(row.expires_at) <= datetime.now(UTC):
                 return None
             try:
-                token = self._signer.fernet.decrypt(
-                    row.encrypted_token.encode("utf-8")
-                ).decode("utf-8")
+                token = self._signer.fernet.decrypt(row.encrypted_token.encode("utf-8")).decode(
+                    "utf-8"
+                )
             except Exception as exc:
                 msg = f"账号 {account_id} WS Token 解密失败"
                 raise WsAuthError(msg) from exc

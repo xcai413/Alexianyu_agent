@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.domain import accounts as domain_accounts
+from xianyu_agent.protocol.mtop.endpoints.user_profile import (
+    UserProfileError,
+    XianyuUserProfileClient,
+)
 from xianyu_agent.utils.time_utils import format_local, to_local
 
 app = typer.Typer(help="账号 CRUD(增删改查、启停)。")
@@ -90,6 +95,8 @@ def show_account(
             "status",
             "last_login_at",
             "last_heartbeat_at",
+            "reply_paused_until",
+            "reply_paused_reason",
             "created_at",
         ):
             val = getattr(r, col)
@@ -99,6 +106,79 @@ def show_account(
                 val = to_local(val).isoformat(timespec="seconds")
             table.add_row(col, str(val) if val is not None else "-")
         console.print(table)
+
+    asyncio.run(_run())
+
+
+@app.command("refresh-profile")
+def refresh_profile(
+    account_id: str = typer.Option(..., "--id", "-i"),
+) -> None:
+    """从平台读取该账号的昵称/头像,并把昵称写进本地镜像(只读接口)。
+
+    需要账号已完成扫码登录且 Cookie 里有签名 token;不修改任何平台状态。
+    """
+
+    async def _run() -> None:
+        if await domain_accounts.get_account(account_id) is None:
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        try:
+            profile = await XianyuUserProfileClient().fetch_profile(account_id)
+        except UserProfileError as exc:
+            console.print(f"[red]读取账号资料失败:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+        if profile.nickname:
+            await domain_accounts.set_nickname(account_id, profile.nickname)
+        console.print(
+            f"[green]OK[/green] {account_id} 昵称 {profile.nickname or '-'}"
+            + (f",头像 {profile.avatar_url}" if profile.avatar_url else "")
+        )
+        if profile.nickname is None:
+            console.print("[yellow]平台响应里没有昵称字段,本地值未改动。[/yellow]")
+
+    asyncio.run(_run())
+
+
+@app.command("pause-reply")
+def pause_reply(
+    account_id: str = typer.Option(..., "--id", "-i"),
+    minutes: int = typer.Option(..., "--minutes", "-m", min=1, max=7 * 24 * 60),
+    reason: str = typer.Option("", "--reason", "-r", help="暂停原因(只给运营看)。"),
+) -> None:
+    """暂停该账号的自动回复一段时间;到点自动恢复。
+
+    这是账号级开关,优先于会话状态:风控期间只需停一次,不用逐个会话去关。
+    """
+
+    async def _run() -> None:
+        until = datetime.now(UTC) + timedelta(minutes=minutes)
+        ok = await domain_accounts.set_reply_pause(
+            account_id, until=until, reason=reason or None
+        )
+        if not ok:
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[yellow]OK[/yellow] {account_id} 的自动回复已暂停 {minutes} 分钟,到 "
+            f"{to_local(until).isoformat(timespec='seconds')} 自动恢复。"
+        )
+
+    asyncio.run(_run())
+
+
+@app.command("resume-reply")
+def resume_reply(
+    account_id: str = typer.Option(..., "--id", "-i"),
+) -> None:
+    """立即恢复该账号的自动回复。"""
+
+    async def _run() -> None:
+        ok = await domain_accounts.set_reply_pause(account_id, until=None)
+        if not ok:
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        console.print(f"[green]OK[/green] {account_id} 的自动回复已恢复。")
 
     asyncio.run(_run())
 

@@ -78,6 +78,7 @@ class CredentialPolicy:
             code=code,
             refresh_recommended=refresh_recommended,
             validation_cooling=validation_cooling,
+            validation_revision=validation.revision,
         )
 
     def result_state_for(self, error: CredentialBackendError) -> CredentialResultState:

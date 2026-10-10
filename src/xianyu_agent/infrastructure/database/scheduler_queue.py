@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from xianyu_agent.db import database as legacy_database
@@ -26,8 +27,11 @@ class SqlAlchemyDueQueue:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        *,
+        work_id_prefix: str | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._work_id_prefix = work_id_prefix
 
     def _sessions(self) -> async_sessionmaker[AsyncSession]:
         return self._session_factory or legacy_database.async_session_factory
@@ -52,6 +56,32 @@ class SqlAlchemyDueQueue:
                 )
             )
 
+    async def enqueue_once(
+        self,
+        *,
+        work_id: str,
+        payload: dict[str, object],
+        available_at: datetime,
+    ) -> bool:
+        """Insert deterministic work once, including under competing producers."""
+        if not work_id:
+            raise ValueError("work_id must not be empty")
+        available_at = require_utc(available_at)
+        async with self._sessions()() as session:
+            session.add(
+                SchedulerWork(
+                    work_id=work_id,
+                    payload=dict(payload),
+                    available_at=available_at,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return False
+        return True
+
     async def claim_due(
         self,
         *,
@@ -71,20 +101,26 @@ class SqlAlchemyDueQueue:
         leased_until = now + lease_duration
         claimed: list[LeasedWork] = []
         async with self._sessions()() as session, session.begin():
+            scope = self._scope_clause()
             candidates = (
-                await session.execute(
-                    select(SchedulerWork.work_id)
-                    .where(
-                        SchedulerWork.available_at <= now,
-                        or_(
-                            SchedulerWork.lease_token.is_(None),
-                            SchedulerWork.leased_until <= now,
-                        ),
+                (
+                    await session.execute(
+                        select(SchedulerWork.work_id)
+                        .where(
+                            scope,
+                            SchedulerWork.available_at <= now,
+                            or_(
+                                SchedulerWork.lease_token.is_(None),
+                                SchedulerWork.leased_until <= now,
+                            ),
+                        )
+                        .order_by(SchedulerWork.available_at.asc(), SchedulerWork.work_id.asc())
+                        .limit(limit * 4)
                     )
-                    .order_by(SchedulerWork.available_at.asc(), SchedulerWork.work_id.asc())
-                    .limit(limit * 4)
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
             for work_id in candidates:
                 if len(claimed) >= limit:
@@ -200,6 +236,7 @@ class SqlAlchemyDueQueue:
             expired = (
                 await session.execute(
                     select(SchedulerWork.work_id, SchedulerWork.lease_token).where(
+                        self._scope_clause(),
                         SchedulerWork.lease_token.is_not(None),
                         SchedulerWork.leased_until <= now,
                     )
@@ -242,6 +279,11 @@ class SqlAlchemyDueQueue:
                 )
                 recovered += 1
         return recovered
+
+    def _scope_clause(self):
+        if self._work_id_prefix is None:
+            return SchedulerWork.work_id.is_not(None)
+        return SchedulerWork.work_id.startswith(self._work_id_prefix, autoescape=True)
 
     @staticmethod
     def _to_lease(row: SchedulerWork) -> LeasedWork:

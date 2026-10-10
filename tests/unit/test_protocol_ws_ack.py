@@ -18,9 +18,7 @@ class _Socket:
 
 
 def test_build_ack_frame_preserves_correlation_contract() -> None:
-    frame = WsFrame(
-        headers={"mid": "m-1", "sid": "s-1", "app-key": "app", "ua": "ua", "dt": "j"}
-    )
+    frame = WsFrame(headers={"mid": "m-1", "sid": "s-1", "app-key": "app", "ua": "ua", "dt": "j"})
 
     assert ack.build_ack_frame(frame) == {
         "code": 200,

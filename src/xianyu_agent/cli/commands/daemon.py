@@ -12,12 +12,14 @@ from xianyu_agent.application.health.observability import build_runtime_snapshot
 from xianyu_agent.config import get_settings
 from xianyu_agent.domain import daemon as daemon_domain
 from xianyu_agent.services.daemon_lock import DaemonAlreadyRunningError
-from xianyu_agent.services.logging_setup import redact_text
+from xianyu_agent.services.logging_setup import redact_text, summarize_log_levels
 from xianyu_agent.services.runtime_daemon import run_runtime_daemon
 from xianyu_agent.utils.time_utils import format_duration, format_local
 
 app = typer.Typer(help="常驻 daemon(无时限运行 / 状态 / 停止 / 日志)。")
 console = Console()
+
+
 @app.command("run")
 def run() -> None:
     """前台运行无时限 daemon;Ctrl+C 或 `daemon stop` 有序退出。"""
@@ -39,12 +41,10 @@ def status() -> None:
 
     async def _run() -> None:
         snapshot = await build_runtime_snapshot()
-        row = snapshot.daemon
-        if row is None:
+        if not snapshot.daemon_instances:
             console.print("[dim]尚无 daemon 运行记录。[/dim]")
             return
-        health = snapshot.daemon_health
-        table = Table(title="daemon 状态")
+        table = Table(title=f"daemon 实例 ({len(snapshot.daemon_instances)})")
         table.add_column("instance_id", style="cyan")
         table.add_column("observed")
         table.add_column("db")
@@ -54,19 +54,24 @@ def status() -> None:
         table.add_column("started_at")
         table.add_column("heartbeat")
         table.add_column("age_s")
+        table.add_column("owners", overflow="fold")
         table.add_column("last_error", overflow="fold")
-        table.add_row(
-            row.instance_id[:12],
-            health.observed,
-            row.status,
-            f"{row.pid} ({'alive' if health.process_alive else 'dead' if health.active else 'historical'})",
-            row.version,
-            format_duration(snapshot.daemon_uptime_s),
-            format_local(row.started_at),
-            format_local(row.last_heartbeat_at),
-            f"{health.heartbeat_age_s:.1f}",
-            redact_text(row.last_error or "-"),
-        )
+        for observed in snapshot.daemon_instances:
+            row = observed.instance
+            health = observed.health
+            table.add_row(
+                row.instance_id[:12],
+                health.observed,
+                row.status,
+                str(row.pid),
+                row.version,
+                format_duration(observed.uptime_s),
+                format_local(row.started_at),
+                format_local(row.last_heartbeat_at),
+                f"{health.heartbeat_age_s:.1f}",
+                ",".join(observed.owned_accounts) or "-",
+                redact_text(row.last_error or "-"),
+            )
         console.print(table)
 
         accounts = Table(title=f"账号运行状态 ({len(snapshot.accounts)})")
@@ -76,6 +81,7 @@ def status() -> None:
         accounts.add_column("actual")
         accounts.add_column("aligned")
         accounts.add_column("heartbeat_age_s")
+        accounts.add_column("owner")
         accounts.add_column("last_error", overflow="fold")
         for account in snapshot.accounts:
             accounts.add_row(
@@ -84,9 +90,12 @@ def status() -> None:
                 account.desired_state,
                 account.actual_state,
                 "Y" if account.aligned else "N",
-                f"{account.heartbeat_age_s:.1f}"
-                if account.heartbeat_age_s is not None
-                else "-",
+                f"{account.heartbeat_age_s:.1f}" if account.heartbeat_age_s is not None else "-",
+                (
+                    f"{account.owner_instance_id[:8]}/{account.owner_health or 'missing'}"
+                    if account.owner_instance_id
+                    else "-"
+                ),
                 redact_text(account.last_error or "-"),
             )
         console.print(accounts)
@@ -125,6 +134,7 @@ def restart() -> None:
 @app.command("logs")
 def logs(
     tail: int = typer.Option(100, "--tail", min=1, max=5000, help="显示末尾行数。"),
+    stats: bool = typer.Option(False, "--stats", help="只打印各级别行数统计,不打印正文。"),
 ) -> None:
     """读取 daemon 文件日志,输出前再次脱敏。"""
     path = get_settings().daemon_log_path
@@ -132,5 +142,11 @@ def logs(
         console.print(f"[dim]日志文件不存在:{path}[/dim]")
         return
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if stats:
+        counts = summarize_log_levels(lines)
+        console.print(f"[cyan]日志统计[/cyan] {path} 共 {len(lines)} 行")
+        for level, count in counts.items():
+            console.print(f"  {level}: {count}")
+        return
     for line in lines[-tail:]:
         console.print(redact_text(line), markup=False)

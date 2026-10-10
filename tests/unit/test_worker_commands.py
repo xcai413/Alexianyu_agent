@@ -17,6 +17,7 @@ from xianyu_agent.domain import (
     daemon as daemon_domain,
     worker_commands,
 )
+from xianyu_agent.domain.account import lease as account_lease
 from xianyu_agent.services.daemon_lock import DaemonLock
 from xianyu_agent.services.runtime_daemon import RuntimeDaemon
 
@@ -40,6 +41,9 @@ class CommandPool:
         self.running.add(account_id)
         return "started"
 
+    async def ensure_started_owned(self, account_id: str) -> str:
+        return self.ensure_started(account_id)
+
     async def ensure_stopped(self, account_id: str) -> str:
         self.calls.append(("stop", account_id))
         if account_id not in self.running:
@@ -51,6 +55,9 @@ class CommandPool:
         self.calls.append(("restart", account_id))
         self.running.add(account_id)
         return "restarted"
+
+    async def restart_worker_owned(self, account_id: str) -> str:
+        return await self.restart_worker(account_id)
 
     async def stop_all(self) -> None:
         self.stopped_all += 1
@@ -309,16 +316,39 @@ def test_pool_cli_missing_and_disabled_accounts_fail(control_db: Path) -> None:
     _ = control_db
     asyncio.run(domain_accounts.create_account("disabled", enabled=False))
     runner = CliRunner()
-    missing = runner.invoke(
-        cli_app, ["pool", "start", "--account", "missing", "--wait", "0"]
-    )
+    missing = runner.invoke(cli_app, ["pool", "start", "--account", "missing", "--wait", "0"])
     assert missing.exit_code == 1
     assert "不存在" in missing.output
-    disabled = runner.invoke(
-        cli_app, ["pool", "start", "--account", "disabled", "--wait", "0"]
-    )
+    disabled = runner.invoke(cli_app, ["pool", "start", "--account", "disabled", "--wait", "0"])
     assert disabled.exit_code == 1
     assert "已禁用" in disabled.output
+
+
+def test_pool_cli_approves_and_revokes_takeover(control_db: Path) -> None:
+    _ = control_db
+    asyncio.run(domain_accounts.create_account("a", enabled=True))
+    runner = CliRunner()
+
+    approved = runner.invoke(cli_app, ["pool", "takeover-approve", "--account", "a"])
+    assert approved.exit_code == 0
+    assert "已批准" in approved.output
+    lease = asyncio.run(account_lease.get("a"))
+    assert lease is not None
+    assert lease.takeover_approved_at is not None
+
+    revoked = runner.invoke(cli_app, ["pool", "takeover-revoke", "--account", "a"])
+    assert revoked.exit_code == 0
+    assert "已撤销" in revoked.output
+    lease = asyncio.run(account_lease.get("a"))
+    assert lease is not None
+    assert lease.takeover_approved_at is None
+
+
+def test_pool_cli_takeover_approve_rejects_missing_account(control_db: Path) -> None:
+    _ = control_db
+    result = CliRunner().invoke(cli_app, ["pool", "takeover-approve", "--account", "missing"])
+    assert result.exit_code == 1
+    assert "不存在" in result.output
 
 
 async def _wait_daemon_running() -> None:

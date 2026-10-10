@@ -54,9 +54,7 @@ async def test_account_application_uow_is_consistent_across_backends() -> None:
         assert updated.remark == "after"
 
         assert await application.set_desired_state(account_id, "running")
-        running_ids = {
-            row.account_id for row in await application.list_desired_running_accounts()
-        }
+        running_ids = {row.account_id for row in await application.list_desired_running_accounts()}
         assert account_id in running_ids
 
         assert await application.set_enabled(account_id, False)

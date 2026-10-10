@@ -43,9 +43,17 @@ class Settings(BaseSettings):
     # === 安全 ===
     fernet_key: str = ""  # 首次启动自动生成
 
+    # === Web 管理后台 ===
+    # 仅接受 scrypt 哈希,由 Web 管理员初始化命令生成;绝不保存密码明文。
+    web_admin_password_hash: str = ""
+    web_session_secret: str = ""
+    web_session_ttl_seconds: int = Field(default=28800, ge=300, le=604800)
+    web_cookie_secure: bool = False
+
     # === HTTP API(可选)===
     http_host: str = "127.0.0.1"
     http_port: int = 8089
+    health_server_enabled: bool = False
 
     # === MCP Server ===
     mcp_host: str = "127.0.0.1"
@@ -59,8 +67,43 @@ class Settings(BaseSettings):
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_model: str = ""
-    reply_mode: Literal["rule", "rule_then_ai", "ai"] = "rule"
+    ai_context_max_messages: int = Field(default=6, ge=0, le=50)
+    ai_context_max_age_seconds: int = Field(default=86400, ge=1, le=604800)
+
+    # === 议价保护(0 表示该项未设置)===
+    bargain_minimum_price: float = Field(default=0.0, ge=0)
+    bargain_max_discount_ratio: float = Field(default=0.0, ge=0, le=1)
+    bargain_max_discount_amount: float = Field(default=0.0, ge=0)
+    bargain_max_rounds: int = Field(default=3, ge=0, le=20)
+
+    reply_mode: Literal[
+        "RULE_THEN_AI", "RULE_THEN_DEFAULT", "RULE_DEFAULT_THEN_AI", "AI_ONLY", "RULE_ONLY"
+    ] = "RULE_ONLY"
     automation_mode: Literal["observe", "active"] = "observe"
+    platform_automation_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    # 发货引擎:auto = 有启用的发货策略就走阶段 6,没有就退回旧卡密链路。
+    delivery_engine: Literal["auto", "legacy", "phase6"] = "auto"
+    message_filter_block_patterns: str = ""
+
+    # === 登录态自动续期(无人值守所需,见 docs/目标与冲突决策.md C1)===
+    credential_renewal_enabled: bool = True
+    credential_renewal_interval_seconds: int = Field(default=600, ge=30, le=86400)
+    credential_renewal_force_interval_seconds: int = Field(default=14400, ge=600, le=604800)
+    credential_renewal_lead_hours: int = Field(default=12, ge=1, le=168)
+
+    # === 多副本账号接管 ===
+    takeover_require_approval: bool = False
+    takeover_max_failures: int = Field(default=3, ge=1, le=20)
+
+    # === 平台请求节流(每账号令牌桶,配额内不等待)===
+    platform_rate_per_minute: int = Field(default=30, ge=1, le=600)
+    platform_jitter_ratio: float = Field(default=0.3, ge=0, le=1)
+
+    # === 运维告警(可选,默认关闭)===
+    # 留空表示不发送任何外部通知;填 https 地址后,daemon 会把"待人工处理"的新事项推过去。
+    alert_webhook_url: str = ""
+    alert_webhook_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    alert_interval_seconds: int = Field(default=60, ge=10, le=3600)
 
     # === guardrails ===
     guardrail_max_msg_per_hour: int = 60
@@ -73,6 +116,14 @@ class Settings(BaseSettings):
     def _ensure_data_dir(cls, v: Path) -> Path:
         v.mkdir(parents=True, exist_ok=True)
         return v
+
+    @field_validator("reply_mode", mode="before")
+    @classmethod
+    def _normalize_reply_mode(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        aliases = {"rule": "RULE_ONLY", "ai": "AI_ONLY", "rule_then_ai": "RULE_THEN_AI"}
+        return aliases.get(value.casefold(), value.upper())
 
     @property
     def resolved_db_path(self) -> Path:

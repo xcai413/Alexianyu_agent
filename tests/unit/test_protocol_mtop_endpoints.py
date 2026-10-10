@@ -57,7 +57,12 @@ def test_canonical_endpoints_own_signer_dependency_and_remain_read_only() -> Non
         if not name.startswith("_") and callable(value)
     }
     assert item_public == {"fetch_all_on_sale", "fetch_on_sale_page"}
-    assert order_public == {"fetch_all_sold", "fetch_sold_page"}
+    assert order_public == {
+        "fetch_all_sold",
+        "fetch_sold_page",
+        "fetch_order_info",
+        "fetch_sold_order",
+    }
 
 
 class _ItemsBootstrapSigner:
@@ -89,9 +94,9 @@ async def test_items_bootstrap_set_cookie_merge_survives_migration() -> None:
                 ),
             ]
         )
-        page = await canonical_items.XianyuItemsClient(
-            _ItemsBootstrapSigner()
-        ).fetch_on_sale_page("acc-items")
+        page = await canonical_items.XianyuItemsClient(_ItemsBootstrapSigner()).fetch_on_sale_page(
+            "acc-items"
+        )
         assert route.call_count == 2
 
     assert page.items == []

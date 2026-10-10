@@ -20,9 +20,7 @@ async def cache_test_ws_token(
     """Insert an encrypted, unexpired token so local WS tests stay offline."""
     async with get_async_session() as session:
         account = (
-            await session.execute(
-                select(Account).where(Account.account_id == account_id).limit(1)
-            )
+            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
         ).scalar_one()
         session.add(
             WsCredential(

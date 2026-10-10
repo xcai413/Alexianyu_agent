@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from uuid import uuid4
 
 from .ports.event_bus import EventBus
 from .ports.outbox import OutboxRecord
@@ -49,13 +50,20 @@ class OutboxDispatcher:
         *,
         batch_size: int = 100,
         clock: Clock | None = None,
+        owner: str | None = None,
+        lease_duration: timedelta = timedelta(seconds=60),
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if lease_duration <= timedelta(0):
+            msg = "lease_duration must be positive"
+            raise ValueError(msg)
         self._uow_factory = uow_factory
         self._event_bus = event_bus
         self._batch_size = batch_size
         self._clock = clock or _utcnow
+        self._owner = owner or f"dispatcher-{uuid4().hex[:8]}"
+        self._lease_duration = lease_duration
 
     async def dispatch_once(self) -> DispatchResult:
         """Dispatch at most ``batch_size`` currently pending events."""
@@ -82,20 +90,30 @@ class OutboxDispatcher:
 
     async def _pending_batch(self) -> tuple[OutboxRecord, ...]:
         async with self._uow_factory() as uow:
-            return tuple(await uow.outbox.list_pending(limit=self._batch_size))
+            claimed = await uow.outbox.claim_pending(
+                owner=self._owner,
+                lease_duration=self._lease_duration,
+                limit=self._batch_size,
+                now=self._clock(),
+            )
+            if claimed:
+                # 抢占必须先落库,其他副本才会看到租约;否则两个副本会同时发布同一事件。
+                await uow.commit()
+            return tuple(claimed)
 
     async def _dispatch_one(self, candidate: OutboxRecord) -> DispatchOutcome:
         current = await self._reload_pending(candidate.event_id)
         if current is None:
+            await self._release_claim(candidate.event_id, candidate.lease_token)
             return DispatchOutcome.SKIPPED
 
         try:
             await self._event_bus.publish(current)
         except Exception as exc:
-            await self._record_failure(current.event_id, exc)
+            await self._record_failure(current.event_id, exc, candidate.lease_token)
             return DispatchOutcome.FAILED
 
-        await self._mark_published(current.event_id)
+        await self._mark_published(current.event_id, candidate.lease_token)
         return DispatchOutcome.PUBLISHED
 
     async def _reload_pending(self, event_id: str) -> OutboxRecord | None:
@@ -105,22 +123,46 @@ class OutboxDispatcher:
             return None
         return current
 
-    async def _record_failure(self, event_id: str, exc: Exception) -> None:
+    async def _release_claim(self, event_id: str, lease_token: str | None) -> None:
+        if lease_token is None:  # pragma: no cover - claim 一定带 token
+            return
         async with self._uow_factory() as uow:
-            current = await uow.outbox.get_by_event_id(event_id)
-            if current is None or current.published_at is not None:
-                return
-            changed = await uow.outbox.record_failure(event_id, error=_safe_error(exc))
+            changed = await uow.outbox.release_claim(event_id, lease_token=lease_token)
             if changed:
                 await uow.commit()
 
-    async def _mark_published(self, event_id: str) -> None:
+    async def _record_failure(self, event_id: str, exc: Exception, lease_token: str | None) -> None:
         async with self._uow_factory() as uow:
             current = await uow.outbox.get_by_event_id(event_id)
             if current is None or current.published_at is not None:
+                await uow.outbox.release_claim(event_id, lease_token=lease_token or "")
+                await uow.commit()
                 return
-            changed = await uow.outbox.mark_published(event_id, published_at=self._clock())
+            changed = await uow.outbox.record_failure(
+                event_id, error=_safe_error(exc), lease_token=lease_token
+            )
             if changed:
+                await uow.commit()
+            elif lease_token is not None:
+                # 租约已不在我们手里(别的 worker 已处理),不要让记录停在占用态。
+                await uow.outbox.release_claim(event_id, lease_token=lease_token)
+                await uow.commit()
+
+    async def _mark_published(self, event_id: str, lease_token: str | None) -> None:
+        async with self._uow_factory() as uow:
+            current = await uow.outbox.get_by_event_id(event_id)
+            if current is None or current.published_at is not None:
+                if lease_token is not None:
+                    await uow.outbox.release_claim(event_id, lease_token=lease_token)
+                    await uow.commit()
+                return
+            changed = await uow.outbox.mark_published(
+                event_id, published_at=self._clock(), lease_token=lease_token
+            )
+            if changed:
+                await uow.commit()
+            elif lease_token is not None:
+                await uow.outbox.release_claim(event_id, lease_token=lease_token)
                 await uow.commit()
 
 

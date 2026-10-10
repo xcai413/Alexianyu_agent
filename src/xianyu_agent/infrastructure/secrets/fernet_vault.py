@@ -20,6 +20,7 @@ from xianyu_agent.db import database as legacy_database
 from xianyu_agent.infrastructure.database.models.secret import SecretRecord
 
 _MASTER_KEY_ENV = "XIANYU_SECRET_MASTER_KEY"
+_LEGACY_FERNET_KEY_ENV = "XIANYU_FERNET_KEY"
 _MASTER_KEY_VERSION_ENV = "XIANYU_SECRET_MASTER_KEY_VERSION"
 _PREVIOUS_KEYS_ENV = "XIANYU_SECRET_PREVIOUS_KEYS"
 _SECRET_ENVELOPE_VERSION = 1
@@ -70,9 +71,13 @@ class FernetKeyring:
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> FernetKeyring:
         """Load active/legacy master keys without logging or persisting key material."""
         source = os.environ if environ is None else environ
-        active_key = source.get(_MASTER_KEY_ENV)
+        # 既有部署只有 XIANYU_FERNET_KEY。允许它作为 SecretVault 的安全兼容
+        # 后备,避免升级后必须立刻迁移密钥;新部署仍可用独立 master key 做隔离。
+        active_key = source.get(_MASTER_KEY_ENV) or source.get(_LEGACY_FERNET_KEY_ENV)
         if not active_key:
-            raise MissingMasterKeyError(f"{_MASTER_KEY_ENV} is required")
+            raise MissingMasterKeyError(
+                f"{_MASTER_KEY_ENV} is required (or legacy {_LEGACY_FERNET_KEY_ENV})"
+            )
 
         active_version = source.get(_MASTER_KEY_VERSION_ENV, "v1")
         keys: dict[str, str | bytes] = {active_version: active_key}
@@ -196,7 +201,9 @@ class SqlAlchemySecretVault:
 
     async def configured(self, ref: SecretRef) -> bool:
         async with self._sessions()() as session:
-            value = await session.scalar(select(SecretRecord.ref).where(SecretRecord.ref == ref.value))
+            value = await session.scalar(
+                select(SecretRecord.ref).where(SecretRecord.ref == ref.value)
+            )
         return value is not None
 
     async def rotate(self, ref: SecretRef) -> bool:

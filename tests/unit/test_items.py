@@ -92,9 +92,7 @@ async def test_fetch_all_follows_pages_until_short_page() -> None:
         ]
     )
     with router:
-        snapshot = await XianyuItemsClient(FakeSigner()).fetch_all_on_sale(
-            "acc-items", page_size=2
-        )
+        snapshot = await XianyuItemsClient(FakeSigner()).fetch_all_on_sale("acc-items", page_size=2)
     assert route is not None
     assert snapshot.pages == 2
     assert [item.item_id for item in snapshot.items] == ["I-1", "I-2", "I-3"]
@@ -125,7 +123,12 @@ async def test_apply_complete_snapshot_marks_missing_item_off_sale(clean_db) -> 
         [RemoteItem("I-2", "商品二改价", "18.8", "1", None, None, None, None, {"id": "I-2"})],
         synced_at=at,
     )
-    assert (result2.total, result2.created, result2.updated, result2.marked_off_sale) == (1, 0, 1, 1)
+    assert (result2.total, result2.created, result2.updated, result2.marked_off_sale) == (
+        1,
+        0,
+        1,
+        1,
+    )
     current = await domain_items.list_items("acc-items")
     assert [item.item_id for item in current] == ["I-2"]
     all_items = await domain_items.list_items("acc-items", on_sale_only=False)
@@ -162,3 +165,20 @@ async def test_item_model_is_queryable(clean_db) -> None:
     assert got.item_id == "I-1"
     assert await domain_items.get_item(99999) is None
     assert isinstance(got, Item)
+
+
+@pytest.mark.asyncio
+async def test_local_item_catalog_update_and_archive_never_need_platform_io(clean_db) -> None:
+    await domain_items.apply_on_sale_snapshot(
+        "acc-items",
+        [RemoteItem("I-1", "商品一", "9.9", "1", None, None, None, None, {"id": "I-1"})],
+    )
+    updated = await domain_items.update_local_item(
+        "acc-items", "I-1", title="本地标题", price="12.50", stock=3
+    )
+    assert updated is not None
+    assert (updated.title, str(updated.price), updated.stock) == ("本地标题", "12.50", 3)
+    assert await domain_items.archive_local_item("acc-items", "I-1") is True
+    archived = await domain_items.get_item_by_external_id("acc-items", "I-1")
+    assert archived is not None
+    assert archived.is_on_sale is False

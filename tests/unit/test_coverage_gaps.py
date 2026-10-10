@@ -522,9 +522,28 @@ def test_cli_message_send_offline_fails(tmp_path: Path, monkeypatch: pytest.Monk
     asyncio.run(domain_accounts.create_account("acc-1", enabled=True))
 
     runner = CliRunner()
-    result = runner.invoke(
+    # 没有 --yes 会先被门禁拒绝(见 test_send_refuses_without_explicit_confirmation),
+    # 这条用例要验证的是"已确认但账号离线"时的干净失败。
+    refused = runner.invoke(
         cli_app,
         ["message", "send", "--account", "acc-1", "--chat-id", "c1", "--text", "在吗"],
+    )
+    assert refused.exit_code == 1
+    assert "--yes" in refused.output
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "message",
+            "send",
+            "--account",
+            "acc-1",
+            "--chat-id",
+            "c1",
+            "--text",
+            "在吗",
+            "--yes",
+        ],
     )
     assert result.exit_code == 1
     assert "未连接" in result.output

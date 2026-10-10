@@ -59,7 +59,15 @@ async def fake_ws_server():
         {
             "code": 0,
             "headers": {"mid": "push-1", "sid": "session-1"},
-            "body": {"syncPushPackage": {"data": [{"data": "eyIxIjp7IjIiOiJjaGF0LWludEBnb29maXNoIiwiNSI6MTcwMDAwMDAwMDAwMCwiMTAiOnsic2VuZGVyVXNlcklkIjoiYi0xIiwic2VuZGVyTmljayI6IuS5sOWutuWQjeensCIsInJlbWluZGVyQ29udGVudCI6IuS5sOWutuWPlumUpSIsImJpelRhZyI6IntcIm1lc3NhZ2VJZFwiOlwiSU5ULTFcIixcIml0ZW1JZFwiOlwiSS0xXCJ9In19fQ=="}]}},
+            "body": {
+                "syncPushPackage": {
+                    "data": [
+                        {
+                            "data": "eyIxIjp7IjIiOiJjaGF0LWludEBnb29maXNoIiwiNSI6MTcwMDAwMDAwMDAwMCwiMTAiOnsic2VuZGVyVXNlcklkIjoiYi0xIiwic2VuZGVyTmljayI6IuS5sOWutuWQjeensCIsInJlbWluZGVyQ29udGVudCI6IuS5sOWutuWPlumUpSIsImJpelRhZyI6IntcIm1lc3NhZ2VJZFwiOlwiSU5ULTFcIixcIml0ZW1JZFwiOlwiSS0xXCJ9In19fQ=="
+                        }
+                    ]
+                }
+            },
         },
         {
             "code": 0,
@@ -136,7 +144,9 @@ async def test_client_connects_parses_and_persists(fake_ws_server, tmp_path, mon
     assert decoded[1]["code"] == 200
     assert decoded[2]["lwp"] == "/r/SyncStatus/ackDiff"
     assert any(message.get("code") == 200 for message in decoded)
-    assert any(frame.headers.get("mid") == decoded[0]["headers"]["mid"] for frame in received_frames)
+    assert any(
+        frame.headers.get("mid") == decoded[0]["headers"]["mid"] for frame in received_frames
+    )
     assert any(isinstance(e, MessageReceived) for e in received_events), f"events={received_events}"
     assert any(isinstance(e, OrderPaid) for e in received_events), f"events={received_events}"
     async with get_async_session() as session:

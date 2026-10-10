@@ -9,7 +9,7 @@
 | `auth login --account <id> --cookie "<串>"` | 建账号并加密存 Cookie(Fernet) |
 | `auth qr-login --account <id> [--timeout] [--qr-out]` | 扫码登录:生成二维码(终端 ASCII + PNG)→ 轮询 → 加密保存 Cookie → 强制换取并缓存 IM token;token 失败退出码 3 |
 | `auth status --account <id>` | 脱敏 Cookie/IM token/设备 ID/过期状态;不输出完整身份与凭据 |
-| `auth refresh --account <id>` | 用当前 Cookie 换取并加密缓存 IM accessToken;Worker 运行时拒绝 |
+| `auth refresh --account <id> [--probe-timeout]` | 用当前 Cookie 换取并加密缓存 IM accessToken;风控恢复时额外建立被动 WebSocket 会话探针;Worker 运行时拒绝 |
 | `auth list` | 账号列表 |
 | `auth show/enable/disable/delete --account <id>` | 管理 |
 
@@ -64,19 +64,37 @@
 - `--wait 0` 只提交不等待,输出会明确标注“未等待执行”。
 - `pool status` 显示 `enabled`、`desired` 与数据库实际状态;CLI 进程不再伪造内存 Worker 状态。
 - `FAIL_SYS_USER_VALIDATE` 时，`pool status` 额外显示风险代码和冷却截止；`pool start/restart`
-  会拒绝该账号，直到一次成功的 `auth refresh` 解除人工恢复闸门。
+  会拒绝该账号，直到一次成功的 `auth refresh` 完成真实会话探针并解除人工恢复闸门。
 
 ### IM 人工验证熔断
 
 当 `auth refresh`、扫码后的 IM Token 校验或后台 Worker 收到
-`FAIL_SYS_USER_VALIDATE` 时，系统只做本地保护：停止该账号的期望 Worker、记录 20 分钟冷却和
+`FAIL_SYS_USER_VALIDATE` 时，系统只做本地保护：停止该账号的期望 Worker、按连续命中次数记录冷却和
 审计事件，不刷新 Cookie、不改 device ID、不改请求头、不更换网络。冷却内 `auth refresh` 会直接
 拒绝且不请求远端；冷却结束后管理员在闲鱼 App 完成人工验证，再执行一次：
+
+当前冷却依次为 60、180、300、600、1200 秒，以 `auth status` 显示的截止时间为准。
+恢复命令的 `--probe-timeout` 默认 45 秒，覆盖凭据刷新和订阅验证；失败后保留风控闸门。
+
+普通商品、订单及运营 MTOP 请求在请求前检查持久化人工恢复标记;冷却到期或进程重启不解除暂停。
+响应中的明确风控错误也会打开该标记;bootstrap 不因同时收到签名 Cookie 而继续重试。
+恢复探针只有在连接清理成功后才记录成功。清理失败返回非零,重新打开 `RECOVERY_CLEANUP_FAILED`
+闸门,不主动释放恢复租约,并保留本进程的账号文件锁直到进程退出。数据库租约仍遵循原 TTL
+和接管冷却规则,不是永久锁;人工应先确认原恢复进程已退出,再检查占用及决定后续恢复。
+清理阶段有独立 10 秒截止时间;超时不会等待不响应取消的清理任务。恢复期间每 20 秒续租,
+清理未确认时保留后台续租任务至恢复进程退出;续租失败或所有权丢失则中止探测并封闭闸门。
+每次打开风控都有独立 `risk_revision`;Token 准备结果和会话确认绑定同一版本,
+数据库按版本原子清闸。缺少版本、版本已更新或没有准备记录时均拒绝确认。
+本次增加迁移 `71c9f03a4e62`;部署前备份数据库并执行 `uv run alembic upgrade head`,
+不要在真实 soak 运行期间升级或重启。
+`auth status` 的 `cookie_digest` 是凭证摘要,可与 `credential_cookie_saved` 审计比对更新情况,
+不表示平台验证成功或 Token 已采用该凭证。Cookie 保存会使旧 IM Token 失效,不会清除风控标记。
 
     uv run xianyu-agent auth refresh --account <id>
     uv run xianyu-agent auth status --account <id>
 
-只有 `ws_token_valid=Y` 且刷新命令成功后，`pool start --account <id>` 才会解除阻断并可运行。
+只有真实会话探针进入 `ONLINE` 且刷新命令成功后，`pool start --account <id>` 才会解除阻断并可运行。
+仅 `ws_token_valid=Y` 不再单独证明账号已恢复。
 
 ### daemon — P0.1 常驻运行(当前可用)
 
@@ -125,6 +143,9 @@ P0.2 已完成:daemon 进程级控制与 `pool` 账号级控制已分离。
 
 capture 未连接或未达到目标消息数返回退出码 2;收到消息但必需字段缺失返回退出码 3;
 只有目标达到且字段完整时返回 0。
+一次 capture 必须对应一个 `--output` 文件:文件里只能有一个 summary,而 `capture-verify`
+会用该 summary 的计数与整份文件交叉核对。文件已存在且非空时 capture 直接拒绝(退出码 1),
+请换一个路径或先删除该文件,不要把两次捕获追加进同一个文件。
 
 `protocol capture-verify --fixture data/captures/<file>.jsonl` 离线复核 summary、目标消息、
 字段完整性、重复事件、错误和常见敏感字段明文;通过返回 0,不通过返回 1。
@@ -148,9 +169,11 @@ Windows Watchdog 每分钟采样;进度保存在 `task_logs`,原始脱敏样本�
 
 ## MCP Server
 
-启动:`xianyu-agent mcp serve`(默认 `127.0.0.1:8090`,SSE 端点 `/sse`)
+启动:`xianyu-agent mcp serve`(默认 `127.0.0.1:8090`,SSE 端点 `/mcp`,兼容历史 `/sse`入口)
 
-由 FastAPI 端点自动生成的 tools(operation_id):
+tools 由 FastAPI 端点自动生成(2026-09-21 实测 **103 个**;每加一个路由数字都会变,这里以实测为准),分两批:
+
+**Agent API(`/api/v1/*`,无鉴权)** — Agent 直接可用,也是默认给 Codex 的那批:
 
 | 工具 | 说明 |
 |------|------|
@@ -159,13 +182,20 @@ Windows Watchdog 每分钟采样;进度保存在 `task_logs`,原始脱敏样本�
 | `auth_login` / `auth_status` | Cookie 录入 / 指纹 |
 | `message_list` | 最近消息 |
 | `item_sync` / `item_list` / `item_get` | 只读在售商品同步 / 本地镜像查询 |
+| `item_lifecycle_plan` | 生命周期 Dry Run(只读预览) |
 | `order_sync` / `order_list` / `order_get` | 只读订单同步 / 订单 |
 | `rule_create` / `rule_list` / `rule_set_enabled` / `rule_delete` / `rule_test` | 规则 |
 | `card_create` / `card_list` / `card_restock` / `card_consume` / `card_set_enabled` / `card_delete` | 卡密 |
 | `maintenance_purge_messages` | 消息清理 |
 | `pool_status` | 账号池状态 |
 
-daemon/service 的 MCP tools 尚未实现;只有账号级跨进程控制通过真实验收后才会暴露。
+**Web 管理 API(`/api/v1/web/*`、`/api/v1/dashboard/*`)** — 同样出现在 tools 列表里,但每条都要求
+管理员会话(部分还要求 CSRF)。Agent 要调用它们必须先通过 `login` 工具拿到会话 Cookie,否则会收到 401/403。
+这条边界由 `tests/unit/test_api_auth_boundary.py` 固化:管理端点缺会话依赖、或 Agent 前缀混进管理路径,
+CI 都会失败。
+
+daemon/service 的总控制面目前通过 Web 管理端点或 CLI 提供;`mcp serve` 绑定地址由 `XIANYU_MCP_HOST`
+决定,默认 `127.0.0.1`。**绑定到非本机地址时 `doctor` 会给出 WARN**——因为这批端点没有鉴权。
 
 Codex 接入示例(`~/.codex/config.toml` 或桌面端 MCP 配置):
 

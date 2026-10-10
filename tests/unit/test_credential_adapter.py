@@ -114,7 +114,11 @@ async def test_legacy_backend_preserves_force_refresh_behavior() -> None:
         ),
         ("WS Token 网络请求失败(ReadTimeout)", CredentialFailureCode.NETWORK_ERROR, True),
         ("账号 account-1 无可用 Cookie", CredentialFailureCode.CREDENTIAL_MISSING, False),
-        ("账号 account-1 Cookie 缺少 unb,请重新扫码登录", CredentialFailureCode.IDENTITY_MISSING, False),
+        (
+            "账号 account-1 Cookie 缺少 unb,请重新扫码登录",
+            CredentialFailureCode.IDENTITY_MISSING,
+            False,
+        ),
         ("FAIL_SYS_SESSION_EXPIRED", CredentialFailureCode.SESSION_EXPIRED, False),
         ("账号 account-1 不存在", CredentialFailureCode.ACCOUNT_NOT_FOUND, False),
         ("unknown auth failure", CredentialFailureCode.AUTH_FAILED, False),
@@ -145,9 +149,7 @@ async def test_legacy_backend_classifies_transient_http_failures_as_retryable(
     status_code: int,
 ) -> None:
     provider = FakeProvider()
-    provider.error = WsAuthError(
-        f"账号 {ACCOUNT_ID} WS Token 请求失败(HTTP {status_code})"
-    )
+    provider.error = WsAuthError(f"账号 {ACCOUNT_ID} WS Token 请求失败(HTTP {status_code})")
     backend = LegacyWsCredentialBackend(
         signer=FakeSigner({"has_unb": True}),
         provider=provider,
@@ -158,7 +160,9 @@ async def test_legacy_backend_classifies_transient_http_failures_as_retryable(
 
     assert caught.value.code is CredentialFailureCode.NETWORK_ERROR
     assert caught.value.retryable_hint is True
-    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+    assert (
+        CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+    )
 
 
 async def test_non_json_transient_http_failure_remains_retryable() -> None:
@@ -175,7 +179,9 @@ async def test_non_json_transient_http_failure_remains_retryable() -> None:
 
     assert caught.value.code is CredentialFailureCode.NETWORK_ERROR
     assert caught.value.retryable_hint is True
-    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+    assert (
+        CredentialPolicy().result_state_for(caught.value) is CredentialResultState.RETRYABLE_FAILURE
+    )
 
 
 async def test_non_transient_http_auth_failure_stays_terminal() -> None:
@@ -191,14 +197,14 @@ async def test_non_transient_http_auth_failure_stays_terminal() -> None:
 
     assert caught.value.code is CredentialFailureCode.AUTH_FAILED
     assert caught.value.retryable_hint is False
-    assert CredentialPolicy().result_state_for(caught.value) is CredentialResultState.TERMINAL_FAILURE
+    assert (
+        CredentialPolicy().result_state_for(caught.value) is CredentialResultState.TERMINAL_FAILURE
+    )
 
 
 async def test_legacy_backend_does_not_propagate_raw_secret_error_text() -> None:
     provider = FakeProvider()
-    provider.error = WsAuthError(
-        "FAIL_SYS_USER_VALIDATE cookie=secret-cookie token=secret-token"
-    )
+    provider.error = WsAuthError("FAIL_SYS_USER_VALIDATE cookie=secret-cookie token=secret-token")
     backend = LegacyWsCredentialBackend(
         signer=FakeSigner({"has_unb": True}),
         provider=provider,
@@ -220,6 +226,7 @@ async def test_validation_gate_maps_legacy_risk_without_worker_state() -> None:
         detected_at=now,
         cooldown_until=now + timedelta(minutes=5),
         recovery_required=True,
+        revision="test-revision",
     )
     opened: list[str] = []
     cleared: list[str] = []
@@ -232,7 +239,8 @@ async def test_validation_gate_maps_legacy_risk_without_worker_state() -> None:
         opened.append(account_id)
         return circuit
 
-    async def clear_circuit(account_id: str) -> bool:
+    async def clear_circuit(account_id: str, *, expected_revision: str) -> bool:
+        assert expected_revision == "test-revision"
         cleared.append(account_id)
         return True
 
@@ -244,7 +252,7 @@ async def test_validation_gate_maps_legacy_risk_without_worker_state() -> None:
 
     status = await gate.inspect(ACCOUNT_ID)
     await gate.mark_needs_validation(ACCOUNT_ID)
-    did_clear = await gate.clear_after_refresh(ACCOUNT_ID)
+    did_clear = await gate.clear_after_refresh(ACCOUNT_ID, expected_revision=status.revision)
 
     assert status.required is True
     assert status.cooling is True

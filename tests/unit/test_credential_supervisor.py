@@ -62,7 +62,8 @@ class FakeValidationGate:
         *,
         clear_succeeds: bool = True,
     ) -> None:
-        self.status = status or ValidationStatus(account_id=ACCOUNT_ID, required=False)
+        current = status or ValidationStatus(account_id=ACCOUNT_ID, required=False)
+        self.status = replace(current, revision=current.revision or "test-revision")
         self.clear_succeeds = clear_succeeds
         self.mark_calls = 0
         self.clear_calls = 0
@@ -81,9 +82,11 @@ class FakeValidationGate:
             code=CredentialFailureCode.NEEDS_VALIDATION.value,
         )
 
-    async def clear_after_refresh(self, account_id: str) -> bool:
+    async def clear_after_refresh(self, account_id: str, *, expected_revision=None) -> bool:
         assert account_id == ACCOUNT_ID
         self.clear_calls += 1
+        if expected_revision != self.status.revision:
+            return False
         if not self.clear_succeeds:
             return False
         was_required = self.status.required
@@ -248,7 +251,9 @@ async def test_exception_path_releases_refresh_lock() -> None:
     assert second.state is CredentialResultState.SUCCESS
 
 
-async def test_validation_recovery_requires_cooldown_to_finish_and_clears_gate() -> None:
+async def test_validation_recovery_requires_cooldown_and_preserves_gate_until_confirmation() -> (
+    None
+):
     backend = FakeBackend(_status(token_cached=False))
     validation = FakeValidationGate(
         ValidationStatus(
@@ -268,7 +273,14 @@ async def test_validation_recovery_requires_cooldown_to_finish_and_clears_gate()
     recovered = await supervisor.refresh(ACCOUNT_ID, validation_recovery=True)
 
     assert recovered.state is CredentialResultState.SUCCESS
-    assert recovered.health.state is CredentialHealthState.HEALTHY
+    assert recovered.health.state is CredentialHealthState.NEEDS_VALIDATION
+    assert validation.clear_calls == 0
+    assert (
+        await supervisor.confirm_recovered(
+            ACCOUNT_ID, expected_revision=recovered.validation_revision
+        )
+        is True
+    )
     assert validation.clear_calls == 1
     assert backend.acquire_calls == [True]
 
@@ -288,10 +300,49 @@ async def test_validation_recovery_stays_blocked_when_gate_does_not_clear() -> N
 
     result = await supervisor.refresh(ACCOUNT_ID, validation_recovery=True)
 
-    assert result.state is CredentialResultState.NEEDS_VALIDATION
+    assert result.state is CredentialResultState.SUCCESS
     assert result.health.state is CredentialHealthState.NEEDS_VALIDATION
+    assert validation.clear_calls == 0
+    assert (
+        await supervisor.confirm_recovered(ACCOUNT_ID, expected_revision=result.validation_revision)
+        is False
+    )
     assert validation.clear_calls == 1
     assert backend.acquire_calls == [True]
+
+
+@pytest.mark.parametrize("defer_clear", [True, False])
+async def test_validation_recovery_never_clears_gate_without_live_session_confirmation(
+    defer_clear: bool,
+) -> None:
+    backend = FakeBackend(_status(token_cached=False))
+    validation = FakeValidationGate(
+        ValidationStatus(
+            account_id=ACCOUNT_ID,
+            required=True,
+            cooling=False,
+            code=CredentialFailureCode.NEEDS_VALIDATION.value,
+        )
+    )
+    supervisor = _supervisor(backend, validation)
+
+    recovered = await supervisor.refresh(
+        ACCOUNT_ID,
+        validation_recovery=True,
+        defer_validation_clear=defer_clear,
+    )
+
+    assert recovered.state is CredentialResultState.SUCCESS
+    assert validation.clear_calls == 0
+    assert validation.status.required is True
+    assert (
+        await supervisor.confirm_recovered(
+            ACCOUNT_ID, expected_revision=recovered.validation_revision
+        )
+        is True
+    )
+    assert validation.clear_calls == 1
+    assert validation.status.required is False
 
 
 async def test_result_repr_never_contains_credential_material() -> None:
@@ -301,3 +352,29 @@ async def test_result_repr_never_contains_credential_material() -> None:
     assert "super-secret-access-token" not in repr(result)
     assert result.credential is not None
     assert "super-secret-access-token" not in repr(result.credential)
+
+
+async def test_old_confirmation_cannot_clear_new_risk_or_use_new_refresh_receipt() -> None:
+    backend = FakeBackend(_status(token_cached=False))
+    gate = FakeValidationGate(
+        ValidationStatus(account_id=ACCOUNT_ID, required=True, revision="old")
+    )
+    supervisor = _supervisor(backend, gate)
+    assert await supervisor.confirm_recovered(ACCOUNT_ID, expected_revision="old") is False
+    old = await supervisor.refresh(ACCOUNT_ID, validation_recovery=True)
+    assert await supervisor.confirm_recovered(ACCOUNT_ID) is False
+    gate.status = replace(gate.status, revision="new")
+    assert (
+        await supervisor.confirm_recovered(ACCOUNT_ID, expected_revision=old.validation_revision)
+        is False
+    )
+    assert gate.status.required
+    fresh = await supervisor.refresh(ACCOUNT_ID, validation_recovery=True)
+    assert (
+        await supervisor.confirm_recovered(ACCOUNT_ID, expected_revision=old.validation_revision)
+        is False
+    )
+    assert (
+        await supervisor.confirm_recovered(ACCOUNT_ID, expected_revision=fresh.validation_revision)
+        is True
+    )

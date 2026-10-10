@@ -62,6 +62,8 @@ class QrAccountStore(Protocol):
 class QrCookieStore(Protocol):
     async def save_cookie(self, account_id: str, cookie: str) -> bool: ...
 
+    async def save_cookie_snapshot(self, account_id: str, snapshot: object) -> bool: ...
+
 
 class QrCredentialValidator(Protocol):
     async def refresh(
@@ -164,8 +166,8 @@ class QrLoginApplication:
     ) -> QrLoginResult:
         """Wait for confirmation, persist the Cookie, then validate credentials.
 
-        ``validation_recovery=True`` is intentional: the already-established
-        CredentialSupervisor remains authoritative for persisted validation cooldowns.
+        QR confirmation saves credentials but does not prove IM subscription readiness.
+        A persisted validation gate requires the separate live-session recovery probe.
         This flow never follows verification URLs or attempts to bypass platform risk
         controls.
         """
@@ -237,10 +239,14 @@ class QrLoginApplication:
                 "success",
                 message="QR login Cookie could not be persisted",
             )
+        save_snapshot = getattr(self._cookies, "save_cookie_snapshot", None)
+        snapshot = getattr(session, "cookie_snapshot", None)
+        if callable(save_snapshot) and snapshot:
+            await save_snapshot(challenge.account_id, snapshot)
 
         credential = await self._credentials.refresh(
             challenge.account_id,
-            validation_recovery=True,
+            validation_recovery=False,
         )
         return self._credential_result(challenge, "success", credential)
 

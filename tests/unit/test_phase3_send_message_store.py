@@ -67,9 +67,7 @@ async def test_service_resolves_receiver_from_canonical_store_before_write() -> 
 
     assert result.status is SendAttemptStatus.SUCCESS
     assert result.receiver_id == "buyer-42"
-    assert protocol.calls == [
-        {"chat_id": "chat-1", "receiver_id": "buyer-42", "text": "hello"}
-    ]
+    assert protocol.calls == [{"chat_id": "chat-1", "receiver_id": "buyer-42", "text": "hello"}]
     assert len(recorder.attempts) == 1
     assert len(store.persisted) == 1
     assert len(recorder.results) == 1

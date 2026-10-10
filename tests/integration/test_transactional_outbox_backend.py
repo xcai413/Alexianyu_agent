@@ -38,7 +38,10 @@ def _assert_identifier_width_validation() -> None:
         "occurred_at": datetime.now(UTC),
     }
     boundary = "x" * 64
-    assert OutboxEvent(**base, correlation_id=boundary, causation_id=boundary).correlation_id == boundary
+    assert (
+        OutboxEvent(**base, correlation_id=boundary, causation_id=boundary).correlation_id
+        == boundary
+    )
 
     with pytest.raises(ValueError, match="CorrelationId must not exceed 64 characters"):
         OutboxEvent(**base, correlation_id="x" * 65)

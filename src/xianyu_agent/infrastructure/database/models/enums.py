@@ -91,4 +91,5 @@ class AuditActor(StrEnum):
     MCP = "mcp"
     SKILL = "skill"
     TUI = "tui"
+    WEB = "web"
     SYSTEM = "system"

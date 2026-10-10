@@ -16,12 +16,13 @@ console = Console()
 
 def doctor(
     output: str = typer.Option("table", "--output", "-o", help="table 或 json。"),
+    startup: bool = typer.Option(False, "--startup", help="容器启动前检查;允许 Worker 启动窗口。"),
 ) -> None:
-    """检查数据库、迁移、密钥、Cookie、日志、daemon 与任务计划。"""
+    """检查数据库、迁移、密钥、Cookie、日志、daemon、任务计划与自动化配置一致性。"""
     if output not in {"table", "json"}:
         console.print("[red]--output 只支持 table 或 json。[/red]")
         raise typer.Exit(code=2)
-    report = asyncio.run(run_doctor())
+    report = asyncio.run(run_doctor(startup=True) if startup else run_doctor())
     if output == "json":
         console.print_json(json.dumps(_as_dict(report), ensure_ascii=False))
     else:
@@ -46,9 +47,7 @@ def _print_table(report: DoctorReport) -> None:
         )
     console.print(table)
     counts = report.counts
-    console.print(
-        f"结果:PASS={counts['pass']} WARN={counts['warn']} FAIL={counts['fail']}"
-    )
+    console.print(f"结果:PASS={counts['pass']} WARN={counts['warn']} FAIL={counts['fail']}")
 
 
 def _as_dict(report: DoctorReport) -> dict[str, object]:

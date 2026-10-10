@@ -6,6 +6,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
+
+from xianyu_agent.db import Account, Conversation, get_async_session
 from xianyu_agent.domain.events import MessageContentType, MessageSent
 from xianyu_agent.domain.message import messages as domain_messages
 
@@ -16,6 +19,12 @@ class DomainMessageStore:
     """Resolve peer identity and persist confirmed outbound messages."""
 
     async def resolve_receiver(self, *, account_id: str, chat_id: str) -> str | None:
+        conversation = await domain_messages.get_conversation(
+            account_id=account_id,
+            chat_id=chat_id,
+        )
+        if conversation is not None and _is_known_party(conversation.buyer_id):
+            return conversation.buyer_id.strip()
         rows = await domain_messages.list_recent(
             account_id=account_id,
             chat_id=chat_id,
@@ -25,12 +34,34 @@ class DomainMessageStore:
         if not rows:
             return None
         sender_id = rows[0].sender_id
-        if not isinstance(sender_id, str):
-            return None
-        receiver_id = sender_id.strip()
-        if not receiver_id or receiver_id.casefold() == _UNKNOWN_SENDER_ID:
-            return None
-        return receiver_id
+        return sender_id.strip() if _is_known_party(sender_id) else None
+
+    async def resolve_conversation_id(
+        self, *, account_id: str, buyer_id: str
+    ) -> str | None:
+        """按买家反查会话 id;发货时只有订单里的买家标识,没有 chat_id。
+
+        同一账号同一买家只取最近一条会话。查不到说明这个买家还没发过消息,
+        此时宁可让调用方停下来,也不要猜一个 chat id 去发图。
+        """
+        async with get_async_session() as session:
+            account = (
+                await session.execute(
+                    select(Account).where(Account.account_id == account_id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if account is None:
+                return None
+            row = await session.scalar(
+                select(Conversation)
+                .where(
+                    Conversation.account_id == account.id,
+                    Conversation.buyer_id == buyer_id,
+                )
+                .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.id.desc())
+                .limit(1)
+            )
+        return None if row is None else row.external_conversation_id
 
     async def record_outbound(
         self,
@@ -41,6 +72,7 @@ class DomainMessageStore:
         text: str,
         client_message_id: str | None,
         response: Any,
+        content_type: str = MessageContentType.TEXT.value,
     ) -> None:
         platform_message_id = _platform_message_id(response)
         if platform_message_id is None:
@@ -57,7 +89,7 @@ class DomainMessageStore:
                 chat_id=chat_id,
                 message_id=platform_message_id,
                 receiver_id=receiver_id,
-                content_type=MessageContentType.TEXT,
+                content_type=MessageContentType(content_type),
                 content=text,
             )
         )
@@ -76,3 +108,11 @@ def _platform_message_id(response: Any) -> str | None:
         return None
     message_id = str(value).strip()
     return message_id or None
+
+
+def _is_known_party(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and value.strip().casefold() != _UNKNOWN_SENDER_ID
+    )

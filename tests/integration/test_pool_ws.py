@@ -142,11 +142,7 @@ async def test_pool_three_accounts_online(
     await asyncio.sleep(3.0)
 
     statuses = await pool.status()
-    online = [
-        s
-        for s in statuses
-        if s["worker_state"] == "online" and s["db_status"] == "online"
-    ]
+    online = [s for s in statuses if s["worker_state"] == "online" and s["db_status"] == "online"]
     assert len(online) == 3, f"statuses={statuses}"
     for s in statuses:
         assert s["last_heartbeat_at"] is not None, f"no heartbeat for {s}"

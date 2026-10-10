@@ -32,8 +32,13 @@ def observe_daemon(
     *,
     now: datetime | None = None,
     stale_after_s: float = STALE_AFTER_S,
+    check_process: bool = True,
 ) -> DaemonHealth:
-    """合并数据库状态、PID 和心跳,给所有接口提供同一事实。"""
+    """合并数据库状态、PID 和心跳,给所有接口提供同一事实。
+
+    集群读取远端容器时必须关闭 PID 检查:不同 PID namespace 里的 PID 没有可比性,
+    此时由数据库心跳证明实例存活。本机 watchdog 仍使用默认的 PID 检查。
+    """
     if row is None:
         return DaemonHealth(
             observed="none",
@@ -52,15 +57,15 @@ def observe_daemon(
         (current.astimezone(UTC) - heartbeat.astimezone(UTC)).total_seconds(),
     )
     active = row.status in daemon_domain.ACTIVE_STATUSES
-    process_alive = active and pid_alive(row.pid)
+    process_alive = active and (pid_alive(row.pid) if check_process else age_s <= stale_after_s)
     healthy = row.status == "running" and process_alive and age_s <= stale_after_s
 
     if healthy:
         observed = "online"
-    elif active and not process_alive:
-        observed = "dead"
     elif active and age_s > stale_after_s:
         observed = "stale"
+    elif active and not process_alive:
+        observed = "dead"
     else:
         observed = row.status
 

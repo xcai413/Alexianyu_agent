@@ -14,6 +14,7 @@ Subcommand groups:
   - service   Windows 任务计划与失败恢复 (P0.3)
   - doctor    本地健康检查 (P0.4)
   - soak      24 小时长稳验收 (P0.5)
+  - notify    需要人类处理的提醒 (Issue #8 Notification)
   - dashboard Textual 驾驶舱 (Phase 5 起)
   - mcp       MCP Server (Phase 6 起)
 """
@@ -29,21 +30,30 @@ from rich.console import Console
 from xianyu_agent import __version__
 from xianyu_agent.cli.commands import (
     account as account_cmd,
+    ai as ai_cmd,
+    analytics as analytics_cmd,
+    attention as attention_cmd,
     auth as auth_cmd,
+    automation as automation_cmd,
+    backup as backup_cmd,
     card as card_cmd,
     daemon as daemon_cmd,
     dashboard as dashboard_cmd,
+    delivery as delivery_cmd,
     doctor as doctor_cmd,
+    inventory as inventory_cmd,
     item as item_cmd,
     maintenance as maintenance_cmd,
     mcp as mcp_cmd,
     message as message_cmd,
+    notify as notify_cmd,
     order as order_cmd,
     pool as pool_cmd,
     protocol as protocol_cmd,
     rule as rule_cmd,
     service as service_cmd,
     soak as soak_cmd,
+    web as web_cmd,
 )
 from xianyu_agent.config import ensure_fernet_key
 
@@ -56,20 +66,29 @@ app = typer.Typer(
 console = Console()
 app.add_typer(auth_cmd.app, name="auth")
 app.add_typer(account_cmd.app, name="account")
+app.add_typer(delivery_cmd.app, name="delivery")
+app.add_typer(ai_cmd.app, name="ai")
+app.add_typer(analytics_cmd.app, name="analytics")
+app.add_typer(automation_cmd.app, name="automation")
+app.add_typer(attention_cmd.app, name="attention")
+app.add_typer(backup_cmd.app, name="backup")
 app.add_typer(card_cmd.app, name="card")
 app.add_typer(dashboard_cmd.app, name="dashboard")
 app.add_typer(daemon_cmd.app, name="daemon")
 app.command(name="doctor")(doctor_cmd.doctor)
 app.add_typer(item_cmd.app, name="item")
+app.add_typer(inventory_cmd.app, name="inventory")
 app.add_typer(maintenance_cmd.app, name="maintenance")
 app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(message_cmd.app, name="message")
+app.add_typer(notify_cmd.app, name="notify")
 app.add_typer(order_cmd.app, name="order")
 app.add_typer(pool_cmd.app, name="pool")
 app.add_typer(protocol_cmd.app, name="protocol")
 app.add_typer(rule_cmd.app, name="rule")
 app.add_typer(service_cmd.app, name="service")
 app.add_typer(soak_cmd.app, name="soak")
+app.add_typer(web_cmd.app, name="web")
 
 
 def _version_callback(value: bool) -> None:

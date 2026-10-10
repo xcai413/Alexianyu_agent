@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -56,12 +57,13 @@ class Guardrails:
         self.fail_threshold = (
             fail_threshold if fail_threshold is not None else s.guardrail_fail_threshold
         )
+        self._business_timezone = ZoneInfo(s.tz)
         self._fail_counts: dict[str, int] = {}
 
     # ---- message gates ----
     async def check_message(self, account_id: str, _content: str) -> GuardrailDecision:
         now = datetime.now(UTC)
-        if self._in_quiet_hours(now):
+        if self._in_quiet_hours(now.astimezone(self._business_timezone)):
             return GuardrailDecision(False, f"夜间静默时段({self.quiet_hours})")
         since = now - timedelta(hours=1)
         recent = await domain_messages.list_recent(

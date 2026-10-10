@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from xianyu_agent.domain import daemon as daemon_domain, worker_commands
+from xianyu_agent.domain.account import lease as account_lease
 from xianyu_agent.services.account_pool import AccountPool
 from xianyu_agent.services.daemon_health import observe_daemon
 from xianyu_agent.utils.time_utils import format_local
@@ -27,6 +28,8 @@ def _status_table(rows: list[dict]) -> Table:
     table.add_column("db", style="magenta")
     table.add_column("reconnects")
     table.add_column("last_heartbeat")
+    table.add_column("owner", overflow="fold")
+    table.add_column("takeover", overflow="fold")
     table.add_column("risk", overflow="fold")
     table.add_column("last_error", overflow="fold")
     for row in rows:
@@ -37,6 +40,8 @@ def _status_table(rows: list[dict]) -> Table:
             row["db_status"],
             str(row["reconnect_attempts"]),
             row["last_heartbeat_at"] or "-",
+            _owner_text(row),
+            _takeover_text(row),
             _risk_text(row),
             (row["last_error"] or "-")[:80],
         )
@@ -50,6 +55,26 @@ def _risk_text(row: dict) -> str:
     if row.get("risk_recovery_required"):
         return f"{code} / {row.get('risk_cooldown_until') or '需手动刷新'}"
     return str(code)
+
+
+def _owner_text(row: dict) -> str:
+    """账号归属:多副本下谁持有;单机(无租约)显示 -。"""
+    owner = row.get("owner_instance_id")
+    if not owner:
+        return "-"
+    until = row.get("owner_lease_until") or "?"
+    return f"{owner[:8]} 至 {until}"
+
+
+def _takeover_text(row: dict) -> str:
+    approved_at = row.get("takeover_approved_at")
+    failures = int(row.get("takeover_failure_count") or 0)
+    if approved_at:
+        actor = row.get("takeover_approved_by") or "?"
+        return f"已批准({actor}) / 失败 {failures}"
+    if failures:
+        return f"失败 {failures} / 待重试"
+    return "-"
 
 
 @app.command("status")
@@ -109,6 +134,38 @@ def stop_all(
     _run_many("stop", wait=wait)
 
 
+@app.command("takeover-approve")
+def approve_takeover(
+    account_id: str = typer.Option(..., "--account", "-a"),
+) -> None:
+    """批准人工门禁下该账号的一段接管尝试。"""
+
+    async def _run() -> None:
+        if not await account_lease.approve_takeover(account_id, actor="cli"):
+            console.print(f"[red]账号 {account_id} 不存在。[/red]")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[green]OK[/green] 已批准账号 {account_id} 的接管;批准将在接管成功或熔断时清除。"
+        )
+
+    asyncio.run(_run())
+
+
+@app.command("takeover-revoke")
+def revoke_takeover(
+    account_id: str = typer.Option(..., "--account", "-a"),
+) -> None:
+    """撤销该账号尚未完成的人工接管批准。"""
+
+    async def _run() -> None:
+        if not await account_lease.revoke_takeover(account_id, actor="cli"):
+            console.print(f"[yellow]账号 {account_id} 当前没有待用接管批准。[/yellow]")
+            return
+        console.print(f"[green]OK[/green] 已撤销账号 {account_id} 的接管批准。")
+
+    asyncio.run(_run())
+
+
 def _run_one(account_id: str, action: str, *, wait: float) -> None:
     async def _run() -> None:
         try:
@@ -143,16 +200,12 @@ async def _report_commands(command_ids: list[str], *, wait: float) -> None:
         )
         return
     if not await _daemon_is_fresh():
-        console.print(
-            "[red]daemon 不在线或心跳已过期,命令已保留为 pending,当前未执行。[/red]"
-        )
+        console.print("[red]daemon 不在线或心跳已过期,命令已保留为 pending,当前未执行。[/red]")
         raise typer.Exit(code=2)
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         rows = [await worker_commands.get(command_id) for command_id in command_ids]
-        if all(
-            row is not None and row.status in worker_commands.TERMINAL_STATUSES for row in rows
-        ):
+        if all(row is not None and row.status in worker_commands.TERMINAL_STATUSES for row in rows):
             failures = [row for row in rows if row is not None and row.status == "failed"]
             if failures:
                 detail = "; ".join(
@@ -166,9 +219,7 @@ async def _report_commands(command_ids: list[str], *, wait: float) -> None:
             )
             return
         await asyncio.sleep(0.2)
-    console.print(
-        f"[red]等待 daemon 回执超时({wait:.1f}s),命令状态未确认;不要按成功处理。[/red]"
-    )
+    console.print(f"[red]等待 daemon 回执超时({wait:.1f}s),命令状态未确认;不要按成功处理。[/red]")
     raise typer.Exit(code=2)
 
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 import typer
+from sqlalchemy import select
 
 from xianyu_agent.application.session import (
     CredentialFailureCode,
@@ -24,6 +26,8 @@ from xianyu_agent.application.session.ports import (
     ValidationStatus,
 )
 from xianyu_agent.cli.commands import auth as auth_cli, order as order_cli, protocol as protocol_cli
+from xianyu_agent.config import reset_settings_cache
+from xianyu_agent.db import AuditLog, database as db_mod, get_async_session
 from xianyu_agent.domain.runtime.worker_state import WorkerState
 from xianyu_agent.protocol.client import ClientConfig, WsClient
 from xianyu_agent.protocol.events import ConnectionState
@@ -36,6 +40,37 @@ from xianyu_agent.runtime.account_worker import AccountWorker
 from xianyu_agent.runtime.recovery import RecoverySupervisor
 
 ACCOUNT_ID = "cli-credential-account"
+
+
+@pytest.fixture(autouse=True)
+async def isolated_auth_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("XIANYU_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XIANYU_DB_PATH", str(tmp_path / "auth.db"))
+    reset_settings_cache()
+    db_mod.reset_engine()
+    await db_mod.init_db()
+    await auth_cli.domain_accounts.create_account(ACCOUNT_ID)
+    yield
+    await db_mod.async_engine.dispose()
+    reset_settings_cache()
+
+
+def test_borrowed_real_file_lock_keeps_outer_ownership_until_cleanup(tmp_path) -> None:
+    owner = AccountConnectionLock(tmp_path / "account.lock")
+    competitor = AccountConnectionLock(tmp_path / "account.lock")
+    owner.acquire(owner_id="cli")
+    borrowed = owner.borrow()
+    try:
+        borrowed.acquire(owner_id="probe")
+        borrowed.release()
+        with pytest.raises(AccountConnectionAlreadyRunningError):
+            competitor.acquire(owner_id="competitor")
+    finally:
+        owner.release()
+    competitor.acquire(owner_id="after-cleanup")
+    competitor.release()
+    with pytest.raises(RuntimeError, match="released ownership"):
+        borrowed.acquire(owner_id="stale-probe")
 
 
 class _FakeLock:
@@ -74,6 +109,7 @@ class _FakeSupervisor:
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[object]:
         assert self._held["value"] is True
         self.refresh_calls.append((account_id, validation_recovery))
@@ -147,12 +183,341 @@ def test_refresh_uses_supervisor_and_explicit_validation_recovery_under_full_loc
     monkeypatch.setattr(auth_cli.domain_accounts, "get_account", get_account)
     monkeypatch.setattr(auth_cli, "_build_credential_supervisor", lambda: supervisor)
 
+    async def probe(
+        _account_id: str, _credentials: object, *, timeout_s: float, account_lock: object
+    ) -> tuple[bool, str]:
+        assert timeout_s == 45.0
+        assert account_lock is lock
+        owner = await auth_cli.account_lease.live_owner(_account_id)
+        assert owner is not None
+        assert owner.startswith("auth-recovery:")
+        competitor = await auth_cli.account_lease.claim_for_start(
+            _account_id, instance_id="competing-recovery"
+        )
+        assert competitor.acquired is False
+        return True, "online"
+
+    monkeypatch.setattr(auth_cli, "_run_validation_recovery_probe", probe)
+
     auth_cli.refresh(account_id=ACCOUNT_ID)
 
     assert supervisor.inspect_calls == [ACCOUNT_ID]
-    assert supervisor.refresh_calls == [(ACCOUNT_ID, True)]
+    assert supervisor.refresh_calls == []
     assert lock.release_calls == 1
     assert held["value"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_recovery_probe_releases_database_lease_on_exception(
+    monkeypatch: pytest.MonkeyPatch, cancelled: bool
+) -> None:
+    async def failing_probe(*_args, **_kwargs):
+        owner = await auth_cli.account_lease.live_owner(ACCOUNT_ID)
+        assert owner is not None
+        if cancelled:
+            raise asyncio.CancelledError
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(auth_cli, "_run_validation_recovery_probe", failing_probe)
+    error = asyncio.CancelledError if cancelled else RuntimeError
+    with pytest.raises(error):
+        await auth_cli._run_leased_validation_probe(
+            ACCOUNT_ID, object(), timeout_s=5.0, account_lock=object()
+        )
+    assert await auth_cli.account_lease.live_owner(ACCOUNT_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_probe_does_not_run_when_database_lease_is_held(monkeypatch) -> None:
+    claim = await auth_cli.account_lease.claim_for_start(ACCOUNT_ID, instance_id="other-instance")
+    assert claim.acquired
+
+    async def forbidden_probe(*_args, **_kwargs):
+        pytest.fail("must not probe an account owned by another instance")
+
+    monkeypatch.setattr(auth_cli, "_run_validation_recovery_probe", forbidden_probe)
+    recovered, reason = await auth_cli._run_leased_validation_probe(
+        ACCOUNT_ID, object(), timeout_s=5.0, account_lock=object()
+    )
+    assert recovered is False
+    assert "恢复租约获取失败" in reason
+    assert await auth_cli.account_lease.live_owner(ACCOUNT_ID) == "other-instance"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_error", [RuntimeError, TimeoutError, asyncio.CancelledError])
+async def test_probe_cleanup_failure_retains_ownership_and_never_audits_success(
+    monkeypatch, tmp_path, cleanup_error
+):
+    class BrokenCleanupWorker:
+        state = WorkerState.NEEDS_VALIDATION
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        async def recover_validation(self):
+            self.state = WorkerState.ONLINE
+            return True
+
+        async def stop(self):
+            raise cleanup_error("TOP-SECRET")
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", BrokenCleanupWorker)
+    owner = AccountConnectionLock(tmp_path / "cleanup.lock")
+    competitor = AccountConnectionLock(tmp_path / "cleanup.lock")
+    owner.acquire(owner_id="probe")
+    try:
+        recovered, reason = await auth_cli._run_leased_validation_probe(
+            ACCOUNT_ID, object(), timeout_s=5, account_lock=owner
+        )
+        assert recovered is False
+        assert "TOP-SECRET" not in reason
+        assert await auth_cli.account_lease.live_owner(ACCOUNT_ID) is not None
+        owner.release()
+        with pytest.raises(AccountConnectionAlreadyRunningError):
+            competitor.acquire(owner_id="competitor")
+        risk = await auth_cli.worker_risk.get(ACCOUNT_ID)
+        assert risk is not None
+        assert risk.code == "RECOVERY_CLEANUP_FAILED"
+        async with get_async_session() as session:
+            results = list(
+                await session.scalars(
+                    select(AuditLog.result).where(AuditLog.action == "ws_validation_recovery_probe")
+                )
+            )
+        assert results == ["failed"]
+    finally:
+        # No real transport exists in this test; release the quarantined fixture.
+        AccountConnectionLock._quarantined.discard(owner)
+        owner.release()
+
+
+@pytest.mark.asyncio
+async def test_stuck_cleanup_returns_on_deadline_and_continues_lease_renewal(monkeypatch, tmp_path):
+    release = asyncio.Event()
+    renewed = asyncio.Event()
+    clock = datetime.now(UTC)
+    origin = clock
+    renew = auth_cli.account_lease.renew
+
+    async def advancing_renew(account_id, *, instance_id, ttl):
+        nonlocal clock
+        clock += timedelta(seconds=60)
+        result = await renew(account_id, instance_id=instance_id, ttl=ttl, now=clock)
+        if clock - origin > timedelta(seconds=400):
+            renewed.set()
+        return result
+
+    class StuckWorker:
+        state = WorkerState.NEEDS_VALIDATION
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        async def recover_validation(self):
+            self.state = WorkerState.ONLINE
+            return True
+
+        async def stop(self):
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", StuckWorker)
+    monkeypatch.setattr(auth_cli, "_PROBE_CLEANUP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(auth_cli, "_PROBE_LEASE_RENEW_INTERVAL_S", 0.01)
+    monkeypatch.setattr(auth_cli.account_lease, "renew", advancing_renew)
+    owner = AccountConnectionLock(tmp_path / "stuck.lock")
+    owner.acquire(owner_id="probe")
+    try:
+        recovered, _ = await asyncio.wait_for(
+            auth_cli._run_leased_validation_probe(
+                ACCOUNT_ID, object(), timeout_s=5, account_lock=owner
+            ),
+            timeout=1,
+        )
+        assert recovered is False
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+        competitor = await auth_cli.account_lease.claim_for_start(
+            ACCOUNT_ID, instance_id="other-host", now=clock
+        )
+        assert competitor.acquired is False
+    finally:
+        release.set()
+        pending = tuple(auth_cli._pending_probe_cleanup)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        guards = tuple(auth_cli._recovery_guards)
+        for guard in guards:
+            guard.cancel()
+        await asyncio.gather(*guards, return_exceptions=True)
+        AccountConnectionLock._quarantined.discard(owner)
+        owner.release()
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_loss_aborts_probe_and_preserves_risk_gate(monkeypatch, tmp_path):
+    stopped = asyncio.Event()
+
+    class Worker:
+        state = WorkerState.NEEDS_VALIDATION
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        async def recover_validation(self):
+            await asyncio.Event().wait()
+
+        async def stop(self):
+            self.state = WorkerState.DISABLED
+            stopped.set()
+
+    async def lost(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", Worker)
+    monkeypatch.setattr(auth_cli.account_lease, "renew", lost)
+    owner = AccountConnectionLock(tmp_path / "lost.lock")
+    owner.acquire(owner_id="probe")
+    try:
+        recovered, reason = await auth_cli._run_leased_validation_probe(
+            ACCOUNT_ID, object(), timeout_s=5, account_lock=owner
+        )
+        assert recovered is False
+        assert "续租失败" in reason
+        assert stopped.is_set()
+        assert (await auth_cli.worker_risk.get(ACCOUNT_ID)).code == "RECOVERY_LEASE_LOST"
+    finally:
+        owner.release()
+
+
+@pytest.mark.asyncio
+async def test_cli_validation_probe_clears_only_after_online_and_stops_probe_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProbeWorker:
+        instances: ClassVar[list[ProbeWorker]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.state = WorkerState.NEEDS_VALIDATION
+            self.stop_calls = 0
+            self.__class__.instances.append(self)
+
+        def start(self):
+            return None
+
+        async def recover_validation(self) -> bool:
+            self.state = WorkerState.ONLINE
+            return True
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self.state = WorkerState.DISABLED
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", ProbeWorker)
+
+    recovered, reason = await auth_cli._run_validation_recovery_probe(
+        ACCOUNT_ID,
+        object(),  # type: ignore[arg-type]
+        timeout_s=5.0,
+    )
+
+    assert recovered is True
+    assert reason == "online"
+    assert ProbeWorker.instances[0].stop_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_probe_audits_exception_without_secret_and_always_stops(
+    monkeypatch, cancelled: bool
+) -> None:
+    audits = []
+    stopped = asyncio.Event()
+
+    class FailingWorker:
+        state = WorkerState.NEEDS_VALIDATION
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        async def recover_validation(self):
+            if cancelled:
+                raise asyncio.CancelledError
+            raise RuntimeError("TOP-SECRET credential response")
+
+        async def stop(self):
+            stopped.set()
+
+    async def record(_account_id, **kwargs):
+        audits.append(kwargs)
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", FailingWorker)
+    monkeypatch.setattr(auth_cli.worker_risk, "record_recovery_probe", record)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await auth_cli._run_validation_recovery_probe(ACCOUNT_ID, object(), timeout_s=5)
+    else:
+        recovered, reason = await auth_cli._run_validation_recovery_probe(
+            ACCOUNT_ID, object(), timeout_s=5
+        )
+        assert recovered is False
+        assert "RuntimeError" in reason
+        assert "TOP-SECRET" not in reason
+    assert stopped.is_set()
+    assert len(audits) == 1
+    assert audits[0]["result"] == "failed"
+    assert "TOP-SECRET" not in audits[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_cancels_stalled_refresh_and_cleans_worker(monkeypatch) -> None:
+    cancelled = asyncio.Event()
+    stopped = asyncio.Event()
+
+    class StalledWorker:
+        state = WorkerState.NEEDS_VALIDATION
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self):
+            return None
+
+        async def recover_validation(self) -> bool:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+            return False
+
+        async def stop(self) -> None:
+            stopped.set()
+
+    monkeypatch.setattr(auth_cli, "AccountWorker", StalledWorker)
+    recovered, reason = await asyncio.wait_for(
+        auth_cli._run_validation_recovery_probe(ACCOUNT_ID, object(), timeout_s=0.02),
+        timeout=1,
+    )
+    assert recovered is False
+    assert "凭据刷新或会话验证" in reason
+    assert cancelled.is_set()
+    assert stopped.is_set()
 
 
 def test_refresh_running_worker_fails_closed_before_supervisor_mutation(
@@ -211,7 +576,9 @@ def test_refresh_failure_never_directly_clears_risk_and_never_prints_secret(
     monkeypatch.setattr(auth_cli.domain_accounts, "get_account", get_account)
     monkeypatch.setattr(auth_cli.worker_risk, "clear_after_refresh", forbidden_clear)
     monkeypatch.setattr(auth_cli, "_build_credential_supervisor", lambda: supervisor)
-    monkeypatch.setattr(auth_cli.console, "print", lambda value, **_kwargs: output.append(str(value)))
+    monkeypatch.setattr(
+        auth_cli.console, "print", lambda value, **_kwargs: output.append(str(value))
+    )
 
     with pytest.raises(typer.Exit) as exc_info:
         auth_cli.refresh(account_id=ACCOUNT_ID)
@@ -280,6 +647,7 @@ class _StandaloneValidation:
             account_id=account_id,
             required=self.required,
             code=CredentialFailureCode.NEEDS_VALIDATION.value if self.required else None,
+            revision="test-revision" if self.required else None,
         )
 
     async def mark_needs_validation(self, account_id: str) -> None:
@@ -287,7 +655,7 @@ class _StandaloneValidation:
         self.mark_calls += 1
         self.required = True
 
-    async def clear_after_refresh(self, account_id: str) -> bool:
+    async def clear_after_refresh(self, account_id: str, *, expected_revision=None) -> bool:
         assert account_id == ACCOUNT_ID
         self.required = False
         return True
@@ -924,6 +1292,7 @@ class _ConcurrentValidationCredentials:
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[object]:
         self.refresh_calls.append(validation_recovery)
         self.refresh_entered.set()

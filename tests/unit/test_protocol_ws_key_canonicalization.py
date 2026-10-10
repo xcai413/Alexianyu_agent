@@ -48,7 +48,6 @@ def test_decode_sync_data_rejects_numeric_string_key_collision():
     assert decoded is None
 
 
-
 def test_msgpack_numeric_keys_parse_into_live_message_event():
     payload = {
         1: {

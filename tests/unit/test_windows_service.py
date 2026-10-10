@@ -76,13 +76,8 @@ def test_system_task_xml_uses_boot_trigger_and_service_account(tmp_path: Path) -
 
 def test_watchdog_task_xml_repeats_every_minute(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    root = ET.fromstring(
-        build_watchdog_task_xml(paths, startup="user", user_sid="S-1-5-21-1000")
-    )
-    assert (
-        _find(root, "t:Triggers/t:TimeTrigger/t:Repetition/t:Interval").text
-        == "PT1M"
-    )
+    root = ET.fromstring(build_watchdog_task_xml(paths, startup="user", user_sid="S-1-5-21-1000"))
+    assert _find(root, "t:Triggers/t:TimeTrigger/t:Repetition/t:Interval").text == "PT1M"
     assert _find(root, "t:Triggers/t:TimeTrigger/t:StartBoundary").text
     assert _find(root, "t:Settings/t:ExecutionTimeLimit").text == "PT1M"
     assert root.find("t:Settings/t:RestartOnFailure", {"t": TASK_NAMESPACE}) is None

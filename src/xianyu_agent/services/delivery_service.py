@@ -142,9 +142,7 @@ class DeliveryService:
                     delivered=True, order_id=row.order_id, reason="订单已发货,无需重试"
                 )
             account_row = (
-                await session.execute(
-                    select(Account).where(Account.id == row.account_id).limit(1)
-                )
+                await session.execute(select(Account).where(Account.id == row.account_id).limit(1))
             ).scalar_one_or_none()
             cons = (
                 await session.execute(

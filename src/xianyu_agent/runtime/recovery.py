@@ -74,7 +74,12 @@ class CredentialRecoveryPort(Protocol[CredentialT_co]):
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[CredentialT_co]: ...
+
+    async def confirm_recovered(
+        self, account_id: str, *, expected_revision: str | None = None
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -314,6 +319,7 @@ class RecoverySupervisor(Generic[CredentialT]):
         route: CredentialRecoveryRoute,
         attempt: int = 1,
         jitter_unit: float = 0.0,
+        defer_validation_clear: bool = False,
     ) -> RecoveryOutcome[CredentialT]:
         """Execute one explicit credential route and classify its result."""
 
@@ -329,6 +335,12 @@ class RecoverySupervisor(Generic[CredentialT]):
                 result = await self._credentials.refresh(
                     account_id,
                     validation_recovery=False,
+                )
+            elif defer_validation_clear:
+                result = await self._credentials.refresh(
+                    account_id,
+                    validation_recovery=True,
+                    defer_validation_clear=True,
                 )
             else:
                 result = await self._credentials.refresh(
@@ -349,6 +361,16 @@ class RecoverySupervisor(Generic[CredentialT]):
             jitter_unit=jitter_unit,
         )
         return RecoveryOutcome(decision=decision, credential_result=result)
+
+    async def confirm_recovered(
+        self, account_id: str, *, expected_revision: str | None = None
+    ) -> bool:
+        """Confirm a live session before clearing a durable validation circuit."""
+        if self._credentials is None:
+            raise RecoveryConfigurationError("credential recovery port is not configured")
+        return await self._credentials.confirm_recovered(
+            account_id, expected_revision=expected_revision
+        )
 
     def _retry_decision(
         self,

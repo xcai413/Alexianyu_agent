@@ -63,9 +63,7 @@ def install(
     except WindowsServiceError as exc:
         set_service_paused(previous_paused)
         raise _service_error(exc) from exc
-    console.print(
-        f"[green]OK[/green] 已安装任务 [cyan]{TASK_NAME}[/cyan] startup={startup}。"
-    )
+    console.print(f"[green]OK[/green] 已安装任务 [cyan]{TASK_NAME}[/cyan] startup={startup}。")
     console.print(f"解释器:{paths.pythonw_executable}")
     console.print(f"工作目录:{paths.project_root}")
     console.print(f"任务 XML:{paths.xml_path}")

@@ -577,7 +577,9 @@ async def test_reconcile_waits_for_retirement_before_replacement_and_preserves_w
         return cast(Any, ReplacementWorker(lambda: writes.append("new_online")))
 
     pool._worker_factory = build_replacement
-    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, old_worker)))
+    wrapper = asyncio.create_task(
+        pool._retire_terminal_transport(account_id, cast(Any, old_worker))
+    )
     await stop_entered.wait()
     canonical = pool._retirement_tasks[account_id]
 
@@ -624,7 +626,9 @@ async def test_restart_waits_for_existing_retirement_barrier() -> None:
         return cast(Any, ReplacementWorker())
 
     pool._worker_factory = build_replacement
-    wrapper = asyncio.create_task(pool._retire_terminal_transport(account_id, cast(Any, old_worker)))
+    wrapper = asyncio.create_task(
+        pool._retire_terminal_transport(account_id, cast(Any, old_worker))
+    )
     await stop_entered.wait()
     canonical = pool._retirement_tasks[account_id]
 

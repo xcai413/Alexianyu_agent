@@ -160,3 +160,51 @@ def test_message_send_reports_existing_daemon_worker_without_traceback(
     output = " ".join(capsys.readouterr().out.split())
     assert "已有常驻 WebSocket 连接" in output
     assert "pool stop --account acc-1" in output
+
+
+@pytest.mark.parametrize(
+    ("command", "setter_name", "expected_state"),
+    [
+        (message_cli.takeover_conversation, "set_takeover_state", "human"),
+        (message_cli.release_conversation, "set_takeover_state", "bot"),
+        (message_cli.pause_reply, "set_bot_state", "paused"),
+        (message_cli.resume_reply, "set_bot_state", "enabled"),
+    ],
+)
+def test_conversation_control_commands_set_expected_state(
+    monkeypatch: pytest.MonkeyPatch,
+    command,
+    setter_name: str,
+    expected_state: str,
+) -> None:
+    calls: list[dict[str, str]] = []
+
+    async def setter(**kwargs: str) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(message_cli.domain_messages, setter_name, setter)
+
+    command(account_id="acc-1", chat_id="chat-1")
+
+    assert calls == [{"account_id": "acc-1", "chat_id": "chat-1", "state": expected_state}]
+
+
+def test_send_refuses_without_explicit_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`message send` 会真的给买家发消息,所以没有 --yes 必须拒绝,而且不能去连平台。"""
+    called = False
+
+    def _boom(*args: object, **kwargs: object) -> None:  # pragma: no cover - 不该被调用
+        nonlocal called
+        called = True
+        raise AssertionError("未确认时不应该开始发送")
+
+    monkeypatch.setattr(message_cli, "AccountWorker", _boom)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        message_cli.send_message(
+            account_id="acc-1", chat_id="chat-1", text="你好", receiver_id="", yes=False
+        )
+
+    assert excinfo.value.exit_code == 1
+    assert called is False

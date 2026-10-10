@@ -77,6 +77,7 @@ class PermanentlyRetryingCredentials:
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[str]:
         raise AssertionError((account_id, validation_recovery))
 
@@ -104,6 +105,7 @@ class ValidationTerminalCredentials:
         account_id: str,
         *,
         validation_recovery: bool = False,
+        defer_validation_clear: bool = False,
     ) -> CredentialResult[str]:
         assert account_id == self.account_id
         self.refresh_calls.append(validation_recovery)

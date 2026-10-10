@@ -148,25 +148,38 @@ async def apply_sold_orders_snapshot(
                         account_id=account.id,
                         order_id=remote.order_id,
                         item_id=remote.item_id,
+                        item_title=remote.item_title,
                         buyer_id=remote.buyer_id,
                         buyer_name=remote.buyer_name,
                         amount=remote.amount,
                         quantity=remote.quantity,
                         status=remote.status,
                         placed_at=remote.placed_at,
+                        paid_at=remote.paid_at,
+                        delivered_at=remote.delivered_at
+                        if remote.status != OrderStatus.PAID.value
+                        else None,
                         raw_payload=remote.raw_payload,
                     )
                 )
                 created += 1
                 continue
             row.item_id = remote.item_id or row.item_id
+            row.item_title = remote.item_title or row.item_title
             row.buyer_id = remote.buyer_id or row.buyer_id
             row.buyer_name = remote.buyer_name or row.buyer_name
             row.amount = remote.amount
             row.quantity = remote.quantity
             row.status = remote.status
             row.placed_at = remote.placed_at or row.placed_at
+            row.paid_at = remote.paid_at or row.paid_at
+            row.delivered_at = remote.delivered_at or row.delivered_at
             row.raw_payload = remote.raw_payload
+            # The seller-order snapshot is authoritative for the platform state.
+            # A previous local delivery attempt may have left delivered_at behind;
+            # keep a paid/pending-ship order eligible for delivery after refresh.
+            if remote.status == OrderStatus.PAID.value:
+                row.delivered_at = None
             updated += 1
         await session.commit()
         return OrderSyncResult(
@@ -185,9 +198,7 @@ async def list_for_account(
 ) -> Sequence[Order]:
     async with get_async_session() as session:
         account = (
-            await session.execute(
-                select(Account).where(Account.account_id == account_id).limit(1)
-            )
+            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
         ).scalar_one_or_none()
         if account is None:
             return []
@@ -212,9 +223,7 @@ async def sales_by_item(account_id: str) -> dict[str, ItemSalesSummary]:
     """
     async with get_async_session() as session:
         account = (
-            await session.execute(
-                select(Account).where(Account.account_id == account_id).limit(1)
-            )
+            await session.execute(select(Account).where(Account.account_id == account_id).limit(1))
         ).scalar_one_or_none()
         if account is None:
             return {}

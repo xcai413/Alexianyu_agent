@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from xianyu_agent.config import get_settings
 from xianyu_agent.infrastructure.database.models import Base
@@ -28,13 +29,20 @@ def _make_engine() -> AsyncEngine:
     if backend == "sqlite":
         connect_args["check_same_thread"] = False
 
-    engine = create_async_engine(
-        settings.db_url,
-        echo=False,
-        future=True,
-        pool_pre_ping=True,
-        connect_args=connect_args,
-    )
+    engine_options: dict[str, Any] = {
+        "echo": False,
+        "future": True,
+        "pool_pre_ping": True,
+        "connect_args": connect_args,
+    }
+    # asyncmy/asyncpg connections are tied to the event loop that created them.
+    # CLI integrations can invoke several asyncio.run() calls in one process;
+    # reusing a pooled connection there raises "Future attached to a different loop".
+    # The daemon still keeps its own long-lived sessions, while each DB operation
+    # obtains a fresh driver connection safely.
+    if backend in {"mysql", "postgresql"}:
+        engine_options["poolclass"] = NullPool
+    engine = create_async_engine(settings.db_url, **engine_options)
 
     if backend == "sqlite":
 

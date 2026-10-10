@@ -12,6 +12,7 @@ from .base import Base
 from .enums import AccountStatus, WorkerDesiredState
 
 if TYPE_CHECKING:
+    from .conversation import Conversation
     from .inventory import Card
     from .message import Message
     from .order import Order
@@ -39,6 +40,28 @@ class Account(Base):
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 账号级自动回复暂停:到点自动恢复;reason 只给运营看,不参与判定。
+    reply_paused_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reply_paused_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # M2 账号归属租约:同一账号任一时刻最多一个未过期 owner(多副本分片的基础)。
+    owner_instance_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    owner_lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    owner_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # M3 接管门禁与连续失败计数。批准在接管成功或熔断时清除。
+    takeover_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    takeover_approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    takeover_failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    takeover_last_failure_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -56,6 +79,9 @@ class Account(Base):
         back_populates="account", cascade="all, delete-orphan", uselist=False
     )
     messages: Mapped[list[Message]] = relationship(back_populates="account")
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
     orders: Mapped[list[Order]] = relationship(back_populates="account")
     cards: Mapped[list[Card]] = relationship(back_populates="account")
     rules: Mapped[list[ReplyRule]] = relationship(back_populates="account")
@@ -82,6 +108,7 @@ class Cookie(Base):
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
     )
     encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

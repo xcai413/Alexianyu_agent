@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from .ports.repositories import AccountRecord
 from .ports.unit_of_work import UnitOfWorkFactory
@@ -66,6 +67,30 @@ class AccountApplication:
     async def set_remark(self, account_id: str, remark: str | None) -> bool:
         async with self._uow_factory() as uow:
             updated = await uow.accounts.set_remark(account_id, remark)
+            if updated:
+                await uow.commit()
+            return updated
+
+    async def set_nickname(self, account_id: str, nickname: str | None) -> bool:
+        """写入本地镜像昵称;平台侧资料只读,这里不改任何远端状态。"""
+        async with self._uow_factory() as uow:
+            updated = await uow.accounts.set_nickname(account_id, nickname)
+            if updated:
+                await uow.commit()
+            return updated
+
+    async def set_reply_pause(
+        self,
+        account_id: str,
+        *,
+        until: datetime | None,
+        reason: str | None = None,
+    ) -> bool:
+        """暂停/恢复该账号的自动回复;until 是恢复时间,None 表示立即恢复。"""
+        async with self._uow_factory() as uow:
+            updated = await uow.accounts.set_reply_pause(
+                account_id, until=until, reason=reason
+            )
             if updated:
                 await uow.commit()
             return updated

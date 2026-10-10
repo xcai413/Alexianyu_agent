@@ -46,6 +46,7 @@ class CredentialHealth:
     code: str | None = None
     refresh_recommended: bool = False
     validation_cooling: bool = False
+    validation_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class CredentialResult(Generic[CredentialT]):
     refreshed: bool = False
     code: str | None = None
     message: str | None = None
+    validation_revision: str | None = None
 
     @property
     def ok(self) -> bool:

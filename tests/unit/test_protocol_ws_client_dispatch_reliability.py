@@ -113,7 +113,9 @@ def _acked_mids(socket: _SendSocket) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_history_cancellation_isolated_per_event_and_remaining_event_waits_reconnect() -> None:
+async def test_history_cancellation_isolated_per_event_and_remaining_event_waits_reconnect() -> (
+    None
+):
     first = _event("first")
     second = _event("second")
     seen: list[str] = []
@@ -389,7 +391,9 @@ async def test_deferred_sync_extra_reserves_capacity_before_ack(monkeypatch) -> 
     socket = _ReceiveSocket()
     router = request_router.RequestRouter()
 
-    def record_sync_start(ws: Any, active_router: request_router.RequestRouter, frame: WsFrame) -> None:
+    def record_sync_start(
+        ws: Any, active_router: request_router.RequestRouter, frame: WsFrame
+    ) -> None:
         assert ws is socket
         assert active_router is router
         started.append(str(frame.headers["mid"]))

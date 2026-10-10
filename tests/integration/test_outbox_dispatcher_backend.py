@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -121,6 +121,42 @@ async def _assert_failed_event_does_not_starve_newer(backend: str) -> None:
 
 
 @pytest.mark.integration
+async def _assert_single_claim_case(backend: str) -> None:
+    """未过期的抢占租约必须挡住第二个副本(M1)。"""
+    event_id = _event_id("claim", backend)
+    await _enqueue(event_id)
+    now = datetime.now(UTC)
+    lease = timedelta(minutes=5)
+
+    async with SqlAlchemyUnitOfWork() as uow:
+        first = await uow.outbox.claim_pending(
+            owner="owner-a", lease_duration=lease, limit=100, now=now
+        )
+        await uow.commit()
+    assert any(row.event_id == event_id for row in first)
+    assert all(row.lease_token for row in first)
+
+    async with SqlAlchemyUnitOfWork() as uow:
+        blocked = await uow.outbox.claim_pending(
+            owner="owner-b",
+            lease_duration=lease,
+            limit=100,
+            now=now + timedelta(seconds=1),
+        )
+    assert all(row.event_id != event_id for row in blocked)
+
+    async with SqlAlchemyUnitOfWork() as uow:
+        takeover = await uow.outbox.claim_pending(
+            owner="owner-b",
+            lease_duration=lease,
+            limit=100,
+            now=now + lease + timedelta(seconds=1),
+        )
+        await uow.commit()
+    assert any(row.event_id == event_id for row in takeover)
+
+
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_outbox_dispatcher_contract_across_backend() -> None:
     expected_backend = os.environ.get("TEST_DATABASE_BACKEND")
@@ -131,3 +167,4 @@ async def test_outbox_dispatcher_contract_across_backend() -> None:
     await _assert_success_case(expected_backend)
     await _assert_retry_case(expected_backend)
     await _assert_failed_event_does_not_starve_newer(expected_backend)
+    await _assert_single_claim_case(expected_backend)

@@ -5,7 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -76,3 +87,107 @@ class CardConsumption(Base):
     order: Mapped[Order | None] = relationship(back_populates="consumptions")
 
     __table_args__ = (Index("ix_consumptions_consumed_at", "consumed_at"),)
+
+
+class InventoryPool(Base):
+    """库存池:一处发货来源的定义(text/data/image/api)。
+
+    只有 data 池持有可消费单元;api 池只保存 api_config_ref(配置记录或机密库条目的引用),
+    密钥本身不进这张表。
+    """
+
+    __tablename__ = "inventory_pools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    delay_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    account_scope: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    item_scope: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sku_scope: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    api_config_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    units: Mapped[list[InventoryUnit]] = relationship(
+        back_populates="pool", cascade="all, delete-orphan"
+    )
+    reservations: Mapped[list[InventoryReservation]] = relationship(
+        back_populates="pool", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (Index("ix_inventory_pools_scope", "account_scope", "item_scope"),)
+
+
+class InventoryReservation(Base):
+    """一次预留:一个发货 job 从某个池占住 N 条单元。"""
+
+    __tablename__ = "inventory_reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pool_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("inventory_pools.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    pool: Mapped[InventoryPool] = relationship(back_populates="reservations")
+
+    __table_args__ = (
+        Index("ix_inventory_reservations_pool_job", "pool_id", "job_ref"),
+        Index("ix_inventory_reservations_state", "state"),
+    )
+
+
+class InventoryUnit(Base):
+    """data 池里的一条卡密单元:状态机决定它归谁。"""
+
+    __tablename__ = "inventory_units"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pool_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("inventory_pools.id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    reservation_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("inventory_reservations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reserved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    unit_metadata: Mapped[dict[str, object] | None] = mapped_column("metadata", JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    pool: Mapped[InventoryPool] = relationship(back_populates="units")
+
+    __table_args__ = (
+        Index("ix_inventory_units_pool_state", "pool_id", "state"),
+        Index("ix_inventory_units_reservation", "reservation_id"),
+    )

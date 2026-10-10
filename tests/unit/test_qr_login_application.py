@@ -194,7 +194,7 @@ async def test_start_returns_render_safe_challenge() -> None:
 
 
 @pytest.mark.asyncio
-async def test_success_persists_cookie_and_uses_explicit_validation_recovery() -> None:
+async def test_success_persists_cookie_without_clearing_validation_gate() -> None:
     app, _, accounts, cookies, credentials = _application()
     challenge = await app.start(ACCOUNT_ID)
 
@@ -204,10 +204,8 @@ async def test_success_persists_cookie_and_uses_explicit_validation_recovery() -
     assert result.cookie_saved is True
     assert result.credential_expires_at is not None
     assert accounts.created == [(ACCOUNT_ID, "shop")]
-    assert cookies.calls == [
-        (ACCOUNT_ID, "cookie2=secret-cookie; unb=2214350705775")
-    ]
-    assert credentials.calls == [(ACCOUNT_ID, True)]
+    assert cookies.calls == [(ACCOUNT_ID, "cookie2=secret-cookie; unb=2214350705775")]
+    assert credentials.calls == [(ACCOUNT_ID, False)]
     assert "secret-cookie" not in repr(result)
 
 
@@ -239,9 +237,7 @@ async def test_non_success_terminal_status_does_not_persist(
     final: str,
     expected: QrLoginResultState,
 ) -> None:
-    app, _, accounts, cookies, credentials = _application(
-        platform=FakePlatform(final=final)
-    )
+    app, _, accounts, cookies, credentials = _application(platform=FakePlatform(final=final))
     challenge = await app.start(ACCOUNT_ID)
 
     result = await app.finish(challenge, timeout_s=30.0)
@@ -298,7 +294,7 @@ async def test_validation_cooldown_remains_authoritative_after_cookie_save() -> 
     assert result.cookie_saved is True
     assert result.validation_cooling is True
     assert len(cookies.calls) == 1
-    assert credentials.calls == [(ACCOUNT_ID, True)]
+    assert credentials.calls == [(ACCOUNT_ID, False)]
 
 
 @pytest.mark.asyncio
@@ -319,9 +315,7 @@ async def test_credential_failures_preserve_saved_cookie(
     credential_state: CredentialResultState,
     expected: QrLoginResultState,
 ) -> None:
-    credentials = FakeCredentials(
-        _credential_result(credential_state, code="AUTH_FAILED")
-    )
+    credentials = FakeCredentials(_credential_result(credential_state, code="AUTH_FAILED"))
     app, _, _, cookies, _ = _application(credentials=credentials)
     challenge = await app.start(ACCOUNT_ID)
 

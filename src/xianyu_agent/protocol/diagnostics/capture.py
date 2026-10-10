@@ -306,6 +306,24 @@ def _redact_url(value: str, *, salt: bytes | None) -> dict[str, Any]:
     }
 
 
+def capture_output_conflict(path: Path) -> str | None:
+    """一次 capture 对应一个文件;已经有内容的文件不能复用。
+
+    capture-verify 要求文件里恰好一个 summary,并把该 summary 的计数与整份文件交叉核对。
+    两次 capture 追加进同一文件会让这套校验必然失败,所以在开跑前就拦住,而不是等到验收。
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    return (
+        f"输出文件已存在且非空:{path};capture 一个文件只对应一次捕获,"
+        "请换一个 --output 路径或先删除该文件"
+    )
+
+
 def verify_capture(path: Path) -> CaptureVerification:
     """Verify a capture artifact without requiring source Cookie or buyer data."""
     records, issues = _read_capture_records(path)
@@ -486,8 +504,7 @@ def _validate_summary_counts(
             f"实际 connected 状态={actual.connected_states}"
         )
     expected_target_reached = (
-        declared["target_messages"] == 0
-        or declared["messages"] >= declared["target_messages"]
+        declared["target_messages"] == 0 or declared["messages"] >= declared["target_messages"]
     )
     if target_reached != expected_target_reached:
         issues.append("target_reached 与目标消息数量矛盾")

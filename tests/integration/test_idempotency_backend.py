@@ -44,9 +44,7 @@ async def _assert_atomic_durable_and_consumer_scoped() -> None:
     async with legacy_database.async_session_factory() as session:
         rows = (
             await session.scalars(
-                select(ConsumerInbox).where(
-                    ConsumerInbox.consumer.in_([consumer, other_consumer])
-                )
+                select(ConsumerInbox).where(ConsumerInbox.consumer.in_([consumer, other_consumer]))
             )
         ).all()
         assert {row.consumer for row in rows} == {consumer, other_consumer}
