@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      XIANYU_DATABASE_URL: sqlite+aiosqlite:///./data/ci-sqlite.db
+      XIANYU_DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/xianyu-ci-sqlite.db
       TEST_DATABASE_BACKEND: sqlite
     steps:
       - name: Checkout
